@@ -55,8 +55,8 @@ missing or "chat" and no bill or statement line has been matched to it, so it ha
 account) pay for nothing and are never candidates of any rule.
 
 A staged entry's placeholder funding postings stand in for its funding account (rule 1, the
-candidates of rule 2, rule 5) only when it has no other: a receipt's or refund's
-`Assets:Unmapped` is the payer, not an account of the user's. A fix never pairs with one.
+candidates of rule 2, rule 5 and the `totals`) only when it has no other: a receipt's or
+refund's `Assets:Unmapped` is the payer, not an account of the user's. A fix never pairs with one.
 """
 
 from __future__ import annotations
@@ -99,6 +99,7 @@ FIX_KEYS = ("orderId", "payTime")
 # How far a hand entry's amount may be from a bill's and still be asked about (rule 5).
 NEAR_ABSOLUTE = Decimal(2)
 NEAR_RELATIVE = Decimal("0.1")
+CENT = Decimal("0.01")
 
 
 @dataclass
@@ -526,6 +527,46 @@ class _Matcher:
                 self.decided[n] = "new", "new", [], None
 
 
+def _amount_text(number: Decimal) -> str:
+    """A sum as text: two decimals, or more when its postings have more (a fund's units)."""
+    return str(number.quantize(CENT) if number.as_tuple().exponent >= -2 else number)
+
+
+def totals(staged: list, currency: str) -> dict:
+    """What the staged transactions move, for the user to check against the bill's own totals.
+
+    Every staged transaction counts, those dated before the books' start too. `out` and `in`
+    add up the negative and the positive signed funding amounts in `currency`, as positive
+    numbers with two decimals: the money that left the user's accounts and the money that
+    reached them. The placeholder stands in for the account only when an entry has no other, as
+    in matching, so a payment by an unknown method counts and a receipt's payer does not. A
+    transfer between the user's own accounts counts in both. Sums in other currencies are listed
+    apart, as "<amount> <currency>", in `out_other` and `in_other`, each only when there are
+    any. `from` and `to` are the first and last dates, None for an empty batch.
+    """
+    txns = sorted(transactions(staged), key=lambda t: t.date)
+    sums: dict[str, dict[str, Decimal]] = {"out": defaultdict(Decimal), "in": defaultdict(Decimal)}
+    for txn in txns:
+        for posting in _staged_funding(txn):
+            units = _units(posting)
+            if units is not None and units[0] != 0:
+                number, unit = units
+                sums["out" if number < 0 else "in"][unit] += abs(number)
+    found = {
+        "count": len(txns),
+        "out": _amount_text(sums["out"].get(currency, Decimal(0))),
+        "in": _amount_text(sums["in"].get(currency, Decimal(0))),
+        "from": txns[0].date.isoformat() if txns else None,
+        "to": txns[-1].date.isoformat() if txns else None,
+    }
+    for way in ("out", "in"):
+        other = [f"{_amount_text(number)} {unit}"
+                 for unit, number in sorted(sums[way].items()) if unit != currency]
+        if other:
+            found[f"{way}_other"] = other
+    return found
+
+
 def match(existing: list, staged: list, settings: Settings) -> list[Item]:
     """Decide every staged transaction against the existing entries. See the module doc."""
     return _Matcher(existing, staged, settings).items()
@@ -537,6 +578,8 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
     The flag counts cover the new and uncertain items, the ones that may be written: a duplicate
     is dropped and a fix keeps the existing entry's postings apart from the funding account.
     `ledger_errors` counts the errors the ledger already had; they do not stop a match.
+    `staged` holds the batch's `totals` in the ledger's operating currency (its first
+    `operating_currency` option, else `[ledger] currency`).
     The plan holds the ledger's digest, taken before it is read: apply refuses the plan once the
     ledger has changed.
     Balances dated on or before `[ledger] start` are left out: they check the money before the
@@ -553,8 +596,9 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
     except LedgerError as err:
         raise LedgerError(f"{staged_path}: {err}") from err
     ledger_digest = digest(main.parent)
-    entries, errors, _options = load(main)
+    entries, errors, options = load(main)
     items = match(entries, staged, settings)
+    currency = (options["operating_currency"] or [settings.currency])[0]
     start = _start(settings)
     plan = {
         "version": 1,
@@ -578,4 +622,5 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
                 flagged[flag] += 1
     summary["flagged"] = flagged
     summary["ledger_errors"] = len(errors)
+    summary["staged"] = totals(staged, currency)
     return summary

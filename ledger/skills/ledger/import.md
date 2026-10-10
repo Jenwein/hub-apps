@@ -68,8 +68,9 @@ added):
    ```
 
 3. Check the count, the totals out and in, and the date range against the
-   statement's own totals. Match only when they agree. The user confirms
-   these entries before they are applied (step 6, "Confirm first").
+   statement's own totals: `lk match` prints them under `staged` (step 3).
+   Apply only when they agree. The user confirms these entries before they
+   are applied (step 6, "Confirm first").
 
 ## 3. Match
 
@@ -79,8 +80,15 @@ uv run apps/ledger/scripts/lk.py match --ledger-dir ledger \
 ```
 
 It writes the plan and prints
-`{"plan", "new", "duplicate", "fix", "uncertain", "flagged": {"unsorted", "unmapped", "investment"}, "ledger_errors"}`.
+`{"plan", "new", "duplicate", "fix", "uncertain", "flagged": {"unsorted", "unmapped", "investment"}, "ledger_errors", "staged": {"count", "out", "in", "from", "to"}}`.
 
+- `staged` totals every staged entry, rows before the start of the books
+  too: `count`, `out` (the money that left the user's accounts) and `in`
+  (the money that reached them) in the operating currency, and the first and
+  last dates, `from` and `to`. A transfer between the user's own accounts (a
+  top-up, a withdrawal, a card repayment) counts in both. Sums in another
+  currency come apart, in `out_other` and `in_other`, such as
+  `["10.50 USD"]`.
 - `ledger_errors` is not 0: the ledger already had errors before this
   import. Tell the user, run `bean-check ledger/main.beancount`, fix them
   (SKILL.md, "Writing to the ledger"), then match again before applying.
@@ -201,9 +209,12 @@ ids may have changed, so carry your answers over by entry, not by id.
   sources the ledger already has, listed by
   `bean-query ledger/main.beancount "SELECT DISTINCT entry_meta('via') AS via"`.
 
-Show the user the count, the totals out and in, the date range, and the match's
-new, duplicate, fix and uncertain counts, and ask them to check these against
-the bill. Apply only after they say yes. If they do not answer in this session,
+Show the user the match's `staged` numbers (the count, the money out and in,
+the dates from and to) and its new, duplicate, fix and uncertain counts, and
+ask them to check these against the bill. A bill's own totals leave transfers
+out (Alipay's 不计收支, WeChat's 中性交易), while `staged` counts each one both
+out and in: say so when the numbers differ by them. Apply only after they say
+yes. If they do not answer in this session,
 delete `plan.json`; next time, match again and ask again.
 
 Then apply:

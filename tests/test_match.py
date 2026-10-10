@@ -263,7 +263,45 @@ def test_flag_counts_cover_only_entries_that_may_be_written(make_ledger, tmp_pat
     assert summary == {
         "plan": str(tmp_path / "plan.json"), "new": 1, "duplicate": 1, "fix": 1, "uncertain": 1,
         "flagged": {"unsorted": 2, "unmapped": 1, "investment": 1}, "ledger_errors": 0,
+        "staged": {"count": 4, "out": "655.00", "in": "0.00", "from": "2026-09-04",
+                   "to": "2026-09-07"},
     }
+
+
+def test_summary_totals_the_staged_entries(make_ledger, tmp_path):
+    # For the confirm step: the count, money out and in, and the dates, over every staged entry.
+    receipt = (  # money in: the payer is Assets:Unmapped, not an account of the user's
+        '2026-09-07 * "某人" "收款"\n  via: "alipay"\n  orderId: "A7"\n'
+        "  Assets:Alipay:Balance  500.00 CNY\n  Assets:Unmapped  -500.00 CNY\n"
+    )
+    unknown = (  # paid by a method with no rule yet: the placeholder stands in for it
+        '2026-09-08 * "某店" "购物"\n  via: "alipay"\n  orderId: "A8"\n'
+        "  Expenses:Unsorted  35.00 CNY\n  Assets:Unmapped  -35.00 CNY\n"
+    )
+    dollars = (
+        '2026-09-09 * "Shop" "book"\n  via: "alipay"\n  orderId: "A9"\n'
+        "  Expenses:Shopping  10.5 USD\n  Liabilities:CreditCard:CMB:5678  -10.5 USD\n"
+    )
+    early = ALIPAY_RIDE.replace("2026-09-03", "2026-08-20").replace('"A1"', '"A0"')
+    d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n")
+    staged = tmp_path / "s.beancount"
+    # The top-up moves 100.00 between the user's accounts: out of the card and into Alipay.
+    staged.write_text(TOPUP + ALIPAY_RIDE + receipt + unknown + dollars + early
+                      + "2026-09-10 balance Assets:Bank:CCB:1234  10.00 CNY\n", "utf-8")
+    started = parse_settings({"ledger": {"start": "2026-09-01"}})
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", started)
+    assert summary["duplicate"] == 1  # the early ride, before the start: counted all the same
+    assert summary["staged"] == {
+        "count": 6, "out": "175.00", "in": "600.00", "from": "2026-08-20", "to": "2026-09-09",
+        "out_other": ["10.50 USD"]}
+    # Only the operating currency: the five keys.
+    staged.write_text(ALIPAY_RIDE, "utf-8")
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", started)
+    assert summary["staged"] == {
+        "count": 1, "out": "20.00", "in": "0.00", "from": "2026-09-03", "to": "2026-09-03"}
+    staged.write_text("", "utf-8")
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", started)
+    assert summary["staged"] == {"count": 0, "out": "0.00", "in": "0.00", "from": None, "to": None}
 
 
 def test_plan_file(make_ledger, tmp_path):
