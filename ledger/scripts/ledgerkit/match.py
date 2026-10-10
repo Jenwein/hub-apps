@@ -17,14 +17,16 @@ applies wins:
 2. chat: S and an open hand entry E are fixed together (E gets S's account and order id) only
    when each is the other's only candidate and the pair is surely one payment. S's candidates
    are the open hand entries in its window with the same or a near signed funding amount (as in
-   rule 5), whatever their kind, category or account, contested or not. E's candidates are the
+   rule 5), whatever their kind, category or account, contested or not; only open ones count,
+   never an entry a bill or statement line was matched to before. E's candidates are the
    staged entries it is a candidate of, apart from those already duplicates (before the start,
    or by rule 1); those rule 1 left uncertain count. The pair must also:
    - pair a funding posting of E with S's, with the same signed amount: when E's `channel` is
      S's source, on that channel's account (`[chat.channels]`, else `[chat] default`) or on S's
-     account; when S is a bank line, on S's account, the account's own statement. A platform
-     row never pairs with an entry that names another channel or none: the user said "card",
-     the bill says Alipay.
+     account; when S is a bank line that names no payment channel, on S's account, the
+     account's own statement. A platform row never pairs with an entry that names another
+     channel or none: the user said "card", the bill says Alipay. Nor does a bank line that
+     names a payment channel (rule 3's test): it is the echo of that platform's payment.
    - be both transfers (only `Assets:` and `Liabilities:` accounts, no placeholder) or both
      flows (an `Expenses:` or `Income:` posting, placeholders included). An entry that is
      neither, such as a receipt booked against `Assets:Unmapped`, is never fixed.
@@ -217,17 +219,18 @@ def _books_twice(entry: Transaction, ours: Posting, account: str) -> bool:
 
 
 def _chat_pair(
-        entry: Transaction, staged: Transaction, settings: Settings, bank: bool,
+        entry: Transaction, staged: Transaction, settings: Settings, own_statement: bool,
 ) -> tuple[Posting, Posting] | None:
     """The funding postings that make a hand entry and a staged entry the same payment, if any.
 
     The two postings have the same signed amount, and one of these holds:
     - the entry's `channel` is S's source, and its posting is on that channel's account
       (`[chat.channels]`, else `[chat] default`) or on S's account;
-    - S is a bank line (`bank`) and both postings are on the same account: the account's own
-      statement.
+    - S is a bank line that names no payment channel (`own_statement`) and both postings are on
+      the same account: the account's own statement.
     A platform row never pairs with an entry that names another channel or none: the user said
-    one way of paying, the bill shows another. A pair whose fix would book an account twice in the
+    one way of paying, the bill shows another. Nor does a bank line that names a payment channel:
+    it is the echo of that platform's payment. A pair whose fix would book an account twice in the
     entry is none.
     """
     channel = entry.meta.get("channel")
@@ -239,7 +242,7 @@ def _chat_pair(
             if _units(ours) is None or _units(ours) != _units(theirs):
                 continue
             if (
-                (bank or named) and ours.account == theirs.account
+                (own_statement or named) and ours.account == theirs.account
                 and ours.account not in PLACEHOLDERS
             ):
                 same.append((ours, theirs))
@@ -460,7 +463,8 @@ class _Matcher:
                 continue
             [i] = entries[n]
             entry, txn = self.ledger[i], self.batch[n]
-            pair = _same_kind(entry, txn) and _chat_pair(entry, txn, self.settings, self.bank[n])
+            own_statement = self.bank[n] and not self.channel[n]
+            pair = _same_kind(entry, txn) and _chat_pair(entry, txn, self.settings, own_statement)
             if pair:
                 self.used.add(i)
                 self.decided[n] = "fix", "chat", [entry], _fix(entry, *pair, txn)

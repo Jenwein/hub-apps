@@ -934,3 +934,29 @@ def test_entry_a_statement_line_was_matched_to_is_closed():  # p3
     # Nor is it a chat entry to ask about: a WeChat payment of 15 that day is new.
     assert kinds(run_match(lunch, billed("2026-10-10", "wechat", "W5", amount="15.00"))) == [
         ("new", "new")]
+
+
+# N1 round 3: a bank line that names a payment channel is no own statement of a hand entry.
+
+
+@pytest.mark.parametrize(("purchase", "echo", "true_row"), [
+    (billed("2026-10-05", "wechat", "X1", CARD, "31.00").replace('"row"', '"purchase"'),
+     ('2026-10-05 * "x" "财付通-某店"\n  via: "ccb"\n'
+      f"  Expenses:Unsorted  31.00 CNY\n  {CARD}  -31.00 CNY\n"),
+     billed("2026-10-03", "wechat", "W3", amount="31.00")),
+    (billed("2026-10-05", "alipay", "A1", CARD, "31.00").replace('"row"', '"purchase"'),
+     ('2026-10-05 * "x" "支付宝-某店"\n  via: "ccb"\n'
+      f"  Expenses:Unsorted  31.00 CNY\n  {CARD}  -31.00 CNY\n"),
+     billed("2026-10-03", "icbc", account="Assets:Bank:ICBC:5678", amount="31.00")),
+], ids=["wechat-echo", "alipay-echo"])
+def test_bank_channel_line_never_fixes_a_hand_entry(purchase, echo, true_row):  # p6 (b), (e)
+    # "Taxi 31 on the CCB card", really paid elsewhere; a platform purchase drawn from the card.
+    taxi = told("2026-10-03", "taxi", CARD, "31.00")
+    # The card's statement line for the purchase is its echo, not the taxi's own line.
+    [item] = run_match(taxi + purchase, echo)
+    assert (item.kind, item.reason) == ("duplicate", "channel")
+    assert '"purchase"' in item.existing[0]["text"]
+    # The taxi stays open: its true row is asked about, never written as new beside it.
+    [item] = run_match(taxi + purchase, true_row)
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-chat", None)
+    assert '"taxi"' in item.existing[0]["text"]
