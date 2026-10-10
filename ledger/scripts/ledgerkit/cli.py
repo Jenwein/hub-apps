@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import book, convert
+from . import book, convert, match
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
@@ -39,6 +39,11 @@ def run_convert(args: argparse.Namespace) -> None:
         defaults_dir=DEFAULTS_DIR, ledger_dir=args.ledger_dir, account=args.account))
 
 
+def run_match(args: argparse.Namespace) -> None:
+    settings = load_settings(args.ledger_dir)
+    print_json(match.run(args.ledger_dir / "main.beancount", args.staged, args.out, settings))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -57,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the staged beancount file to write")
     p.add_argument("--account", help="the account of the card (required for bank statements)")
     p.set_defaults(func=run_convert)
+    p = sub.add_parser(
+        "match", help="sort staged entries into new, duplicate, fix and uncertain; write a plan")
+    add_ledger_dir(p)
+    p.add_argument("--staged", type=Path, required=True, metavar="STAGED",
+                   help="the staged beancount file, e.g. from convert")
+    p.add_argument("--out", type=Path, required=True, metavar="PLAN",
+                   help="the plan file to write (JSON), for apply")
+    p.set_defaults(func=run_match)
     return parser
 
 
