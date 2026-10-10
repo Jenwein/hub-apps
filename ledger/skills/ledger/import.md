@@ -239,9 +239,22 @@ uv run apps/ledger/scripts/lk.py apply --ledger-dir ledger \
   statement's balance is not checked. If the failing check is one already in
   the ledger, see "When a balance check fails" below.
 
-Then delete the inbox folder, commit (`ledger: import <source> <period>`), and
-tell the user: how many new entries, duplicates skipped, chat entries fixed,
-and what is still pending. Ask whether more bills are coming.
+Then:
+
+1. Delete the inbox folder only once the bill is filed: the apply result's
+   `document` is a path. If apply said the document could not be copied, keep
+   the folder and tell the user that the bill is still in it, not filed.
+2. Commit (`ledger: import <source> <period>`).
+3. Tell the user how many new entries, how many duplicates skipped (rows
+   dated before the start of the books apart), and what is still pending. List
+   each `fix` on a line of its own, chat entry ← bill row, each with its date,
+   amount and accounts, so that the user can see they are the same payment:
+
+   ```
+   2026-09-06 lunch 35.00 CNY, Expenses:Food / Assets:Bank:CCB:1234 ← 2026-09-06 食堂 午餐 35.00 CNY, paid from Assets:WeChat:Change
+   ```
+
+   Ask whether more bills are coming.
 
 ## Refunds
 

@@ -64,7 +64,8 @@ If `start` in `ledger/config.toml` is empty, the app is not set up yet: follow
 
 - Reply in the user's language. Name accounts as they are written in the
   ledger.
-- After a write, show what you wrote: the entry, or the counts of an import.
+- After a write, show what you wrote: the entry, or the counts of an import
+  and each chat entry it fixed.
 - Never guess an amount, a date or an account. When an entry would need a
   placeholder account (`Expenses:Unsorted`, `Income:Unsorted`,
   `Assets:Unmapped`), or `lk match` reports an `uncertain` item, ask the user.
