@@ -15,14 +15,18 @@ each staged entry S the first rule that applies wins:
    the same account, or on the channel S came through. The nearest one is fixed to S's account and
    gets S's order id; several at the same distance make S uncertain.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
-   with S. Bank lines take their candidates across the batch nearest first, channel lines before
-   other lines at the same distance. A bank line that names a payment channel, or whose candidate is
-   a transfer, is that candidate's duplicate; another bank line is uncertain. A platform row with a
-   candidate is uncertain: it is never a bank's echo.
+   with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
+   first, then bank lines claim candidates that are transfers; each time nearest first, then in
+   batch and file order. A claim makes S a duplicate. After that, a staged entry that still has
+   unclaimed candidates is uncertain and lists only those: a platform row is never a bank's echo,
+   and another bank line may be a payment of its own.
 4. A bank line that names a payment channel and matched nothing is uncertain.
-5. An open chat entry in the window whose funding amount is within max(2, 10 %) of S's, on any
-   account, makes S uncertain.
+5. An open chat entry in the window whose signed funding amount is within max(2, 10 %) of S's, on
+   any account, makes S uncertain.
 6. Otherwise S is new.
+
+S's placeholder funding postings stand in for its funding account in rules 2 and 5 only when it
+has no other: a receipt's `Assets:Unmapped` is the payer, not an account of the user's.
 """
 
 from __future__ import annotations
@@ -123,6 +127,12 @@ def _funding_amounts(txn: Transaction) -> list[tuple[Decimal, str]]:
     return [units for p in funding_postings(txn) if (units := _units(p)) is not None]
 
 
+def _staged_funding(staged: Transaction) -> list[Posting]:
+    """S's funding postings; its placeholder ones only when it has no other."""
+    postings = funding_postings(staged)
+    return [p for p in postings if p.account not in PLACEHOLDERS] or postings
+
+
 def _same_payment(entry: Transaction, staged: Transaction) -> bool:
     """A funding posting with the same signed amount in each: the same money moving the same way.
 
@@ -162,7 +172,7 @@ def _chat_pair(entry: Transaction, staged: Transaction) -> tuple[Posting, Postin
     """The funding postings that make a chat entry and a staged entry the same payment, if any."""
     pairs = [
         (ours, theirs)
-        for ours in funding_postings(entry) for theirs in funding_postings(staged)
+        for ours in funding_postings(entry) for theirs in _staged_funding(staged)
         if _units(ours) is not None and _units(ours) == _units(theirs)
     ]
     for ours, theirs in pairs:
@@ -174,11 +184,12 @@ def _chat_pair(entry: Transaction, staged: Transaction) -> tuple[Posting, Postin
 
 
 def _near_amount(entry: Transaction, staged: Transaction) -> bool:
-    """A funding amount within max(2, 10 % of the staged amount) of the staged one, any account."""
+    """A signed funding amount within max(2, 10 % of the staged one) of S's, on any account."""
     for number, currency in _funding_amounts(entry):
-        for theirs, their_currency in _funding_amounts(staged):
+        for posting in _staged_funding(staged):
+            theirs, their_currency = _units(posting)
             limit = max(NEAR_ABSOLUTE, abs(theirs) * NEAR_RELATIVE)
-            if currency == their_currency and abs(abs(number) - abs(theirs)) <= limit:
+            if currency == their_currency and abs(number - theirs) <= limit:
                 return True
     return False
 
@@ -240,7 +251,7 @@ class _Matcher:
     def items(self) -> list[Item]:
         self.identity()
         self.chats()
-        self.bank_postings()
+        self.claims()
         self.rest()
         items = []
         for n, txn in enumerate(self.batch):
@@ -326,34 +337,30 @@ class _Matcher:
             elif chats:
                 self.decided[n] = "uncertain", "chat", [self.ledger[i] for i in chats], None
 
-    def bank_postings(self) -> None:
-        """Rule 3 for bank lines: pairs nearest first, channel lines first, then batch and file."""
-        pairs = []
-        for n in self.undecided():
-            if self.bank[n]:
+    def claims(self) -> None:
+        """Rule 3 for bank lines: channel lines claim candidates, then lines claim transfers.
+
+        Each round goes over the whole batch nearest first, then in batch and file order.
+        """
+        for reason in ("channel", "transfer"):
+            pairs = []
+            for n in self.undecided():
+                if not self.bank[n] or (reason == "channel" and not self.channel[n]):
+                    continue
                 txn = self.batch[n]
                 for i in self.candidates(txn):
-                    days = _days(self.ledger[i], txn)
-                    pairs.append((days, not self.channel[n], n, _location(self.ledger[i]), i))
-        for _days_apart, _other, n, _where, i in sorted(pairs):
-            if n in self.decided or i in self.used:
-                continue
-            if self.channel[n]:
-                self.take(n, i, "duplicate", "channel")
-            elif is_transfer(self.ledger[i]):
-                self.take(n, i, "duplicate", "transfer")
-            else:
-                txn = self.batch[n]
-                tied = self.nearest(self.candidates(txn), txn)
-                self.decided[n] = (
-                    "uncertain", "possible-duplicate", [self.ledger[j] for j in tied], None)
+                    if reason == "channel" or is_transfer(self.ledger[i]):
+                        where = _location(self.ledger[i])
+                        pairs.append((_days(self.ledger[i], txn), n, where, i))
+            for _days_apart, n, _where, i in sorted(pairs):
+                if n not in self.decided and i not in self.used:
+                    self.take(n, i, "duplicate", reason)
 
     def rest(self) -> None:
-        """Rule 3 for platform rows, then rules 4 to 6."""
+        """Rule 3 for what no claim settled: candidates nobody claimed; then rules 4 to 6."""
         for n in self.undecided():
             txn = self.batch[n]
-            # A bank line left with candidates lost them all to nearer lines in bank_postings.
-            tied = [] if self.bank[n] else self.nearest(self.candidates(txn), txn)
+            tied = self.nearest(self.candidates(txn), txn)
             if tied:
                 self.decided[n] = (
                     "uncertain", "possible-duplicate", [self.ledger[i] for i in tied], None)

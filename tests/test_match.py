@@ -370,3 +370,59 @@ def test_pad_entries_are_never_candidates(make_ledger, tmp_path):
     assert summary["ledger_errors"] == 0
     [item] = json.loads((tmp_path / "plan.json").read_text("utf-8"))["items"]
     assert (item["kind"], item["reason"]) == ("uncertain", "channel-unmatched")
+
+
+# Fix round 2.
+
+
+def assert_no_claimed_entry_listed_again(items):
+    """An entry a duplicate or fix took is listed by no other item."""
+    claims = [(e["file"], e["line"]) for i in items if i.kind in ("duplicate", "fix")
+              for e in i.existing]
+    assert len(claims) == len(set(claims))
+    for item in items:
+        if item.kind == "uncertain":
+            assert not set(claims) & {(e["file"], e["line"]) for e in item.existing}
+
+
+def test_channel_lines_claim_before_nearer_rows():
+    zhang = (
+        '2026-09-04 * "张三" "转账"\n  via: "ccb"\n'
+        "  Expenses:Unsorted  100.00 CNY\n  Assets:Bank:CCB:1234  -100.00 CNY\n"
+    )
+    topup = TOPUP.replace("2026-09-05", "2026-09-04")  # nearer to 张三 than to the echo
+    items = run_match(topup, zhang + BANK_TOPUP)
+    assert kinds(items) == [("new", "new"), ("duplicate", "channel")]
+    assert_no_claimed_entry_listed_again(items)
+
+
+def test_row_whose_candidate_was_claimed_is_new():
+    shop = (
+        '2026-09-03 * "某超市" "购物"\n  via: "ccb"\n'
+        "  Expenses:Unsorted  20.00 CNY\n  Assets:Bank:CCB:1234  -20.00 CNY\n"
+    )
+    items = run_match(ALIPAY_RIDE, shop + BANK_RIDE)
+    assert kinds(items) == [("new", "new"), ("duplicate", "channel")]
+    assert_no_claimed_entry_listed_again(items)
+
+
+def test_transfer_row_claims_a_farther_transfer():
+    # The nearest candidate is a refund to the card, no transfer; the transfer two days on is.
+    refund = (
+        '2026-09-11 * "某店" "退款"\n  via: "alipay"\n  orderId: "A8"\n'
+        "  Liabilities:CreditCard:ICBC:5678  1000.00 CNY\n  Expenses:Shopping  -1000.00 CNY\n"
+    )
+    items = run_match(refund + CC_PAY.replace("2026-09-10", "2026-09-13"), CC_SIDE)
+    assert kinds(items) == [("duplicate", "transfer")]
+    assert '"工行信用卡" "还款"' in items[0].existing[0]["text"]
+
+
+def test_receipt_never_matches_a_chat_expense():
+    # The converter books a receipt against Assets:Unmapped: the payer, not the user's account.
+    receipt = (
+        '2026-09-03 * "某人" "收款"\n  via: "alipay"\n  orderId: "A7"\n'
+        "  Assets:Alipay:Balance  20.00 CNY\n  Assets:Unmapped  -20.00 CNY\n"
+    )
+    assert kinds(run_match(TAXI_CHAT, receipt)) == [("new", "new")]
+    near = receipt.replace("20.00", "19.80")
+    assert kinds(run_match(TAXI_CHAT, near)) == [("new", "new")]
