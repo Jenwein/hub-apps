@@ -14,24 +14,24 @@ applies wins:
      duplicate; without one (a refund under its purchase's order id) S is uncertain.
    - statement-row: for a bank line, an existing entry with the same `via` and date that holds every
      non-placeholder posting of S, and the same `balances` when both have one, is a duplicate.
-2. chat: an open hand entry in the window that is surely S's payment is fixed to S's account and
-   gets S's order id. All of these hold:
-   - a funding posting of the entry has S's signed funding amount and pairs with it: when the
-     entry's `channel` is S's source, on that channel's account (`[chat.channels]`, else
-     `[chat] default`) or on S's account; when S is a bank line, on S's account, the account's
-     own statement. A platform row never pairs with an entry that names another channel or
-     none: the user said "card", the bill says Alipay.
-   - both are transfers (only `Assets:` and `Liabilities:` accounts, no placeholder) or both are
+2. chat: S and an open hand entry E are fixed together (E gets S's account and order id) only
+   when each is the other's only candidate and the pair is surely one payment. S's candidates
+   are the open hand entries in its window with the same or a near signed funding amount (as in
+   rule 5), whatever their kind, category or account, contested or not. E's candidates are the
+   staged entries it is a candidate of, apart from those already duplicates (before the start,
+   or by rule 1); those rule 1 left uncertain count. The pair must also:
+   - pair a funding posting of E with S's, with the same signed amount: when E's `channel` is
+     S's source, on that channel's account (`[chat.channels]`, else `[chat] default`) or on S's
+     account; when S is a bank line, on S's account, the account's own statement. A platform
+     row never pairs with an entry that names another channel or none: the user said "card",
+     the bill says Alipay.
+   - be both transfers (only `Assets:` and `Liabilities:` accounts, no placeholder) or both
      flows (an `Expenses:` or `Income:` posting, placeholders included). An entry that is
      neither, such as a receipt booked against `Assets:Unmapped`, is never fixed.
-   - where both have an `Expenses:` or `Income:` account other than a placeholder, the same.
-   Across the batch the nearest pairs go first, then in batch and file order, each entry once;
-   several entries left at a staged entry's nearest distance make it uncertain. A loan,
-   reimbursement or transfer side of the entry never pairs through the channel, and no fix books
-   an account twice in one entry. A pair that fails goes on to rules 3 and 5, which ask. A hand
-   entry that two or more staged entries may be (in their window, with the same or a near signed
-   funding amount as in rule 5, whatever the kind, category or account) is contested: rule 2
-   fixes it for none of them and no claim of rule 3 takes it; it stays for rules 3 and 5 to ask.
+   - where both have an `Expenses:` or `Income:` account other than a placeholder, have the same.
+   A loan, reimbursement or transfer side of E never pairs through the channel, and no fix books
+   an account twice in one entry. Every other S goes on to rules 3 to 6. A hand entry with two
+   or more candidates is contested: no claim of rule 3 takes it.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
    first, then bank lines claim candidates that are transfers when no other candidate is as near;
@@ -44,8 +44,9 @@ applies wins:
 6. Otherwise S is new.
 
 An open hand entry is one the user told about in chat or added in Fava or by hand: its `via` is
-missing or "chat" and no bill has given it an `orderId`. Pad entries and opening balances (an entry
-with a posting on an `Equity:` account) pay for nothing and are never candidates of any rule.
+missing or "chat" and no bill or statement line has been matched to it, so it has neither an
+`orderId` nor a `bill`. Pad entries and opening balances (an entry with a posting on an `Equity:`
+account) pay for nothing and are never candidates of any rule.
 
 A staged entry's placeholder funding postings stand in for its funding account (rules 1, 2 and 5)
 only when it has no other: a receipt's or refund's `Assets:Unmapped` is the payer, not an account
@@ -144,12 +145,12 @@ def _pays_nothing(entry: Transaction) -> bool:
 def _is_open_hand(entry: Transaction) -> bool:
     """A hand entry that no bill has claimed yet: told in chat, or added in Fava or by hand.
 
-    Its `via` is missing or "chat" and it has no `orderId`; opening balances and pad entries are
-    none.
+    Its `via` is missing or "chat", and it has neither an `orderId` nor a `bill` (a fix from a
+    bank line gives it only `bill`); opening balances and pad entries are none.
     """
     return (
         entry.meta.get("via", CHAT) == CHAT and "orderId" not in entry.meta
-        and not _pays_nothing(entry)
+        and "bill" not in entry.meta and not _pays_nothing(entry)
     )
 
 
@@ -349,7 +350,7 @@ class _Matcher:
         ]
         self.used: set[int] = set()
         self.decided: dict[int, Decision] = {}
-        # Open hand entries that two or more staged entries may be (see `contest`).
+        # Open hand entries that two or more staged entries may be (see `chats`).
         self.contested: set[int] = set()
 
     def items(self) -> list[Item]:
@@ -434,55 +435,35 @@ class _Matcher:
                 if rows:
                     self.take(n, rows[0], "duplicate", "statement-row")
 
-    def contest(self) -> None:
-        """Find the open hand entries that two or more undecided staged entries may be.
-
-        A staged entry may be one when the entry is in its window and has a signed funding amount
-        the same as or near its own (rule 5's measure), whatever the kind, category or account.
-        Rule 2 fixes such an entry for none of them and no claim of rule 3 takes it, so that each
-        of them is asked about it.
-        """
-        rows: Counter = Counter()
-        for n in self.undecided():
-            txn = self.batch[n]
-            for i in self.near(txn):
-                if _is_open_hand(self.ledger[i]) and _near_amount(self.ledger[i], txn):
-                    rows[i] += 1
-        self.contested = {i for i, count in rows.items() if count > 1}
-
     def chats(self) -> None:
-        """Rule 2 over the whole batch: nearest first, then in batch and file order.
+        """Rule 2: fix a staged entry and an open hand entry that are each other's only candidate.
 
-        A staged entry whose nearest open hand entries left are several is uncertain. A contested
-        entry is never fixed.
+        A staged entry's candidates are the open hand entries in its window with the same or a
+        near signed funding amount (rule 5's measure), whatever their kind, category or account.
+        A hand entry's candidates are the staged entries it is a candidate of, apart from those
+        decided duplicates already (before the start, or by rule 1); those rule 1 left uncertain
+        count. Such a pair is fixed only when it also passes `_same_kind` and `_chat_pair`. A
+        hand entry with two or more candidates is contested: no claim of rule 3 takes it.
         """
-        self.contest()
-        found: dict[int, dict[int, tuple[Posting, Posting]]] = {}
-        order = []
-        for n in self.undecided():
-            txn = self.batch[n]
-            found[n] = {}
-            for i in self.near(txn):
-                entry = self.ledger[i]
-                if i in self.contested:
-                    continue
-                if _is_open_hand(entry) and _same_kind(entry, txn):
-                    pair = _chat_pair(entry, txn, self.settings, self.bank[n])
-                    if pair:
-                        found[n][i] = pair
-                        order.append((_days(entry, txn), n, _location(entry), i))
-        for days, n, _where, i in sorted(order):
-            if n in self.decided or i in self.used:
+        entries: dict[int, list[int]] = {}  # staged entry -> its candidate hand entries
+        rows: dict[int, list[int]] = defaultdict(list)  # hand entry -> its candidate rows
+        for n, txn in enumerate(self.batch):
+            if n in self.decided and self.decided[n][0] == "duplicate":
                 continue
-            txn = self.batch[n]
-            tied = [j for j in found[n]
-                    if j not in self.used and _days(self.ledger[j], txn) == days]
-            if len(tied) > 1:
-                self.decided[n] = "uncertain", "chat", [self.ledger[j] for j in tied], None
-            else:
+            entries[n] = [i for i in self.near(txn) if _is_open_hand(self.ledger[i])
+                          and _near_amount(self.ledger[i], txn)]
+            for i in entries[n]:
+                rows[i].append(n)
+        self.contested = {i for i, found in rows.items() if len(found) > 1}
+        for n in self.undecided():
+            if len(entries[n]) != 1 or rows[entries[n][0]] != [n]:
+                continue
+            [i] = entries[n]
+            entry, txn = self.ledger[i], self.batch[n]
+            pair = _same_kind(entry, txn) and _chat_pair(entry, txn, self.settings, self.bank[n])
+            if pair:
                 self.used.add(i)
-                self.decided[n] = "fix", "chat", [self.ledger[i]], _fix(
-                    self.ledger[i], *found[n][i], txn)
+                self.decided[n] = "fix", "chat", [entry], _fix(entry, *pair, txn)
 
     def claims(self) -> None:
         """Rule 3 for bank lines: channel lines claim candidates, then lines claim transfers.

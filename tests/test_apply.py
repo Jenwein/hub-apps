@@ -538,6 +538,27 @@ def test_fix_of_an_entry_added_in_fava(make_ledger, tmp_path):
     assert txn.meta["filename"].endswith("web.beancount")
 
 
+def test_entry_a_statement_line_fixed_is_not_fixed_again(make_ledger, tmp_path):  # p3
+    lunch = CHAT_LUNCH.replace('  channel: "wechat"\n', "").replace("2026-09-06", "2026-09-10")
+    d = make_ledger(OPEN, txns={2026: lunch})
+    statement = SHOP.replace("2026-09-04", "2026-09-10").replace("20.00", "35.00").replace(
+        "Expenses:Unsorted", "Expenses:Food")
+    for n, day in enumerate(("2026-09-10", "2026-09-11")):
+        staged = tmp_path / f"staged{n}.beancount"
+        staged.write_text(statement.replace("2026-09-10", day), "utf-8", newline="\n")
+        plan = tmp_path / f"plan{n}.json"
+        summary = run(d / "main.beancount", staged, plan, SET)
+        if n == 0:  # the lunch's own POS line
+            assert summary["fix"] == 1 and apply_plan(plan, d, {})["fixed"] == 1
+        else:  # the next statement's other lunch of 35: asked about, then written
+            assert (summary["fix"], summary["uncertain"]) == (0, 1)
+            assert apply_plan(plan, d, {"s1": "new"})["written"] == 1
+    entries, errors, _ = load(d / "main.beancount")
+    assert errors == []
+    assert sorted((t.date.isoformat(), t.meta.get("bill")) for t in transactions(entries)) == [
+        ("2026-09-10", "ccb"), ("2026-09-11", None)]
+
+
 def test_rows_before_the_start_are_not_written(make_ledger, tmp_path):
     # The accounts open on the first day of the books, as setup writes them.
     d = make_ledger(OPEN.replace("2000-01-01", "2026-09-04"))

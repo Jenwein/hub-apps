@@ -63,7 +63,7 @@ def test_chat_entry_gets_fixed():
 
 
 def test_two_chat_candidates_are_uncertain():
-    assert kinds(run_match(CHAT_LUNCH + CHAT_LUNCH.replace("lunch", "snack"), WX_LUNCH)) == [("uncertain", "chat")]
+    assert kinds(run_match(CHAT_LUNCH + CHAT_LUNCH.replace("lunch", "snack"), WX_LUNCH)) == [("uncertain", "possible-chat")]
 
 
 def test_chat_without_channel_on_other_account_is_uncertain():
@@ -170,11 +170,12 @@ def test_chat_on_the_same_account_keeps_it():
     assert item.fix["account_from"] == item.fix["account_to"] == "Assets:Bank:CCB:1234"
 
 
-def test_nearest_chat_entry_wins():
+def test_another_chat_entry_in_the_window_makes_it_uncertain():
+    # The row is no surer of the nearer one: it asks, about the nearest.
     far = CHAT_LUNCH.replace("2026-09-06", "2026-09-08").replace("lunch", "snack")
     [item] = run_match(far + CHAT_LUNCH, WX_LUNCH)
-    assert (item.kind, item.reason) == ("fix", "chat")
-    assert '"lunch"' in item.existing[0]["text"]
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-chat", None)
+    assert ['"lunch"' in e["text"] for e in item.existing] == [True]
 
 
 def test_item_fields():
@@ -873,3 +874,63 @@ def test_single_row_for_a_hand_entry_still_fixes_it():
     imported = WX_LUNCH.replace("2026-09-06", "2026-09-05").replace('"W1"', '"W0"')
     items = run_match(CHAT_LUNCH + "\n" + imported, imported + WX_LUNCH)
     assert kinds(items) == [("duplicate", "order-id"), ("fix", "chat")]
+
+
+# N1 round 2: a row and a hand entry are fixed together only when each is the other's only
+# candidate; an entry a bill or statement line was matched to (`bill`) is closed.
+
+
+def told(day, what, account="Assets:WeChat:Change", amount="30.00"):
+    """A hand entry; paid with WeChat unless on the card, which names no channel."""
+    channel = '  channel: "wechat"\n' if account != CARD else ""
+    return (f'{day} * "" "{what}"\n  via: "chat"\n{channel}'
+            f"  Expenses:Food  {amount} CNY\n  {account}  -{amount} CNY\n\n")
+
+
+def billed(day, via, order=None, account="Assets:WeChat:Change", amount="30.00"):
+    """A bill row, or a statement line when it has no order id."""
+    order_id = f'  orderId: "{order}"\n' if order else ""
+    return (f'{day} * "店" "row"\n  via: "{via}"\n{order_id}'
+            f"  Expenses:Unsorted  {amount} CNY\n  {account}  -{amount} CNY\n\n")
+
+
+@pytest.mark.parametrize(("settings", "entries", "rows"), [
+    (WALLETS, told("2026-10-01", "taxi") + told("2026-10-03", "lunch"),
+     billed("2026-10-03", "wechat", "W3") + billed("2026-10-06", "wechat", "W6")),
+    (WALLETS, told("2026-10-02", "taxi") + told("2026-10-04", "lunch"),
+     billed("2026-10-03", "wechat", "W3") + billed("2026-10-07", "wechat", "W7")),
+    (SET, told("2026-10-01", "dinner one", CARD) + told("2026-10-03", "dinner two", CARD),
+     billed("2026-10-03", "ccb", account=CARD) + billed("2026-10-06", "ccb", account=CARD)),
+    (WALLETS, told("2026-10-01", "taxi") + told("2026-10-03", "lunch"),
+     billed("2026-10-03", "wechat", "W3")),
+], ids=["nearest-entry-contested", "same-distance", "bank", "row-with-two-entries"])
+def test_fix_needs_each_to_be_the_others_only_candidate(settings, entries, rows):  # P1
+    items = run_with(settings, entries, rows)
+    assert kinds(items) == [("uncertain", "possible-duplicate")] * len(items)
+    assert all(i.fix is None for i in items)
+
+
+def test_row_rule_1_left_uncertain_still_contests_a_hand_entry():  # P2
+    purchase = ('2026-10-01 * "店" "lunch"\n  via: "wechat"\n  orderId: "W1"\n'
+                "  Expenses:Food  35.00 CNY\n  Assets:WeChat:Change  -35.00 CNY\n\n")
+    refund_told = ('2026-10-03 * "店" "lunch refunded"\n  via: "chat"\n  channel: "wechat"\n'
+                   "  Assets:WeChat:Change  35.00 CNY\n  Income:Refunds  -35.00 CNY\n\n")
+    refund = ('2026-10-03 * "店" "退款"\n  via: "wechat"\n  orderId: "W1"\n'
+              "  Assets:WeChat:Change  35.00 CNY\n  Income:Unsorted  -35.00 CNY\n\n")
+    red_packet = ('2026-10-04 * "朋友" "红包"\n  via: "wechat"\n  orderId: "W9"\n'
+                  "  Assets:WeChat:Change  35.00 CNY\n  Income:Unsorted  -35.00 CNY\n\n")
+    items = run_with(WALLETS, purchase + refund_told, refund + red_packet)
+    assert kinds(items) == [("uncertain", "order-id-mismatch"), ("uncertain", "possible-duplicate")]
+    assert items[1].fix is None and '"lunch refunded"' in items[1].existing[0]["text"]
+
+
+def test_entry_a_statement_line_was_matched_to_is_closed():  # p3
+    # The lunch as apply leaves it once its POS line fixed it.
+    lunch = told("2026-10-10", "lunch", CARD, "15.00").replace(
+        '  via: "chat"\n', '  bill: "ccb"\n  via: "chat"\n')
+    # The next statement's lunch of the same amount is another payment: never merged into it.
+    [item] = run_match(lunch, billed("2026-10-11", "ccb", account=CARD, amount="15.00"))
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+    # Nor is it a chat entry to ask about: a WeChat payment of 15 that day is new.
+    assert kinds(run_match(lunch, billed("2026-10-10", "wechat", "W5", amount="15.00"))) == [
+        ("new", "new")]
