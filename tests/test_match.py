@@ -592,3 +592,31 @@ def test_opening_balances_are_never_a_candidate():
         "  Assets:Bank:CCB:1234  5230.00 CNY\n  Income:Salary  -5230.00 CNY\n"
     )
     assert kinds(run_match(OPENING, salary)) == [("new", "new")]
+
+
+# Final review: bill rows dated before the books' start (I1).
+
+STARTED = parse_settings({"ledger": {"start": "2026-09-04"}, "chat": {"channels": {"wechat": CARD}}})
+
+
+def test_rows_before_the_start_are_skipped():
+    items = run_with(STARTED, ALIPAY_RIDE, ALIPAY_RIDE + BANK_RIDE)
+    assert kinds(items) == [("duplicate", "before-start"), ("duplicate", "channel")]
+    assert items[0].existing == [] and items[0].fix is None
+    # A row on the first day is imported; one before it never takes a ledger entry.
+    assert kinds(run_with(STARTED, "", BANK_RIDE)) == [("uncertain", "channel-unmatched")]
+    earlier = WX_LUNCH.replace("2026-09-06", "2026-09-03").replace('"W1"', '"W0"')
+    assert kinds(run_with(STARTED, CHAT_LUNCH, earlier + WX_LUNCH)) == [
+        ("duplicate", "before-start"), ("fix", "chat")]
+
+
+def test_balances_before_the_books_are_left_out(make_ledger, tmp_path):
+    d = make_ledger()
+    staged = tmp_path / "s.beancount"
+    staged.write_text(
+        ALIPAY_RIDE + "2026-09-04 balance Assets:Bank:CCB:1234  10.00 CNY\n"
+        "2026-09-05 balance Assets:Bank:CCB:1234  20.00 CNY\n", "utf-8")
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", STARTED)
+    assert (summary["duplicate"], summary["new"]) == (1, 0)
+    [balance] = json.loads((tmp_path / "plan.json").read_text("utf-8"))["balances"]
+    assert balance.startswith("2026-09-05 balance")

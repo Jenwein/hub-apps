@@ -2,8 +2,11 @@
 
 Staged transactions are taken in date order and get the ids s1, s2, ...; every staged posting needs
 an amount. An existing entry serves at most one duplicate or fix. The rules run in passes over the
-whole batch, the surest first, so that a weaker match never takes an entry a surer one needs. For
-each staged entry S the first rule that applies wins:
+whole batch, the surest first, so that a weaker match never takes an entry a surer one needs.
+
+A staged entry dated before `[ledger] start` is not imported: it is a duplicate with reason
+`before-start` and takes part in no rule. For each other staged entry S the first rule that
+applies wins:
 
 1. Identity.
    - order-id: an existing entry from the same bill (its `bill`, else its `via`) with the same
@@ -41,6 +44,7 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -249,6 +253,11 @@ def _fix(entry: Transaction, ours: Posting, theirs: Posting, staged: Transaction
             "account_to": _target(ours, theirs), "meta": meta}
 
 
+def _start(settings: Settings) -> date | None:
+    """The first day of the books, when it is set."""
+    return date.fromisoformat(settings.start) if settings.start else None
+
+
 def _flags(txn: Transaction, settings: Settings) -> list[str]:
     accounts = {posting.account for posting in txn.postings}
     found = []
@@ -288,6 +297,7 @@ class _Matcher:
         self.decided: dict[int, Decision] = {}
 
     def items(self) -> list[Item]:
+        self.before_start()
         self.identity()
         self.chats()
         self.claims()
@@ -327,6 +337,13 @@ class _Matcher:
         self.used.add(i)
         self.decided[n] = kind, reason, [self.ledger[i]], None
 
+    def before_start(self) -> None:
+        """Rows from before the books' start are not imported."""
+        start = _start(self.settings)
+        for n, txn in enumerate(self.batch):
+            if start is not None and txn.date < start:
+                self.decided[n] = "duplicate", "before-start", [], None
+
     def identity(self) -> None:
         """Rule 1: order ids first, then bank lines imported before."""
         by_order = defaultdict(list)
@@ -335,7 +352,8 @@ class _Matcher:
             if key is not None:
                 by_order[key].append(i)
         seen = defaultdict(list)  # order key -> the staged entries with it so far
-        for n, txn in enumerate(self.batch):
+        for n in self.undecided():
+            txn = self.batch[n]
             key = _order_key(txn.meta["via"], txn)
             if key is None:
                 continue
@@ -439,6 +457,8 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
     The flag counts cover the new and uncertain items, the ones that may be written: a duplicate
     is dropped and a fix keeps the existing entry's postings apart from the funding account.
     `ledger_errors` counts the errors the ledger already had; they do not stop a match.
+    Balances dated on or before `[ledger] start` are left out: they check the money before the
+    books begin, which the opening balances, dated that first day, do not count yet.
     """
     main, staged_path, out = Path(main), Path(staged_path), Path(out)
     for path in (main, staged_path):
@@ -452,13 +472,16 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
         raise LedgerError(f"{staged_path}: {err}") from err
     entries, errors, _options = load(main)
     items = match(entries, staged, settings)
+    start = _start(settings)
     plan = {
         "version": 1,
         "ledger": str(main),
         "staged": str(staged_path),
         "applied": False,
         "items": [asdict(item) for item in items],
-        "balances": [format_entry(e).strip() for e in staged if isinstance(e, Balance)],
+        "balances": [
+            format_entry(e).strip() for e in staged
+            if isinstance(e, Balance) and (start is None or e.date > start)],
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", "utf-8", newline="\n")

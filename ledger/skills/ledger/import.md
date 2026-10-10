@@ -95,6 +95,10 @@ It writes the plan and prints
 | `fix` | the bill's copy of a chat entry: one recorded from chat, or added in Fava or by hand, that no bill has claimed yet | keeps the chat entry, sets its account to the one that paid, adds the bill's order id |
 | `uncertain` | needs the user | waits for `--decide` |
 
+A `duplicate` with reason `before-start` is a row dated before `[ledger] start`:
+it is not imported, and the report counts it as skipped, before the start of
+the books.
+
 ## 4. Settle the flags
 
 The flag counts cover new and uncertain items. `apply` refuses to write an item

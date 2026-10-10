@@ -9,7 +9,7 @@ from ledgerkit.apply import NeedsDecision, apply_plan
 from ledgerkit.book import load, transactions
 from ledgerkit.cli import main
 from ledgerkit.match import run
-from ledgerkit.settings import LedgerError
+from ledgerkit.settings import LedgerError, parse_settings
 from test_match import ALIPAY_RIDE, BANK_RIDE, CHAT_LUNCH, SET, WX_LUNCH
 
 OPEN = "2000-01-01 open Assets:Bank:CCB:1234\n2000-01-01 open Assets:WeChat:Change\n"
@@ -519,3 +519,17 @@ def test_fix_of_an_entry_added_in_fava(make_ledger, tmp_path):
     txn = only_transaction(d)
     assert txn.meta["orderId"] == "W1" and txn.meta["bill"] == "wechat" and "via" not in txn.meta
     assert txn.meta["filename"].endswith("web.beancount")
+
+
+def test_rows_before_the_start_are_not_written(make_ledger, tmp_path):
+    # The accounts open on the first day of the books, as setup writes them.
+    d = make_ledger(OPEN.replace("2000-01-01", "2026-09-04"))
+    staged = tmp_path / "staged.beancount"
+    staged.write_text(ALIPAY_RIDE + SHOP_SORTED.replace("2026-09-04", "2026-09-05")
+                      + "2026-09-04 balance Assets:Bank:CCB:1234  0.00 CNY\n", "utf-8", newline="\n")
+    plan = tmp_path / "plan.json"
+    run(d / "main.beancount", staged, plan, parse_settings({"ledger": {"start": "2026-09-04"}}))
+    result = apply_plan(plan, d, {})
+    assert (result["written"], result["skipped"], result["balances"]) == (1, 1, 0)
+    entries, errors, _ = load(d / "main.beancount")
+    assert errors == [] and [t.date.isoformat() for t in transactions(entries)] == ["2026-09-05"]
