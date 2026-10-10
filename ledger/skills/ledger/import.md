@@ -130,14 +130,14 @@ that is `unsorted` or `unmapped`.
   payee, narration, or the bill's `txType`, `type` or `category`. Ask; a
   purchase or sale is a holding, not spending ([investments.md](investments.md)).
 
-A card no flag shows: setup's card rules go by the last digits alone
-(`method: "(1234)"`), and such a rule takes any bank's card that ends in them,
-a family member's or an old card bound to the wallet too, without a flag.
-While a source's rules still hold one, list the method texts of each staged
-file (`grep -o 'method: "[^"]*"' <staged file> | sort | uniq -c`). Ask the
-user about a text with those digits that names another bank than the card's.
-Then replace the digits rule with a rule for each text that is their card,
-with `fullMatch: true`: a card not seen before then comes as `unmapped`.
+Card rules on the last digits alone, `method: "(1234)"` as setup writes them,
+take any bank's card that ends in those digits without a flag: a family
+member's card or an old one bound to the wallet too. While a source's rules
+still hold one, list the method texts of each staged file
+(`grep -o 'method: "[^"]*"' <staged file> | sort | uniq -c`), and ask the user
+about a text with those digits that names another bank than the card's. Then
+replace the digits rule with a rule for each text that is their card, with
+`fullMatch: true`: a card not seen before then comes as `unmapped`.
 
 Transfers between the user's own accounts are not spending: top-ups,
 withdrawals, moves between 余额 and 余额宝 or 零钱 and 零钱通, and repayments of
