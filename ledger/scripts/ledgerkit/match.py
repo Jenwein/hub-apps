@@ -251,10 +251,22 @@ def _shape(txn: Transaction) -> str:
     return "unknown"
 
 
+def _categories(txn: Transaction) -> set[str]:
+    """The `Expenses:` and `Income:` accounts of an entry, placeholders aside."""
+    return {p.account for p in txn.postings
+            if p.account.startswith(FLOW_ROOTS) and p.account not in PLACEHOLDERS}
+
+
 def _same_kind(entry: Transaction, staged: Transaction) -> bool:
-    """Both are transfers or both are flows: a fix never turns one into the other."""
+    """Both are transfers or both are flows, and where both name categories, the same ones.
+
+    A fix keeps the entry's category; one the bill contradicts is the user's to settle.
+    """
     shape = _shape(entry)
-    return shape != "unknown" and shape == _shape(staged)
+    if shape == "unknown" or shape != _shape(staged):
+        return False
+    ours, theirs = _categories(entry), _categories(staged)
+    return not (ours and theirs and ours != theirs)
 
 
 def _near_amount(entry: Transaction, staged: Transaction) -> bool:

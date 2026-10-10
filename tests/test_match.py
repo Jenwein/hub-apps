@@ -722,3 +722,22 @@ def test_receipt_of_unknown_kind_is_never_fixed_silently():
     # Placed as the loan paid back, it is a transfer like the entry: fixed.
     placed = UNPLACED_RECEIPT.replace("Assets:Unmapped", "Assets:Receivables:Loans:ZhangSan")
     assert kinds(run_with(WALLETS, PAID_BACK, placed)) == [("fix", "chat")]
+
+
+def test_another_category_is_never_fixed_silently():
+    shopping = WX_LUNCH.replace("Expenses:Unsorted", "Expenses:Shopping")
+    [item] = run_match(CHAT_LUNCH, shopping)
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-chat", None)
+    assert '"lunch"' in item.existing[0]["text"]
+    # The same category, or none in the bill yet: fixed.
+    assert kinds(run_match(CHAT_LUNCH, WX_LUNCH.replace("Expenses:Unsorted", "Expenses:Food"))) == [
+        ("fix", "chat")]
+    assert kinds(run_match(CHAT_LUNCH, WX_LUNCH)) == [("fix", "chat")]
+    # An income too: a refund the user told about against the bill's.
+    refund = CHAT_LUNCH.replace("Expenses:Food  35.00", "Income:Refunds  -35.00").replace(
+        f"{CARD}  -35.00", f"{CARD}  35.00")
+    row = WX_LUNCH.replace("Expenses:Unsorted  35.00", "Income:Other  -35.00").replace(
+        "Assets:WeChat:Change  -35.00", "Assets:WeChat:Change  35.00")
+    assert kinds(run_match(refund, row)) == [("uncertain", "possible-chat")]
+    assert kinds(run_match(refund, row.replace("Income:Other", "Income:Refunds"))) == [
+        ("fix", "chat")]
