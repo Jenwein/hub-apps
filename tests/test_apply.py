@@ -1,3 +1,4 @@
+import io
 import json
 import shutil
 from datetime import date
@@ -6,7 +7,7 @@ import pytest
 from beancount.core.data import Balance, Document
 from ledgerkit import apply as apply_module
 from ledgerkit.apply import NeedsDecision, apply_plan
-from ledgerkit.book import load, transactions
+from ledgerkit.book import digest, load, transactions
 from ledgerkit.cli import main
 from ledgerkit.match import run
 from ledgerkit.settings import LedgerError, parse_settings
@@ -56,6 +57,12 @@ def edit_plan(plan, change):
     data = read_plan(plan)
     change(data)
     plan.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8", newline="\n")
+
+
+def refresh_digest(plan, ledger):
+    """Bring the plan's ledger digest up to date, as if the ledger had changed only just before
+    the match: a check of each fix, not the digest, is then what sees a change at the fix."""
+    edit_plan(plan, lambda p: p.update(ledger_digest=digest(ledger)))
 
 
 def only_transaction(ledger):
@@ -270,10 +277,13 @@ def test_same_bill_matched_again_adds_nothing(prepare, tmp_path):
     assert snapshot(d) == after_first  # not even the balance line is written twice
 
 
-def test_stale_plan_is_refused(prepare):
+@pytest.mark.parametrize("refresh", [False, True], ids=["digest", "fix-check"])
+def test_stale_plan_is_refused(prepare, refresh):
     d, plan = prepare(WX_FOOD, existing=CHAT_LUNCH)
     path = d / "txns" / "2026.beancount"
     path.write_text("; a note above\n" + CHAT_LUNCH, "utf-8", newline="\n")
+    if refresh:
+        refresh_digest(plan, d)
     before = snapshot(d)
     with pytest.raises(LedgerError, match="run match again"):
         apply_plan(plan, d, {})
@@ -285,6 +295,7 @@ def test_stale_plan_with_another_entry_on_the_same_day(prepare):
     other = CHAT_LUNCH.replace("lunch", "coffee").replace("35.00", "9.00")
     path = d / "txns" / "2026.beancount"
     path.write_text(other + "\n" + CHAT_LUNCH, "utf-8", newline="\n")  # line 1 is now `coffee`
+    refresh_digest(plan, d)
     before = snapshot(d)
     with pytest.raises(LedgerError, match="run match again"):
         apply_plan(plan, d, {})
@@ -304,6 +315,7 @@ def test_stale_plan_with_a_look_alike_entry_at_the_line(prepare, stand_in):
     d, plan = prepare(WX_FOOD, existing=CHAT_LUNCH)
     path = d / "txns" / "2026.beancount"
     path.write_text(stand_in + "\n" + CHAT_LUNCH, "utf-8", newline="\n")
+    refresh_digest(plan, d)
     before = snapshot(d)
     with pytest.raises(LedgerError, match="run match again"):
         apply_plan(plan, d, {})
@@ -330,6 +342,7 @@ def test_stale_plan_checks_every_fix_before_writing(prepare):
     # The dinner entry is where the plan says (and is fixed first, bottom up); lunch changed.
     path.write_text(
         CHAT_LUNCH.replace("lunch", "brunch") + "\n" + CHAT_DINNER, "utf-8", newline="\n")
+    refresh_digest(plan, d)
     before = snapshot(d)
     with pytest.raises(LedgerError, match="run match again"):
         apply_plan(plan, d, {})
@@ -393,6 +406,7 @@ def test_document_account_must_be_open_on_the_document_date(prepare, tmp_path):
     (d / "accounts.beancount").write_text(
         (d / "accounts.beancount").read_text("utf-8") + "2026-12-01 open Assets:Later\n",
         "utf-8", newline="\n")
+    refresh_digest(plan, d)
     bill = tmp_path / "bill.xls"
     bill.write_bytes(b"x")
     with pytest.raises(LedgerError, match="not open on 2026-09-03"):
@@ -533,3 +547,64 @@ def test_rows_before_the_start_are_not_written(make_ledger, tmp_path):
     assert (result["written"], result["skipped"], result["balances"]) == (1, 1, 0)
     entries, errors, _ = load(d / "main.beancount")
     assert errors == [] and [t.date.isoformat() for t in transactions(entries)] == ["2026-09-05"]
+
+
+# Final review: a plan is stale once anything in the ledger changed (I2).
+
+
+def test_entry_added_between_match_and_apply_is_refused(prepare, monkeypatch, capsys):
+    d, plan = prepare(ALIPAY_RIDE)
+    # The user tells about the same ride in chat before the plan is applied.
+    told = ALIPAY_RIDE.replace('  via: "alipay"\n  orderId: "A1"\n', "")
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(told.encode("utf-8"))))
+    assert main(["add", "--ledger-dir", str(d)]) == 0
+    capsys.readouterr()
+    before = snapshot(d)
+    with pytest.raises(LedgerError, match="ledger changed since match; run match again"):
+        apply_plan(plan, d, {})
+    assert snapshot(d) == before and read_plan(plan)["applied"] is False
+    assert len(transactions(load(d / "main.beancount")[0])) == 1
+
+
+def test_any_ledger_file_counts(prepare):
+    d, plan = prepare(ALIPAY_RIDE)
+    prices = d / "prices.beancount"
+    prices.write_text(prices.read_text("utf-8") + "\n; a comment\n", "utf-8", newline="\n")
+    with pytest.raises(LedgerError, match="run match again"):
+        apply_plan(plan, d, {})
+
+
+def test_retry_after_a_crash_before_the_plan_is_marked(prepare, monkeypatch):
+    d, plan = prepare(ALIPAY_RIDE)
+
+    def crash(*_args):
+        raise OSError("power cut")
+
+    monkeypatch.setattr(apply_module, "_save_plan", crash)
+    with pytest.raises(LedgerError, match="do not apply it again"):
+        apply_plan(plan, d, {})
+    monkeypatch.undo()
+    after_first = snapshot(d)
+    with pytest.raises(LedgerError, match="run match again"):
+        apply_plan(plan, d, {})
+    assert snapshot(d) == after_first
+    assert len(transactions(load(d / "main.beancount")[0])) == 1
+
+
+def test_plan_without_a_digest_is_refused(prepare):
+    d, plan = prepare(ALIPAY_RIDE)
+    edit_plan(plan, lambda p: p.pop("ledger_digest"))
+    with pytest.raises(LedgerError, match="run match again"):
+        apply_plan(plan, d, {})
+    assert not (d / "txns" / "2026.beancount").exists()
+
+
+def test_plan_for_another_ledger_is_refused(prepare, tmp_path):
+    d, plan = prepare(ALIPAY_RIDE)
+    other = tmp_path / "other"
+    shutil.copytree(d, other)  # the same files, so the same digest
+    before = snapshot(other)
+    with pytest.raises(LedgerError, match="another ledger"):
+        apply_plan(plan, other, {})
+    assert snapshot(other) == before and read_plan(plan)["applied"] is False
+    assert apply_plan(plan, d, {})["written"] == 1

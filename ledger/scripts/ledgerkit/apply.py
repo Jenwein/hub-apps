@@ -1,7 +1,8 @@
 """Apply a plan written by `lk match`: fix chat entries, append the new ones, write the balances.
 
-Everything that can be checked is checked before the first byte is written: the plan, the decisions,
-every fix against the file it points into, the document and its target. The write itself is one
+Everything that can be checked is checked before the first byte is written: the plan is for this
+ledger and nothing in the ledger changed since the match (its digest), the decisions, every fix
+against the file it points into, the document and its target. The write itself is one
 `guarded` block (fixes, new entries and balances), so any new beancount error undoes all of it.
 Only then the document is copied and the plan marked applied, which is what stops a second apply.
 """
@@ -25,6 +26,7 @@ from .book import (
     UNSORTED_EXPENSE,
     UNSORTED_INCOME,
     append_entries,
+    digest,
     guarded,
     load,
     parse_text,
@@ -65,6 +67,19 @@ def _read_plan(path: Path) -> dict:
     ):
         raise LedgerError(f"{path} is not a plan written by lk match")
     return plan
+
+
+def _check_fresh(plan: dict, main: Path) -> None:
+    """The plan was made for this ledger, and nothing in the ledger has changed since.
+
+    A change in between (an entry added in chat or in Fava, another plan applied, an apply that
+    stopped before it could mark its plan) could hold a payment the plan would write again.
+    """
+    ledger = plan.get("ledger")
+    if not isinstance(ledger, str) or Path(ledger).resolve() != main.resolve():
+        raise LedgerError(f"the plan was made for another ledger ({ledger}), not {main}")
+    if plan.get("ledger_digest") != digest(main.parent):
+        raise LedgerError(STALE)
 
 
 def _check_decisions(items: list[dict], decisions: dict[str, str]) -> None:
@@ -348,6 +363,10 @@ def apply_plan(
     plan = _read_plan(plan_path)
     if plan.get("applied"):
         raise LedgerError("plan already applied")
+    main = ledger_dir / "main.beancount"
+    if not main.is_file():
+        raise LedgerError(f"no main.beancount in {ledger_dir}")
+    _check_fresh(plan, main)
     items = plan["items"]
     _check_decisions(items, decisions)
     undecided = [i["id"] for i in items if i["kind"] == "uncertain" and i["id"] not in decisions]
@@ -365,9 +384,6 @@ def apply_plan(
     if unresolved:
         raise NeedsDecision({"unresolved": unresolved})
 
-    main = ledger_dir / "main.beancount"
-    if not main.is_file():
-        raise LedgerError(f"no main.beancount in {ledger_dir}")
     existing = load(main)[0]
     fixes = [item for item in items if item["kind"] == "fix"]
     changed = _fix_files(ledger_dir, fixes)
@@ -375,6 +391,7 @@ def apply_plan(
     when = max((item["date"] for item in items), default=date.today().isoformat())
     target = _document_target(ledger_dir, existing, document, document_account, when)
 
+    _check_fresh(plan, main)  # again, just before the write: the checks above take a while
     with guarded(ledger_dir):
         for path, data in changed.items():
             path.write_bytes(data)

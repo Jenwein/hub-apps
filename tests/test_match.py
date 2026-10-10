@@ -2,7 +2,7 @@ import json
 import re
 
 import pytest
-from ledgerkit.book import format_entry, parse_text
+from ledgerkit.book import digest, format_entry, parse_text
 from ledgerkit.cli import main
 from ledgerkit.match import match, run
 from ledgerkit.settings import LedgerError, parse_settings
@@ -236,6 +236,7 @@ def test_plan_file(make_ledger, tmp_path):
     assert set(item) == ITEM_KEYS and item["kind"] == "fix"
     assert item["fix"]["file"] == str(d / "txns" / "2026.beancount") and item["fix"]["line"] == 1
     assert item["existing"][0]["file"] == item["fix"]["file"]
+    assert plan["ledger_digest"] == digest(d)
 
 
 def test_missing_staged_file(make_ledger, tmp_path):

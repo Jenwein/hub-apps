@@ -8,6 +8,7 @@ from ledgerkit.book import (
     PLACEHOLDERS,
     add_text,
     append_entries,
+    digest,
     format_entry,
     funding_postings,
     guarded,
@@ -194,3 +195,19 @@ def test_guarded_needs_a_ledger(tmp_path):
     with pytest.raises(LedgerError, match="no main.beancount"), guarded(tmp_path / "nowhere"):
         pass
     assert not (tmp_path / "nowhere").exists()
+
+
+def test_digest_covers_the_ledger_files_but_the_inbox(make_ledger):
+    d = make_ledger(ACCTS)
+    first = digest(d)
+    assert len(first) == 64 and digest(d) == first
+    inbox = d / "inbox" / "20261001-093000-alipay"
+    inbox.mkdir(parents=True)
+    (inbox / "staged.beancount").write_text(LUNCH, "utf-8")
+    (d / "documents" / "bill.beancount.txt").write_text("x", "utf-8")
+    assert digest(d) == first  # the inbox and files that are not .beancount do not count
+    year_file(d, 2026).write_text(LUNCH, "utf-8")
+    second = digest(d)
+    assert second != first
+    (d / "txns" / "2026.beancount").rename(d / "txns" / "2027.beancount")
+    assert digest(d) not in (first, second)  # a path counts, not only the bytes

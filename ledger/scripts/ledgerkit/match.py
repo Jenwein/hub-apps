@@ -57,6 +57,7 @@ from .book import (
     UNMAPPED,
     UNSORTED_EXPENSE,
     UNSORTED_INCOME,
+    digest,
     format_entry,
     funding_postings,
     is_transfer,
@@ -457,6 +458,8 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
     The flag counts cover the new and uncertain items, the ones that may be written: a duplicate
     is dropped and a fix keeps the existing entry's postings apart from the funding account.
     `ledger_errors` counts the errors the ledger already had; they do not stop a match.
+    The plan holds the ledger's digest, taken before it is read: apply refuses the plan once the
+    ledger has changed.
     Balances dated on or before `[ledger] start` are left out: they check the money before the
     books begin, which the opening balances, dated that first day, do not count yet.
     """
@@ -470,12 +473,14 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
         raise LedgerError(f"{staged_path} is not UTF-8 text: {err}") from err
     except LedgerError as err:
         raise LedgerError(f"{staged_path}: {err}") from err
+    ledger_digest = digest(main.parent)
     entries, errors, _options = load(main)
     items = match(entries, staged, settings)
     start = _start(settings)
     plan = {
         "version": 1,
-        "ledger": str(main),
+        "ledger": str(main.absolute()),
+        "ledger_digest": ledger_digest,
         "staged": str(staged_path),
         "applied": False,
         "items": [asdict(item) for item in items],

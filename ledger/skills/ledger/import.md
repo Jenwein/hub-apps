@@ -226,8 +226,9 @@ uv run apps/ledger/scripts/lk.py apply --ledger-dir ledger \
   - `{"unresolved": [{"id": "s5", "flags": ["unsorted"]}, ...]}`: items to
     write that still hold a placeholder: settle them (step 4), which ends
     with a new match.
-- `lk: ledger changed since match; run match again`: do that, then apply the
-  new plan.
+- `lk: ledger changed since match; run match again`: a ledger file changed
+  after the match (an entry added in chat or in Fava, another plan applied,
+  the `prices` task). Match again, then apply the new plan.
 - `lk: plan already applied`: it is in the ledger; do not apply it again. The
   same holds for an error that says the entries are in the ledger.
 - `lk: ledger check failed: Balance failed for ...` stops the whole apply.

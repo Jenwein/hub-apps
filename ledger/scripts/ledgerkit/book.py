@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -64,6 +65,26 @@ def is_transfer(txn: Transaction) -> bool:
 
 def year_file(ledger_dir: Path, year: int) -> Path:
     return ledger_dir / "txns" / f"{year}.beancount"
+
+
+def digest(ledger_dir: Path) -> str:
+    """SHA-256 over the ledger: every `.beancount` file under `ledger_dir` except in `inbox/`.
+
+    Each file adds its path relative to `ledger_dir` (POSIX) and its bytes, in path order: any
+    change to an entry, a new or renamed file, makes another digest.
+    """
+    ledger_dir = Path(ledger_dir)
+    files = {}
+    for path in ledger_dir.rglob("*.beancount"):
+        relative = path.relative_to(ledger_dir)
+        if relative.parts[0] != "inbox" and path.is_file():
+            files[relative.as_posix()] = path
+    found = hashlib.sha256()
+    for name in sorted(files):
+        data = files[name].read_bytes()
+        found.update(f"{name}\0{len(data)}\0".encode())
+        found.update(data)
+    return found.hexdigest()
 
 
 def _error_counts(main: Path) -> Counter:
