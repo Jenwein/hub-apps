@@ -1,8 +1,8 @@
 import argparse
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 from beancount.core.data import Open
 from beancount.loader import load_file as load
 from ledgerkit import cli

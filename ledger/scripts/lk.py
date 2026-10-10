@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #   "beancount>=3.2,<4", "pyyaml>=6", "matplotlib>=3.8",
 #   "openpyxl>=3.1", "xlrd>=2.0", "pdfplumber>=0.11",

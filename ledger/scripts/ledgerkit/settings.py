@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-
-import tomllib
 
 
 class LedgerError(Exception):
