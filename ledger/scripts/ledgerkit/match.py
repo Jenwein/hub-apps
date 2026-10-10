@@ -11,11 +11,11 @@ each staged entry S the first rule that applies wins:
      duplicate; without one (a refund under its purchase's order id) S is uncertain.
    - statement-row: for a bank line, an existing entry with the same `via` and date that holds every
      non-placeholder posting of S, and the same `balances` when both have one, is a duplicate.
-2. chat: an open chat entry (`via: "chat"`, no `orderId`) in the window with S's signed funding
-   amount on the same account, or, when its `channel` is S's source, on that channel's account
-   (`[chat.channels]`, else `[chat] default`). The nearest one is fixed to S's account and gets S's
-   order id; several at the same distance make S uncertain. A loan, reimbursement or transfer side
-   of the entry never pairs through the channel, and no fix books an account twice in one entry.
+2. chat: an open hand entry in the window with S's signed funding amount on the same account, or,
+   when its `channel` is S's source, on that channel's account (`[chat.channels]`, else
+   `[chat] default`). The nearest one is fixed to S's account and gets S's order id; several at
+   the same distance make S uncertain. A loan, reimbursement or transfer side of the entry never
+   pairs through the channel, and no fix books an account twice in one entry.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
    first, then bank lines claim candidates that are transfers when no other candidate is as near;
@@ -23,9 +23,13 @@ each staged entry S the first rule that applies wins:
    a staged entry that still has unclaimed candidates is uncertain and lists only those: a platform
    row is never a bank's echo, and another bank line may be a payment of its own.
 4. A bank line that names a payment channel and matched nothing is uncertain.
-5. An open chat entry in the window whose signed funding amount is within max(2, 10 %) of S's, on
+5. An open hand entry in the window whose signed funding amount is within max(2, 10 %) of S's, on
    any account, makes S uncertain.
 6. Otherwise S is new.
+
+An open hand entry is one the user told about in chat or added in Fava or by hand: its `via` is
+missing or "chat" and no bill has given it an `orderId`. Pad entries and opening balances (an entry
+with a posting on an `Equity:` account) pay for nothing and are never candidates of any rule.
 
 A staged entry's placeholder funding postings stand in for its funding account (rules 1, 2 and 5)
 only when it has no other: a receipt's or refund's `Assets:Unmapped` is the payer, not an account
@@ -59,11 +63,12 @@ from .book import (
 from .settings import LedgerError, Settings, source
 
 CHAT = "chat"
+EQUITY = "Equity:"
 KINDS = ("new", "duplicate", "fix", "uncertain")
 FLAGS = ("unsorted", "unmapped", "investment")
-# The staged keys a fix copies onto the chat entry; `via` goes there as `bill`.
+# The staged keys a fix copies onto the hand entry; `via` goes there as `bill`.
 FIX_KEYS = ("orderId", "payTime")
-# How far a chat entry's amount may be from a bill's and still be asked about (rule 5).
+# How far a hand entry's amount may be from a bill's and still be asked about (rule 5).
 NEAR_ABSOLUTE = Decimal(2)
 NEAR_RELATIVE = Decimal("0.1")
 
@@ -103,7 +108,7 @@ def _mentions(txn: Transaction, words: tuple[str, ...]) -> bool:
 
 
 def _bill(entry: Transaction):
-    """The bill an existing entry's `orderId` came from: `bill` on a fixed chat entry, or `via`."""
+    """The bill an existing entry's `orderId` came from: `bill` on a fixed hand entry, or `via`."""
     return entry.meta.get("bill") or entry.meta.get("via")
 
 
@@ -112,9 +117,21 @@ def _order_key(origin, entry: Transaction) -> tuple | None:
     return None if order is None else (origin, str(order))
 
 
-def _is_open_chat(entry: Transaction) -> bool:
-    """A chat entry that no bill has claimed yet."""
-    return entry.meta.get("via") == CHAT and "orderId" not in entry.meta
+def _pays_nothing(entry: Transaction) -> bool:
+    """Made by a `pad` directive, or opening balances (a posting on an `Equity:` account)."""
+    return entry.flag == FLAG_PADDING or any(p.account.startswith(EQUITY) for p in entry.postings)
+
+
+def _is_open_hand(entry: Transaction) -> bool:
+    """A hand entry that no bill has claimed yet: told in chat, or added in Fava or by hand.
+
+    Its `via` is missing or "chat" and it has no `orderId`; opening balances and pad entries are
+    none.
+    """
+    return (
+        entry.meta.get("via", CHAT) == CHAT and "orderId" not in entry.meta
+        and not _pays_nothing(entry)
+    )
 
 
 def _other_order(entry: Transaction, staged: Transaction) -> bool:
@@ -169,8 +186,8 @@ def _shares_posting(entry: Transaction, staged: Transaction) -> bool:
 
 
 def _target(ours: Posting, theirs: Posting) -> str:
-    """The account a fix gives the chat entry's posting: the bill's, unless the bill does not
-    know it (a placeholder); the chat entry's account then stays."""
+    """The account a fix gives the hand entry's posting: the bill's, unless the bill does not
+    know it (a placeholder); the hand entry's account then stays."""
     return ours.account if theirs.account in PLACEHOLDERS else theirs.account
 
 
@@ -182,7 +199,7 @@ def _books_twice(entry: Transaction, ours: Posting, account: str) -> bool:
 def _chat_pair(
         entry: Transaction, staged: Transaction, settings: Settings,
 ) -> tuple[Posting, Posting] | None:
-    """The funding postings that make a chat entry and a staged entry the same payment, if any.
+    """The funding postings that make a hand entry and a staged entry the same payment, if any.
 
     Either both have the same account and signed amount, or the entry's `channel` is S's source
     and its posting on that channel's account (`[chat.channels]`, else `[chat] default`) has S's
@@ -254,8 +271,8 @@ class _Matcher:
 
     def __init__(self, existing: list, staged: list, settings: Settings):
         self.settings = settings
-        # Padding entries come from `pad` directives: they are in no file and pay for nothing.
-        self.ledger = [t for t in transactions(existing) if t.flag != FLAG_PADDING]
+        # Pad entries (in no file) and opening balances pay for nothing: never candidates.
+        self.ledger = [t for t in transactions(existing) if not _pays_nothing(t)]
         self.batch = sorted(transactions(staged), key=lambda t: t.date)
         for txn in self.batch:
             if "via" not in txn.meta:
@@ -349,7 +366,7 @@ class _Matcher:
             txn = self.batch[n]
             pairs = {}
             for i in self.near(txn):
-                if _is_open_chat(self.ledger[i]):
+                if _is_open_hand(self.ledger[i]):
                     pair = _chat_pair(self.ledger[i], txn, self.settings)
                     if pair:
                         pairs[i] = pair
@@ -402,7 +419,7 @@ class _Matcher:
                 continue
             chats = self.nearest(
                 [i for i in self.near(txn)
-                 if _is_open_chat(self.ledger[i]) and _near_amount(self.ledger[i], txn)],
+                 if _is_open_hand(self.ledger[i]) and _near_amount(self.ledger[i], txn)],
                 txn)
             if chats:
                 self.decided[n] = (

@@ -503,3 +503,19 @@ def test_fix_that_books_an_account_twice_is_refused(prepare):
     with pytest.raises(LedgerError, match="s1: .*Expenses:Food twice"):
         apply_plan(plan, d, {})
     assert snapshot(d) == before and read_plan(plan)["applied"] is False
+
+
+def test_fix_of_an_entry_added_in_fava(make_ledger, tmp_path):
+    d = make_ledger(OPEN)
+    web = d / "txns" / "web.beancount"
+    fava = WX_FOOD.replace('  via: "wechat"\n  orderId: "W1"\n', "").replace(
+        '  payTime: "2026-09-06 12:01:02 +0800 CST"\n', "")
+    web.write_text(web.read_text("utf-8") + "\n" + fava, "utf-8", newline="\n")
+    staged = tmp_path / "staged.beancount"
+    staged.write_text(WX_LUNCH, "utf-8", newline="\n")
+    plan = tmp_path / "plan.json"
+    assert run(d / "main.beancount", staged, plan, SET)["fix"] == 1
+    assert apply_plan(plan, d, {})["fixed"] == 1
+    txn = only_transaction(d)
+    assert txn.meta["orderId"] == "W1" and txn.meta["bill"] == "wechat" and "via" not in txn.meta
+    assert txn.meta["filename"].endswith("web.beancount")

@@ -553,3 +553,42 @@ def test_fix_never_books_an_account_twice():
     [item] = run_with(WALLETS, LOAN_CHAT, transfer)
     assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
         "fix", "Assets:WeChat:Change", "Assets:WeChat:Change")
+
+
+# Final review: entries added in Fava or by hand count as chat entries (I3).
+
+FAVA_LUNCH = (  # no via: added in Fava
+    '2026-09-06 * "食堂" "lunch"\n'
+    "  Expenses:Food  35.00 CNY\n  Assets:WeChat:Change  -35.00 CNY\n"
+)
+OPENING = (
+    '2026-09-01 * "Opening balances"\n'
+    "  Assets:WeChat:Change  35.00 CNY\n  Assets:Bank:CCB:1234  5230.00 CNY\n"
+    "  Equity:Opening-Balances\n"
+)
+
+
+def test_entry_added_in_fava_is_fixed_like_a_chat_entry():
+    [item] = run_match(FAVA_LUNCH, WX_LUNCH)
+    assert (item.kind, item.reason) == ("fix", "chat")
+    assert item.fix["account_from"] == item.fix["account_to"] == "Assets:WeChat:Change"
+    assert item.fix["meta"]["orderId"] == "W1"
+
+
+def test_entry_added_in_fava_on_another_account_is_asked_about():
+    on_cash = FAVA_LUNCH.replace("Assets:WeChat:Change", "Assets:Cash")
+    assert kinds(run_match(on_cash, WX_LUNCH)) == [("uncertain", "possible-chat")]
+
+
+def test_opening_balances_are_never_a_candidate():
+    receipt = (
+        '2026-09-02 * "某人" "收款"\n  via: "wechat"\n  orderId: "W50"\n'
+        "  Assets:WeChat:Change  35.00 CNY\n  Income:Gifts  -35.00 CNY\n"
+    )
+    assert kinds(run_match(OPENING, receipt)) == [("new", "new")]
+    assert kinds(run_match(OPENING, receipt.replace("35.00", "34.00"))) == [("new", "new")]
+    salary = (
+        '2026-09-02 * "某公司" "工资"\n  via: "ccb"\n'
+        "  Assets:Bank:CCB:1234  5230.00 CNY\n  Income:Salary  -5230.00 CNY\n"
+    )
+    assert kinds(run_match(OPENING, salary)) == [("new", "new")]
