@@ -13,7 +13,7 @@ a CSV file.
 |---|---|
 | `钱包余额` | `Assets:JD:Balance` |
 | `白条` | `Liabilities:JD:Baitiao` |
-| `中国银行信用卡(1875)` | a card: `method: "(1875)"` |
+| `中国银行信用卡(1875)` | a card: `method: "(1875)"` at setup; that whole text with `fullMatch: true` once a bill shows it ([import.md](../import.md), step 4) |
 
 Write these to `ledger/importers/jd.yaml`. JD's own categories are in
 `category:` (`category: 食品酒饮` → `Expenses:Groceries`). Document account: the

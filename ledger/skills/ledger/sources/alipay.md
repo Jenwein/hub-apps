@@ -16,7 +16,7 @@ it is; it is GBK text.
 | `余额` | `Assets:Alipay:Balance` (default rule) |
 | `余额宝` | `Assets:Alipay:YuEBao` (default rule) |
 | `花呗` | `Liabilities:Alipay:Huabei` (default rule) |
-| `招商银行信用卡(1234)` | a card: add `method: "(1234)"` with its `methodAccount` to `ledger/importers/alipay.yaml` |
+| `招商银行信用卡(1234)` | a card: `method: "(1234)"` with its `methodAccount` in `ledger/importers/alipay.yaml` at setup; that whole text with `fullMatch: true` once a bill shows it ([import.md](../import.md), step 4) |
 
 Alipay's own categories (`category:`) for dining, transport, groceries, top-ups
 and health map to `Expenses:` accounts by default; add `category`, `peer` or

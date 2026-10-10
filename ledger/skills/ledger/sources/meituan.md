@@ -15,7 +15,7 @@ The payee is empty and the order title is the narration, so category rules use
 | Method text | Account |
 |---|---|
 | `美团月付` | `Liabilities:Meituan:MonthlyPay` |
-| `中国银行信用卡(1875)` | a card: `method: "(1875)"` |
+| `中国银行信用卡(1875)` | a card: `method: "(1875)"` at setup; that whole text with `fullMatch: true` once a bill shows it ([import.md](../import.md), step 4) |
 
 Write these to `ledger/importers/meituan.yaml`. Document account: the account
 most rows were paid from.

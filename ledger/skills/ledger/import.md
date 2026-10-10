@@ -117,7 +117,9 @@ that is `unsorted` or `unmapped`.
 - `unmapped`: `Assets:Unmapped` stands for an account the converter could not
   tell.
   - A payment: show the `method:` text and ask which account it is; add a
-    `methodAccount` rule. Cards go by their last digits: `method: "(1234)"`.
+    `methodAccount` rule on that whole text with `fullMatch: true`, such as
+    `method: 建设银行储蓄卡(1234)`. A rule on the digits alone would also take
+    another bank's card that ends in them.
   - A receipt (money in) comes as `<account> +X` / `Assets:Unmapped -X`. Ask
     what the money is and add a `targetAccount` rule with its account: an
     income (`Income:Salary`), a loan paid back
@@ -127,6 +129,15 @@ that is `unsorted` or `unmapped`.
 - `investment`: the row mentions a fund, shares or wealth management, in its
   payee, narration, or the bill's `txType`, `type` or `category`. Ask; a
   purchase or sale is a holding, not spending ([investments.md](investments.md)).
+
+A card no flag shows: setup's card rules go by the last digits alone
+(`method: "(1234)"`), and such a rule takes any bank's card that ends in them,
+a family member's or an old card bound to the wallet too, without a flag.
+While a source's rules still hold one, list the method texts of each staged
+file (`grep -o 'method: "[^"]*"' <staged file> | sort | uniq -c`). Ask the
+user about a text with those digits that names another bank than the card's.
+Then replace the digits rule with a rule for each text that is their card,
+with `fullMatch: true`: a card not seen before then comes as `unmapped`.
 
 Transfers between the user's own accounts are not spending: top-ups,
 withdrawals, moves between 余额 and 余额宝 or 零钱 and 零钱通, and repayments of
@@ -153,7 +164,8 @@ app's defaults (`apps/ledger/importers/<source>.yaml`) run before them.
 
 ```yaml
 rules:
-  - method: "(1234)"                 # the card ending 1234
+  - method: 招商银行信用卡(1234)      # the card ending 1234, as the bill shows it
+    fullMatch: true
     methodAccount: Liabilities:CreditCard:CMB:1234
   - peer: 滴滴
     targetAccount: Expenses:Transport

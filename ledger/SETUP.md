@@ -77,10 +77,19 @@ Then write, in this order. Skip whatever is already there.
    `ledger/importers/<source>.yaml` (if it exists, add only what it lacks).
    Its `rules:` list holds:
    - a rule for every card they gave, `method: "(1234)"` with `methodAccount`
-     the card's account (a rule that never matches does nothing). If two cards
-     share their last four digits, ask how the platform shows each, such as
-     `招商银行信用卡(1234)`, and use that text, or the second rule would take
-     both.
+     the card's account (a rule that never matches does nothing). Such a rule
+     takes any card that ends in those digits, of any bank: also a card not in
+     their list, such as a family member's or an old card bound to the
+     wallet, which would then be booked to this card without a word. So it is
+     only a start: once a bill shows the card's full method text, the import
+     replaces it with a rule on that text with `fullMatch: true` (`import.md`,
+     step 4). If two of their cards share their last four digits, ask now how
+     the platform shows each, such as `招商银行信用卡(1234)`, and use that text
+     with `fullMatch: true`, or the second rule would take both.
+   - in `wechat.yaml`, for each bank of which they have exactly one card:
+     `method: <bank name>`, such as `method: 招商银行`, with `fullMatch: true`
+     and that card's account. WeChat shows some card payments by the bank's
+     name alone (`sources/wechat.md`, "Known issues").
    - a rule for each payment method of the guide's "Convert" table that they
      use and the table does not mark "(default rule)": `method: <text>` with
      `methodAccount: <account>`. Alipay and WeChat need none for their wallets;
@@ -224,6 +233,12 @@ enabling Serve), tell them the exact commands, run
 do not register the scheduled tasks or mark the app done. When the user says it
 is done, run this file again from the top; finished steps are skipped. Linger
 (step 2) is not one of these: it never holds the setup up.
+
+Nor is a CJK font, which charts need for Chinese text. On Linux, if
+`fc-list :lang=zh` prints nothing (or there is no `fc-list`), tell the user
+that charts will show Chinese as boxes until they install one, and give them
+the command to run when they like, such as `sudo apt install fonts-noto-cjk`
+on Debian or Ubuntu. Installing it needs root: never run `sudo` yourself.
 
 When nothing is left, the scheduled tasks and the rest are the `hub-apps`
 skill's job.
