@@ -165,8 +165,7 @@ def test_fix_never_moves_to_a_placeholder():
 
 
 def test_chat_on_the_same_account_keeps_it():
-    chat = CHAT_LUNCH.replace('  channel: "wechat"\n', "")
-    [item] = run_match(chat, WX_LUNCH.replace("Assets:WeChat:Change", "Assets:Bank:CCB:1234"))
+    [item] = run_match(CHAT_LUNCH, WX_LUNCH.replace("Assets:WeChat:Change", "Assets:Bank:CCB:1234"))
     assert (item.kind, item.reason) == ("fix", "chat")
     assert item.fix["account_from"] == item.fix["account_to"] == "Assets:Bank:CCB:1234"
 
@@ -570,10 +569,17 @@ OPENING = (
 
 
 def test_entry_added_in_fava_is_fixed_like_a_chat_entry():
-    [item] = run_match(FAVA_LUNCH, WX_LUNCH)
+    # It names no channel: the card's own statement fixes it, a platform's row asks (N1).
+    on_card = FAVA_LUNCH.replace("Assets:WeChat:Change", CARD)
+    pos = BANK_RIDE.replace("2026-09-04", "2026-09-06").replace("20.00", "35.00")
+    [item] = run_match(on_card, pos.replace("支付宝-支付宝外部商户-高德打车", "食堂"))
     assert (item.kind, item.reason) == ("fix", "chat")
-    assert item.fix["account_from"] == item.fix["account_to"] == "Assets:WeChat:Change"
-    assert item.fix["meta"]["orderId"] == "W1"
+    assert item.fix["account_from"] == item.fix["account_to"] == CARD
+    assert item.fix["meta"] == {"bill": "ccb"}
+    assert kinds(run_match(FAVA_LUNCH, WX_LUNCH)) == [("uncertain", "possible-duplicate")]
+    with_channel = FAVA_LUNCH.replace('"lunch"\n', '"lunch"\n  channel: "wechat"\n')
+    [item] = run_match(with_channel, WX_LUNCH)
+    assert (item.kind, item.fix["meta"]["orderId"]) == ("fix", "W1")
 
 
 def test_entry_added_in_fava_on_another_account_is_asked_about():
@@ -621,3 +627,51 @@ def test_balances_before_the_books_are_left_out(make_ledger, tmp_path):
     assert (summary["duplicate"], summary["new"]) == (1, 0)
     [balance] = json.loads((tmp_path / "plan.json").read_text("utf-8"))["balances"]
     assert balance.startswith("2026-09-05 balance")
+
+
+# N1: rule 2 fixes a hand entry only when it is surely the same payment.
+
+CHAT_DINNER = (  # "dinner, 200 on the card": no channel
+    '2026-10-03 * "饭店" "dinner"\n  via: "chat"\n'
+    f"  Expenses:Food  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+HEADPHONES = (  # an Alipay payment drawn from that card
+    '2026-10-04 * "淘宝" "耳机"\n  via: "alipay"\n  orderId: "T1"\n'
+    f"  Expenses:Shopping  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+CCB_DINNER_AND_HEADPHONES = (
+    '2026-10-03 * "某饭店" "POS消费"\n  via: "ccb"\n'
+    f"  Expenses:Food  200.00 CNY\n  {CARD}  -200.00 CNY\n\n"
+    '2026-10-04 * "支付宝" "支付宝-淘宝"\n  via: "ccb"\n'
+    f"  Expenses:Shopping  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+
+
+def test_platform_row_never_fixes_an_entry_paid_by_card():  # probe C
+    # The user said "card", the bill says Alipay: ask, whether or not the row has a category yet.
+    for row in (HEADPHONES, HEADPHONES.replace("Expenses:Shopping", "Expenses:Unsorted")):
+        [item] = run_match(CHAT_DINNER, row)
+        assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+        assert '"dinner"' in item.existing[0]["text"]
+    # The headphones are another payment. The card's own statement fixes the dinner with its POS
+    # line; its Alipay line is the headphones' echo.
+    items = run_match(CHAT_DINNER + "\n" + HEADPHONES, CCB_DINNER_AND_HEADPHONES)
+    assert kinds(items) == [("fix", "chat"), ("duplicate", "channel")]
+    assert '"dinner"' in items[0].existing[0]["text"]
+    assert items[0].fix == {"file": "<string>", "line": 1, "account_from": CARD,
+                            "account_to": CARD, "meta": {"bill": "ccb"}}
+    assert '"耳机"' in items[1].existing[0]["text"]
+
+
+def test_platform_row_fixes_only_an_entry_that_names_it():
+    on_card = WX_LUNCH.replace("Assets:WeChat:Change", CARD)
+    no_channel = CHAT_LUNCH.replace('  channel: "wechat"\n', "")
+    other_channel = CHAT_LUNCH.replace('"wechat"', '"alipay"')
+    for chat in (no_channel, other_channel, FAVA_LUNCH.replace("Assets:WeChat:Change", CARD)):
+        [item] = run_match(chat, on_card)
+        assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+    # Named: on the channel's account, or on the account the bill shows.
+    assert kinds(run_match(CHAT_LUNCH, on_card)) == [("fix", "chat")]
+    [item] = run_match(CHAT_LUNCH.replace(CARD, "Assets:WeChat:Change"), WX_LUNCH)
+    assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
+        "fix", "Assets:WeChat:Change", "Assets:WeChat:Change")

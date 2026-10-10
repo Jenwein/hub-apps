@@ -202,24 +202,31 @@ def _books_twice(entry: Transaction, ours: Posting, account: str) -> bool:
 
 
 def _chat_pair(
-        entry: Transaction, staged: Transaction, settings: Settings,
+        entry: Transaction, staged: Transaction, settings: Settings, bank: bool,
 ) -> tuple[Posting, Posting] | None:
     """The funding postings that make a hand entry and a staged entry the same payment, if any.
 
-    Either both have the same account and signed amount, or the entry's `channel` is S's source
-    and its posting on that channel's account (`[chat.channels]`, else `[chat] default`) has S's
-    signed funding amount. A pair whose fix would book an account twice in the entry is none.
+    The two postings have the same signed amount, and one of these holds:
+    - the entry's `channel` is S's source, and its posting is on that channel's account
+      (`[chat.channels]`, else `[chat] default`) or on S's account;
+    - S is a bank line (`bank`) and both postings are on the same account: the account's own
+      statement.
+    A platform row never pairs with an entry that names another channel or none: the user said
+    one way of paying, the bill shows another. A pair whose fix would book an account twice in the
+    entry is none.
     """
     channel = entry.meta.get("channel")
-    through = None
-    if channel is not None and channel == staged.meta["via"]:
-        through = settings.chat_channels.get(channel) or settings.chat_default
+    named = channel is not None and channel == staged.meta["via"]
+    through = (settings.chat_channels.get(channel) or settings.chat_default) if named else None
     same, channelled = [], []
     for ours in funding_postings(entry):
         for theirs in _staged_funding(staged):
             if _units(ours) is None or _units(ours) != _units(theirs):
                 continue
-            if ours.account == theirs.account and ours.account not in PLACEHOLDERS:
+            if (
+                (bank or named) and ours.account == theirs.account
+                and ours.account not in PLACEHOLDERS
+            ):
                 same.append((ours, theirs))
             elif ours.account == through:
                 channelled.append((ours, theirs))
@@ -386,7 +393,7 @@ class _Matcher:
             pairs = {}
             for i in self.near(txn):
                 if _is_open_hand(self.ledger[i]):
-                    pair = _chat_pair(self.ledger[i], txn, self.settings)
+                    pair = _chat_pair(self.ledger[i], txn, self.settings, self.bank[n])
                     if pair:
                         pairs[i] = pair
             chats = self.nearest(list(pairs), txn)
