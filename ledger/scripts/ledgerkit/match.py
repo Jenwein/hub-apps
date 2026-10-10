@@ -420,23 +420,34 @@ class _Matcher:
                     self.take(n, rows[0], "duplicate", "statement-row")
 
     def chats(self) -> None:
-        """Rule 2, in date order."""
+        """Rule 2 over the whole batch: nearest first, then in batch and file order.
+
+        A staged entry whose nearest open hand entries left are several is uncertain.
+        """
+        found: dict[int, dict[int, tuple[Posting, Posting]]] = {}
+        order = []
         for n in self.undecided():
             txn = self.batch[n]
-            pairs = {}
+            found[n] = {}
             for i in self.near(txn):
-                if _is_open_hand(self.ledger[i]) and _same_kind(self.ledger[i], txn):
-                    pair = _chat_pair(self.ledger[i], txn, self.settings, self.bank[n])
+                entry = self.ledger[i]
+                if _is_open_hand(entry) and _same_kind(entry, txn):
+                    pair = _chat_pair(entry, txn, self.settings, self.bank[n])
                     if pair:
-                        pairs[i] = pair
-            chats = self.nearest(list(pairs), txn)
-            if len(chats) == 1:
-                [i] = chats
+                        found[n][i] = pair
+                        order.append((_days(entry, txn), n, _location(entry), i))
+        for days, n, _where, i in sorted(order):
+            if n in self.decided or i in self.used:
+                continue
+            txn = self.batch[n]
+            tied = [j for j in found[n]
+                    if j not in self.used and _days(self.ledger[j], txn) == days]
+            if len(tied) > 1:
+                self.decided[n] = "uncertain", "chat", [self.ledger[j] for j in tied], None
+            else:
                 self.used.add(i)
                 self.decided[n] = "fix", "chat", [self.ledger[i]], _fix(
-                    self.ledger[i], *pairs[i], txn)
-            elif chats:
-                self.decided[n] = "uncertain", "chat", [self.ledger[i] for i in chats], None
+                    self.ledger[i], *found[n][i], txn)
 
     def claims(self) -> None:
         """Rule 3 for bank lines: channel lines claim candidates, then lines claim transfers.

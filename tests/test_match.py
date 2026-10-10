@@ -741,3 +741,49 @@ def test_another_category_is_never_fixed_silently():
     assert kinds(run_match(refund, row)) == [("uncertain", "possible-chat")]
     assert kinds(run_match(refund, row.replace("Income:Other", "Income:Refunds"))) == [
         ("fix", "chat")]
+
+
+def test_each_row_fixes_its_nearest_hand_entry():
+    snack = CHAT_LUNCH.replace("2026-09-06", "2026-09-03").replace("lunch", "snack")
+    rows = WX_LUNCH.replace('"W1"', '"W2"') + WX_LUNCH.replace("2026-09-06", "2026-09-03")
+    items = run_match(snack + CHAT_LUNCH, rows)  # in the file 09-06 comes before 09-03
+    assert kinds(items) == [("fix", "chat")] * 2
+    assert [(i.date, i.fix["meta"]["orderId"]) for i in items] == [
+        ("2026-09-03", "W1"), ("2026-09-06", "W2")]
+    assert ['"snack"' in i.existing[0]["text"] for i in items] == [True, False]
+    # A row a day off never takes the entry from its same-day row, though it comes first.
+    earlier = WX_LUNCH.replace("2026-09-06", "2026-09-05").replace('"W1"', '"W0"')
+    items = run_match(CHAT_LUNCH, earlier + WX_LUNCH)
+    assert kinds(items) == [("new", "new"), ("fix", "chat")]
+    assert items[1].fix["meta"]["orderId"] == "W1"
+    # Two entries as near as each other still make the row uncertain.
+    twins = CHAT_LUNCH + CHAT_LUNCH.replace("lunch", "snack")
+    assert kinds(run_match(twins, earlier + WX_LUNCH)) == [("uncertain", "chat")] * 2
+
+
+ALIPAY_ONLY = parse_settings({"chat": {"channels": {"alipay": "Assets:Alipay:Balance"}}})
+FAVA_TOPUP = (  # added in Fava: no via, no channel
+    '2026-10-06 * "" "top up Alipay"\n'
+    f"  Assets:Alipay:Balance  100.00 CNY\n  {CARD}  -100.00 CNY\n"
+)
+DINNER_AND_TOPUP = (  # an Alipay bill: a dinner paid by card, then the top-up
+    '2026-10-05 * "某饭店" "晚餐"\n  via: "alipay"\n  orderId: "A40"\n'
+    f"  Expenses:Food  100.00 CNY\n  {CARD}  -100.00 CNY\n\n"
+    '2026-10-06 * "支付宝" "充值"\n  via: "alipay"\n  orderId: "A41"\n'
+    f"  Assets:Alipay:Balance  100.00 CNY\n  {CARD}  -100.00 CNY\n"
+)
+
+
+def test_card_paid_dinner_never_fixes_a_top_up():  # probe G
+    # Named as an Alipay top-up: the top-up row fixes it, the dinner is new.
+    for meta in ('  channel: "alipay"\n', '  via: "chat"\n  channel: "alipay"\n'):
+        named = FAVA_TOPUP.replace('"top up Alipay"\n', f'"top up Alipay"\n{meta}')
+        items = run_with(ALIPAY_ONLY, named, DINNER_AND_TOPUP)
+        assert kinds(items) == [("new", "new"), ("fix", "chat")]
+        assert items[1].fix["meta"]["orderId"] == "A41"
+    # Without a channel no platform row fixes it. Both rows share its card posting: ask.
+    for meta in ("", '  via: "chat"\n'):
+        entry = FAVA_TOPUP.replace('"top up Alipay"\n', f'"top up Alipay"\n{meta}')
+        items = run_with(ALIPAY_ONLY, entry, DINNER_AND_TOPUP)
+        assert kinds(items) == [("uncertain", "possible-duplicate")] * 2
+        assert all('"top up Alipay"' in i.existing[0]["text"] for i in items)
