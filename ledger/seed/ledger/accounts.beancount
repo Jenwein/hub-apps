@@ -1,0 +1,25 @@
+; Accounts. Add one "open" line per card, wallet or loan the user has.
+2000-01-01 open Equity:Opening-Balances
+2000-01-01 open Assets:Cash
+2000-01-01 open Assets:Receivables:Reimbursement
+2000-01-01 open Expenses:Food
+2000-01-01 open Expenses:Groceries
+2000-01-01 open Expenses:Transport
+2000-01-01 open Expenses:Shopping
+2000-01-01 open Expenses:Housing
+2000-01-01 open Expenses:Utilities
+2000-01-01 open Expenses:Communication
+2000-01-01 open Expenses:Health
+2000-01-01 open Expenses:Entertainment
+2000-01-01 open Expenses:Travel
+2000-01-01 open Expenses:Education
+2000-01-01 open Expenses:Gifts
+2000-01-01 open Expenses:Insurance
+2000-01-01 open Expenses:Fees
+2000-01-01 open Expenses:Other
+2000-01-01 open Income:Salary
+2000-01-01 open Income:Bonus
+2000-01-01 open Income:Interest
+2000-01-01 open Income:Investment
+2000-01-01 open Income:Gifts
+2000-01-01 open Income:Other

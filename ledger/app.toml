@@ -1,0 +1,46 @@
+[app]
+name = "ledger"
+version = "0.1.0"
+description = "Bookkeeping with beancount and Fava: record from chat, import bills, charts"
+min_hub = "0.4.0"
+
+[data]
+dirs = ["ledger"]
+
+[[requires]]
+name = "fava (with beancount, beanquery, beanprice)"
+bin = "fava"
+install = "uv tool install --force fava --with-executables-from beancount,beanquery,beanprice"
+
+[[requires]]
+name = "beancount"
+bin = "bean-check"
+install = "uv tool install --force fava --with-executables-from beancount,beanquery,beanprice"
+
+[[requires]]
+name = "beanquery"
+bin = "bean-query"
+install = "uv tool install --force fava --with-executables-from beancount,beanquery,beanprice"
+
+[[requires]]
+name = "beanprice"
+bin = "bean-price"
+install = "uv tool install --force fava --with-executables-from beancount,beanquery,beanprice"
+
+[[requires]]
+name = "double-entry-generator"
+bin = "double-entry-generator"
+
+[requires.install]
+linux = "sh -c 'case $(uname -m) in aarch64|arm64) a=arm64;; *) a=x86_64;; esac; mkdir -p ~/.local/bin && curl -fsSL https://github.com/deb-sig/double-entry-generator/releases/download/v2.16.0/double-entry-generator_Linux_$a.tar.gz | tar -xz -C ~/.local/bin double-entry-generator'"
+macos = "brew install deb-sig/tap/double-entry-generator"
+windows = "powershell -NoProfile -Command \"$d = Join-Path $HOME '.local\\bin'; New-Item -ItemType Directory -Force $d | Out-Null; $t = Join-Path $env:TEMP 'deb.tar.gz'; Invoke-WebRequest https://github.com/deb-sig/double-entry-generator/releases/download/v2.16.0/double-entry-generator_Windows_x86_64.tar.gz -OutFile $t; tar -xzf $t -C $d double-entry-generator.exe\""
+
+[[requires]]
+name = "uv"
+bin = "uv"
+
+[requires.install]
+linux = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+macos = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+windows = "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\""

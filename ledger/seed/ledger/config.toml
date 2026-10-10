@@ -1,0 +1,19 @@
+# Settings of the ledger app; the agent fills them in during setup.
+[ledger]
+currency = "CNY"
+start = ""                # first day of the books, YYYY-MM-DD
+
+[chat]
+default = ""              # account for a chat entry when the user names none
+
+[chat.channels]           # payment channel -> account, e.g. wechat = "Assets:Bank:CCB:1234"
+
+[import]
+sources = []              # bill sources the user exports, e.g. ["alipay", "wechat", "ccb"]
+window_days = 3
+channel_keywords = ["支付宝", "财付通", "美团", "京东", "抖音", "拼多多"]
+invest_keywords = ["基金", "申购", "赎回", "证券", "理财", "股票"]
+
+[fava]
+port = 5000
+tailscale = false

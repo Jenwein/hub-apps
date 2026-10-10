@@ -1,0 +1,7 @@
+option "title" "Ledger"
+option "operating_currency" "CNY"
+option "documents" "documents"
+
+include "accounts.beancount"
+include "prices.beancount"
+include "txns/*.beancount"
