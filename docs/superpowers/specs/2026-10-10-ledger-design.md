@@ -156,7 +156,7 @@ skill 里每个来源一份说明文件，写：在哪里导出（菜单路径�
   uv tool install fava --with-executables-from beancount,beanquery,beanprice
   ```
 
-  画图要用的库也装进这个环境（Claude 定）。
+  应用自己的脚本（去重对账、读表、画图）不用这个环境，由 `uv run` 按脚本里声明的依赖单独准备，画图库也在那里（Claude 定）。
 - double-entry-generator：下载官方发布的安装包放进 `~/.local/bin`，不需要 root；各平台的安装行留给实现者。
 - `uv`：总站本来就靠它装 cc-hub，脚本也用它跑（留给实现者决定脚本怎么取得 beancount 等依赖）。
 - 用户的服务器通过代理访问外网（GitHub、价格源）。应用不自己配代理，靠 agent 进程环境里已有的代理变量；cc-connect 以服务运行时，代理变量要和 PATH 一样写进它的 agent 环境配置，README 里提一句。
