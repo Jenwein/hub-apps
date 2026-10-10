@@ -6,9 +6,10 @@ import argparse
 import csv
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
-from . import apply, book, convert, match, table
+from . import apply, book, chart, convert, match, report, table
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
@@ -78,6 +79,27 @@ def run_table(args: argparse.Namespace) -> None:
     csv.writer(sys.stdout, lineterminator="\n").writerows(rows)
 
 
+def run_summary(args: argparse.Namespace) -> None:
+    print_json(report.summary(args.ledger_dir / "main.beancount", args.month, date.today()))
+
+
+def parse_date(text: str, flag: str) -> date:
+    """A YYYY-MM-DD date. A bad one is a LedgerError (exit 1), not an argparse error."""
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.isoformat() != text:  # python 3.11 also reads 20260901
+        raise LedgerError(f"{flag} must be YYYY-MM-DD, got {text!r}")
+    return parsed
+
+
+def run_chart(args: argparse.Namespace) -> None:
+    start, end = parse_date(args.start, "--start"), parse_date(args.end, "--end")
+    print_json(chart.chart(
+        args.kind, args.ledger_dir / "main.beancount", start, end, args.out, args.title))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -124,6 +146,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--password", metavar="P",
                    help="the password of an encrypted PDF; used for this read only")
     p.set_defaults(func=run_table)
+    p = sub.add_parser(
+        "summary", help="the numbers of a month, or only who owes whom when no month is given")
+    add_ledger_dir(p)
+    p.add_argument("--month", metavar="YYYY-MM",
+                   help="the month to sum up; without it only receivables and payables are printed")
+    p.set_defaults(func=run_summary)
+    p = sub.add_parser("chart", help="draw a PNG chart from the ledger; prints its path as JSON")
+    add_ledger_dir(p)
+    p.add_argument("kind", help="expenses (bars by category), trend (income and expenses per "
+                   "month) or networth (a line over the months)")
+    p.add_argument("--start", required=True, metavar="YYYY-MM-DD", help="the first day")
+    p.add_argument("--end", required=True, metavar="YYYY-MM-DD",
+                   help="the day after the last one (the range is half-open)")
+    p.add_argument("--out", type=Path, metavar="PNG",
+                   help="the file to write (default: a new file in the temp folder)")
+    p.add_argument("--title", help="the chart title (default: one in English)")
+    p.set_defaults(func=run_chart)
     return parser
 
 
