@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      # The tap install in tests/test_install.py clones this checkout, so it needs its history.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # No uv.lock is committed, so there is nothing for the cache to key on.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      # The cchub and deb tests run only where these two are on PATH, which is Ubuntu here.
+      - name: Put ~/.local/bin on PATH
+        if: runner.os == 'Linux'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The app's own Linux install line (double-entry-generator v2.16.0 into ~/.local/bin),
+      # read from ledger/app.toml so CI exercises exactly what a user runs.
+      - name: Install double-entry-generator
+        if: runner.os == 'Linux'
+        run: |
+          line=$(python3 -c 'import tomllib; d = tomllib.load(open("ledger/app.toml", "rb")); print(next(r["install"]["linux"] for r in d["requires"] if r["bin"] == "double-entry-generator"))')
+          eval "$line"
+          test -x "$HOME/.local/bin/double-entry-generator"
+
+      - name: Install cc-hub
+        if: runner.os == 'Linux'
+        run: uv tool install cc-hub
+
+      - run: uv run ruff check .
+      - run: uv run pytest -q
