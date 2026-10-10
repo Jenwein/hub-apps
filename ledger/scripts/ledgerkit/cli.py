@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import book, convert, match
+from . import apply, book, convert, match
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
@@ -44,6 +44,34 @@ def run_match(args: argparse.Namespace) -> None:
     print_json(match.run(args.ledger_dir / "main.beancount", args.staged, args.out, settings))
 
 
+def parse_decisions(pairs: list[str]) -> dict[str, str]:
+    """`ID=new|skip` arguments as a dict.
+
+    A bad one is a LedgerError (exit 1) here: an argparse error would exit 2, which means that
+    apply needs decisions. The same decision twice is harmless, two different ones are an error.
+    """
+    decisions = {}
+    for pair in pairs:
+        id_, sep, choice = pair.partition("=")
+        if not sep or not id_:
+            raise LedgerError(f"--decide takes ID=new or ID=skip, got {pair!r}")
+        if decisions.setdefault(id_, choice) != choice:
+            raise LedgerError(f"two different decisions for {id_}")
+    return decisions
+
+
+def run_apply(args: argparse.Namespace) -> int:
+    decisions = parse_decisions(args.decide)
+    try:
+        result = apply.apply_plan(
+            args.plan, args.ledger_dir, decisions, args.document, args.document_account)
+    except apply.NeedsDecision as err:
+        print_json(err.payload)
+        return 2
+    print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -70,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True, metavar="PLAN",
                    help="the plan file to write (JSON), for apply")
     p.set_defaults(func=run_match)
+    p = sub.add_parser(
+        "apply", help="write a plan from match to the ledger; exit 2 when it needs decisions")
+    add_ledger_dir(p)
+    p.add_argument("--plan", type=Path, required=True, metavar="PLAN",
+                   help="the plan file written by match")
+    p.add_argument("--decide", action="append", default=[], metavar="ID=new|skip",
+                   help="what to do with an uncertain item: write it (new) or drop it (skip)")
+    p.add_argument("--document", type=Path, metavar="FILE",
+                   help="the bill to file under the ledger's documents")
+    p.add_argument("--document-account", metavar="ACCOUNT",
+                   help="the account the document belongs to (an open account)")
+    p.set_defaults(func=run_apply)
     return parser
 
 
