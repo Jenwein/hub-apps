@@ -5,7 +5,14 @@ from decimal import Decimal
 import pytest
 from ledgerkit.book import load
 from ledgerkit.cli import main
-from ledgerkit.report import money, net_worth, open_balances, period_totals, summary
+from ledgerkit.report import (
+    money,
+    net_worth,
+    open_balances,
+    open_holdings,
+    period_totals,
+    summary,
+)
 from ledgerkit.settings import LedgerError
 
 ACCTS = """\
@@ -97,6 +104,51 @@ def test_paid_back_loan_is_not_listed(make_ledger):
     assert summary(d / "main.beancount", None, date(2026, 10, 1))["receivables"] == {}
 
 
+LOANS = ACCTS + """\
+2000-01-01 open Assets:Receivables:Loans:Wang
+2000-01-01 open Assets:Receivables:Loans:Li
+2000-01-01 open Assets:Receivables:Loans:Zhao
+"""
+
+
+def test_receivables_and_payables_in_every_currency(make_ledger):
+    d = make_ledger(LOANS, txns={2026: (
+        txn("2026-09-01", "lent", "Assets:Receivables:Loans:Wang  10.00 CNY", BANK)
+        + txn("2026-09-02", "lent", "Assets:Receivables:Loans:Wang  3.00 USD", BANK + "  -3.00 USD")
+        + txn("2026-09-03", "lent", "Assets:Receivables:Loans:Li  100.00 USD",
+              BANK + "  -100.00 USD")
+        + txn("2026-09-04", "lent", "Assets:Receivables:Loans:Zhao  5.00 EUR",
+              BANK + "  -5.00 EUR")
+        + txn("2026-09-05", "lent", "Assets:Receivables:Loans:Zhao  3.00 USD",
+              BANK + "  -3.00 USD")
+        + txn("2026-09-06", "borrowed", f"{BANK}  20.00 USD", "Liabilities:Payables:LiSi  -20.00 USD")
+        + txn("2026-09-07", "borrowed", f"{BANK}  8.00 CNY", "Liabilities:Payables:LiSi  -8.00 CNY")
+    )})
+    main_file = d / "main.beancount"
+    s = summary(main_file, None, date(2026, 10, 1))
+    assert s["receivables"] == {
+        "Assets:Receivables:Loans:Li": "100.00 USD",
+        "Assets:Receivables:Loans:Wang": "10.00, 3.00 USD",
+        "Assets:Receivables:Loans:Zhao": "5.00 EUR, 3.00 USD"}
+    assert s["payables"] == {"Liabilities:Payables:LiSi": "-8.00, -20.00 USD"}
+    assert json.loads(json.dumps(s)) == s
+    # The operating currency is the plain one, wherever it falls in the order.
+    set_main(d, OPTION, 'option "operating_currency" "USD"')
+    s = summary(main_file, "2026-09", date(2026, 10, 1))
+    assert s["receivables"] == {
+        "Assets:Receivables:Loans:Li": "100.00",
+        "Assets:Receivables:Loans:Wang": "10.00 CNY, 3.00",
+        "Assets:Receivables:Loans:Zhao": "5.00 EUR, 3.00"}
+    assert s["payables"] == {"Liabilities:Payables:LiSi": "-8.00 CNY, -20.00"}
+
+
+def test_a_loan_in_one_other_currency_is_listed_by_itself(make_ledger):
+    d = make_ledger(LOANS, txns={2026: txn(
+        "2026-09-03", "lent", "Assets:Receivables:Loans:Li  100.00 USD", BANK + "  -100.00 USD")})
+    s = summary(d / "main.beancount", None, date(2026, 10, 1))
+    assert (s["receivables"], s["payables"]) == ({"Assets:Receivables:Loans:Li": "100.00 USD"}, {})
+
+
 def test_previous_month_of_january_is_december(make_ledger):
     d = make_ledger(ACCTS, txns={
         2025: txn("2025-12-31", "lunch", "Expenses:Food  12.30 CNY", BANK),
@@ -118,11 +170,49 @@ def test_unsorted_counts_entries_that_still_need_the_user(make_ledger):
     assert "Expenses:Unsorted" not in s["expenses"]  # dated in August
 
 
-def test_currency_comes_from_config(ledger):
+def set_main(ledger, old, new):
+    main_file = ledger / "main.beancount"
+    text = main_file.read_text("utf-8")
+    assert old in text
+    main_file.write_text(text.replace(old, new), "utf-8", newline="\n")
+
+
+def set_config_currency(ledger, currency):
     config = ledger / "config.toml"
-    config.write_text(config.read_text("utf-8").replace('"CNY"', '"USD"'), "utf-8", newline="\n")
+    text = config.read_text("utf-8")
+    assert 'currency = "CNY"' in text
+    config.write_text(text.replace('currency = "CNY"', f'currency = "{currency}"'), "utf-8",
+                      newline="\n")
+
+
+OPTION = 'option "operating_currency" "CNY"'
+
+
+def test_currency_is_the_operating_currency_of_the_ledger(ledger):
+    set_main(ledger, OPTION, 'option "operating_currency" "USD"')  # config.toml still says CNY
     s = summary(ledger / "main.beancount", "2026-09", date(2026, 10, 2))
     assert (s["currency"], s["expenses"], s["expenses_total"]) == ("USD", {}, "0.00")
+    assert summary(ledger / "main.beancount", None, date(2026, 10, 2))["currency"] == "USD"
+
+
+def test_the_first_operating_currency_counts(ledger):
+    set_main(ledger, OPTION, 'option "operating_currency" "USD"' + chr(10) + OPTION)
+    assert summary(ledger / "main.beancount", None, date(2026, 10, 2))["currency"] == "USD"
+
+
+def test_currency_falls_back_to_config_without_the_option(ledger):
+    set_main(ledger, OPTION, "")
+    set_config_currency(ledger, "USD")
+    s = summary(ledger / "main.beancount", "2026-09", date(2026, 10, 2))
+    assert (s["currency"], s["expenses"], s["expenses_total"]) == ("USD", {}, "0.00")
+
+
+def test_the_option_does_not_need_config_toml(ledger):
+    (ledger / "config.toml").unlink()
+    assert summary(ledger / "main.beancount", None, date(2026, 10, 2))["currency"] == "CNY"
+    set_main(ledger, OPTION, "")
+    with pytest.raises(LedgerError, match="no config.toml"):
+        summary(ledger / "main.beancount", None, date(2026, 10, 2))
 
 
 @pytest.mark.parametrize("month", [
@@ -264,6 +354,23 @@ def test_open_balances_by_currency(make_ledger):
         "Assets:Receivables:Loans:Wang": Decimal("10.00")}
     with pytest.raises(LedgerError, match="several currencies"):
         open_balances(entries, prefixes, date(2026, 10, 1))
+
+
+def test_open_holdings(make_ledger):
+    d = make_ledger(LOANS, txns={2026: (
+        txn("2026-09-01", "lent", "Assets:Receivables:Loans:Wang  10.00 CNY", BANK)
+        + txn("2026-09-02", "lent", "Assets:Receivables:Loans:Wang  3.00 USD", BANK + "  -3.00 USD")
+        + txn("2026-09-03", "back", "Assets:Receivables:Loans:Wang  -10.00 CNY", BANK)
+        + txn("2026-09-04", "lent", "Assets:Receivables:Loans:Li  1.00 USD", BANK + "  -1.00 USD")
+    )})
+    entries = entries_of(d)
+    prefixes = ("Assets:Receivables:",)
+    assert open_holdings(entries, prefixes, date(2026, 10, 1)) == {
+        "Assets:Receivables:Loans:Li": {"USD": Decimal("1.00")},
+        "Assets:Receivables:Loans:Wang": {"USD": Decimal("3.00")}}  # the CNY is paid back
+    assert open_holdings(entries, prefixes, date(2026, 9, 2)) == {
+        "Assets:Receivables:Loans:Wang": {"CNY": Decimal("10.00")}}
+    assert open_holdings(entries, prefixes, date(2026, 9, 1)) == {}
 
 
 # command line

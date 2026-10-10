@@ -298,3 +298,13 @@ def test_an_unwritable_out_is_a_ledger_error(ledger, tmp_path):
     with pytest.raises(LedgerError, match="cannot write the chart"):
         chart("expenses", ledger / "main.beancount", date(2026, 9, 1), date(2026, 10, 1),
               tmp_path, None)  # a folder
+
+
+def test_chart_counts_the_operating_currency_of_the_ledger(ledger, tmp_path):
+    main_file = ledger / "main.beancount"
+    text = main_file.read_text("utf-8")
+    assert 'option "operating_currency" "CNY"' in text
+    main_file.write_text(text.replace('"operating_currency" "CNY"', '"operating_currency" "USD"'),
+                         "utf-8", newline="\n")  # config.toml still says CNY
+    with pytest.raises(LedgerError, match="nothing to chart"):
+        chart("expenses", main_file, date(2026, 9, 1), date(2026, 10, 1), tmp_path / "x.png", None)
