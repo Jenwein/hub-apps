@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
 from datetime import date
 from pathlib import Path
 
-from . import apply, book, chart, convert, match, report, table
+from . import apply, book, chart, convert, match, report, service, table
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
@@ -100,6 +101,17 @@ def run_chart(args: argparse.Namespace) -> None:
         args.kind, args.ledger_dir / "main.beancount", start, end, args.out, args.title))
 
 
+def run_fava_unit(args: argparse.Namespace) -> None:
+    # A relative path would start Fava from wherever the service manager runs it.
+    if not args.ledger.is_absolute():
+        raise LedgerError(f"--ledger must be an absolute path, got {args.ledger}")
+    port = args.port if args.port is not None else load_settings(args.ledger.parent).fava_port
+    fava = args.fava if args.fava is not None else shutil.which("fava")
+    if fava is None:
+        raise LedgerError("fava is not on PATH")
+    print(service.fava_unit(args.platform, fava, args.ledger, port), end="")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -163,6 +175,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the file to write (default: a new file in the temp folder)")
     p.add_argument("--title", help="the chart title (default: one in English)")
     p.set_defaults(func=run_chart)
+    p = sub.add_parser(
+        "fava-unit", help="print the service definition that keeps Fava running on the ledger")
+    p.add_argument("--platform", required=True, metavar="linux|macos",
+                   help="linux: a systemd user unit; macos: a launchd agent")
+    p.add_argument("--ledger", required=True, type=Path, metavar="ABS_PATH",
+                   help="the ledger's main.beancount, as an absolute path")
+    p.add_argument("--port", type=int, metavar="N",
+                   help="the port (default: [fava] port in the config.toml next to --ledger)")
+    p.add_argument("--fava", metavar="PATH",
+                   help="the fava executable (default: fava on PATH)")
+    p.set_defaults(func=run_fava_unit)
     return parser
 
 
