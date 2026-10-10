@@ -36,7 +36,11 @@
    transaction, appends them to the year's file and prints
    `{"written": <n>, "files": [...]}`. It refuses text it cannot parse and
    undoes a write that breaks the ledger check; read the `lk:` message, fix
-   the entry, and run it again.
+   the entry, and run it again. If the message is
+   `Balance failed for '<account>'`, the entry falls before an earlier
+   balance check of that account: never change an amount to satisfy it;
+   settle it with the user as in [import.md](import.md), "When a balance check
+   fails".
 4. Reply with the entry as written, then commit (SKILL.md, "Writing to the
    ledger").
 
@@ -49,7 +53,8 @@ purchase, so record those in chat too, even when a bill will show the payment.
 "Make that 45": find the entry (usually the one you just wrote; else search
 `ledger/txns/` for the date and payee), edit it in place, run
 `bean-check ledger/main.beancount`, reply with the entry as it is now, and
-commit. To delete an entry, remove its lines. Keep its `orderId`, `via` and
+commit. If bean-check reports `Balance failed`, undo the edit and settle it
+with the user as in [import.md](import.md), "When a balance check fails". To delete an entry, remove its lines. Keep its `orderId`, `via` and
 `bill` metadata as they are: they stop the next import from booking the
 payment again.
 

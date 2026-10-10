@@ -10,9 +10,10 @@ bank line paid through a platform is then recognised as the same payment. When
 several bills arrive at once, take the platform bills first, one bill at a
 time.
 
-An inbox folder whose `plan.json` still has `"applied": false` is an import
-that was not finished. Pick it up when the user comes back to it: match again
-first, since the ledger may have changed.
+An inbox folder with a `staged.beancount` and no applied plan (no `plan.json`,
+or one with `"applied": false`) is an import that was not finished. Pick it up
+when the user comes back to it: match again first, since the ledger may have
+changed.
 
 ## 1. Receive
 
@@ -66,8 +67,9 @@ added):
    2026-10-01 balance Assets:Bank:NBCB:5678   1234.56 CNY
    ```
 
-3. Show the user the count, the totals out and in, and the date range; check
-   them against the statement's own totals. Match only when they agree.
+3. Check the count, the totals out and in, and the date range against the
+   statement's own totals. Match only when they agree. The user confirms
+   these entries before they are applied (step 6, "Confirm first").
 
 ## 3. Match
 
@@ -187,6 +189,21 @@ two plans for one staged file: apply does not match again. After any change to
 the staged file, the rules or the ledger, match again and use the new plan; its
 ids may have changed, so carry your answers over by entry, not by id.
 
+**Confirm first.** Wait for the user's yes before applying when:
+
+- you wrote the staged entries yourself (the `lk table` path): the amounts are
+  yours, not a converter's;
+- this is the first import from this source: its name is not among the
+  sources the ledger already has, listed by
+  `bean-query ledger/main.beancount "SELECT DISTINCT entry_meta('via') AS via"`.
+
+Show the user the count, the totals out and in, the date range, and the match's
+new, duplicate, fix and uncertain counts, and ask them to check these against
+the bill. Apply only after they say yes. If they do not answer in this session,
+delete `plan.json`; next time, match again and ask again.
+
+Then apply:
+
 ```
 uv run apps/ledger/scripts/lk.py apply --ledger-dir ledger \
   --plan ledger/inbox/<folder>/plan.json --decide s4=skip --decide s9=new \
@@ -209,10 +226,13 @@ uv run apps/ledger/scripts/lk.py apply --ledger-dir ledger \
   new plan.
 - `lk: plan already applied`: it is in the ledger; do not apply it again. The
   same holds for an error that says the entries are in the ledger.
-- A `balance` that fails stops the whole apply (`ledger check failed`): the
-  ledger and the statement disagree. Look for the missing or extra entry with
-  the user. To import the rows meanwhile, delete the `balance` line from the
-  staged file and match again.
+- `lk: ledger check failed: Balance failed for ...` stops the whole apply.
+  If the failing check is the statement's own closing balance, the ledger and
+  the statement disagree: look for the missing or extra entry with the user.
+  Only if the user agrees to import the rows without that check, delete the
+  `balance` line from the staged file and match again, and tell them this
+  statement's balance is not checked. If the failing check is one already in
+  the ledger, see "When a balance check fails" below.
 
 Then delete the inbox folder, commit (`ledger: import <source> <period>`), and
 tell the user: how many new entries, duplicates skipped, chat entries fixed,
@@ -239,13 +259,30 @@ its purchase when both are in the bill.
   bean-query ledger/main.beancount "SELECT account, sum(position) WHERE account ~ '^(Assets:(Alipay|WeChat|Cash)|Liabilities:(Alipay|JD|Meituan))' GROUP BY account"
   ```
 
-  - A difference on Yu'E Bao (`Assets:Alipay:YuEBao`) or LingQianTong
-    (`Assets:WeChat:LingQianTong`) is interest: `lk add` an entry dated today,
+  - Yu'E Bao (`Assets:Alipay:YuEBao`) or LingQianTong
+    (`Assets:WeChat:LingQianTong`) holding more than the ledger shows: the
+    gain is interest. `lk add` an entry dated today,
     `<account> X CNY` / `Income:Interest -X CNY`.
-  - Any other difference: look into it with the user before going on.
+  - Any other difference, including less on Yu'E Bao or LingQianTong than
+    the ledger shows: look into it with the user before going on. Never book
+    negative interest.
   - Then `lk add` one `balance` directive per account, dated tomorrow. A
     liability's balance is negative: owing 300 on Huabei is
     `<tomorrow> balance Liabilities:Alipay:Huabei  -300.00 CNY`.
+
+### When a balance check fails
+
+A `balance` directive checks the account at the start of its day. An entry
+added later and dated before that day (a late bill, a payment the user
+remembers afterwards; for a month-end check dated tomorrow, any entry dated
+today or earlier) breaks it: `lk add` or `lk apply` fails with
+`ledger check failed: Balance failed for '<account>'` and writes nothing.
+
+Never change an amount to satisfy a check. Tell the user the entry falls
+before an earlier balance check of that account, and settle it with them:
+move the entry's date only if they say the date was wrong; correct the
+`balance` directive only if they confirm the real balance was different; if
+the entry turns out to be a payment the ledger already has, skip it.
 
 ## Month end
 
