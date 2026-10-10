@@ -69,6 +69,7 @@ from .book import (
 from .settings import LedgerError, Settings, source
 
 EQUITY = "Equity:"
+FLOW_ROOTS = ("Expenses:", "Income:")
 KINDS = ("new", "duplicate", "fix", "uncertain")
 FLAGS = ("unsorted", "unmapped", "investment")
 # The staged keys a fix copies onto the hand entry; `via` goes there as `bill`.
@@ -236,6 +237,26 @@ def _chat_pair(
     return None
 
 
+def _shape(txn: Transaction) -> str:
+    """What an entry does with the money: "transfer", "flow" or "unknown".
+
+    A transfer only moves money between the user's own accounts (receivables and payables count),
+    none of them a placeholder. A flow has an `Expenses:` or `Income:` posting, placeholders
+    included. Anything else, such as a receipt booked against `Assets:Unmapped`, is unknown.
+    """
+    if any(p.account.startswith(FLOW_ROOTS) for p in txn.postings):
+        return "flow"
+    if is_transfer(txn) and not any(p.account in PLACEHOLDERS for p in txn.postings):
+        return "transfer"
+    return "unknown"
+
+
+def _same_kind(entry: Transaction, staged: Transaction) -> bool:
+    """Both are transfers or both are flows: a fix never turns one into the other."""
+    shape = _shape(entry)
+    return shape != "unknown" and shape == _shape(staged)
+
+
 def _near_amount(entry: Transaction, staged: Transaction) -> bool:
     """A signed funding amount within max(2, 10 % of the staged one) of S's, on any account."""
     for number, currency in _funding_amounts(entry):
@@ -392,7 +413,7 @@ class _Matcher:
             txn = self.batch[n]
             pairs = {}
             for i in self.near(txn):
-                if _is_open_hand(self.ledger[i]):
+                if _is_open_hand(self.ledger[i]) and _same_kind(self.ledger[i], txn):
                     pair = _chat_pair(self.ledger[i], txn, self.settings, self.bank[n])
                     if pair:
                         pairs[i] = pair

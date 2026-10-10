@@ -545,14 +545,9 @@ def test_fix_never_books_an_account_twice():
     # The channel's account is the card: the card side of the top-up pays the meal, but moving it
     # to Assets:Alipay:Balance would put that account on the entry twice.
     assert kinds(run_match(TOPUP_CHAT, ALIPAY_MEAL)) == [("uncertain", "possible-chat")]
-    # The loan's own transfer in the bill, paid from 零钱, is the loan: fixed, its postings kept.
-    transfer = (
-        '2026-09-06 * "张三" "转账"\n  via: "wechat"\n  orderId: "W31"\n'
-        "  Expenses:Unsorted  500.00 CNY\n  Assets:WeChat:Change  -500.00 CNY\n"
-    )
-    [item] = run_with(WALLETS, LOAN_CHAT, transfer)
-    assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
-        "fix", "Assets:WeChat:Change", "Assets:WeChat:Change")
+    # The same with a transfer in the bill: a move from 余额 to 余额宝.
+    to_yuebao = ALIPAY_MEAL.replace("Expenses:Food", "Assets:Alipay:YuEBao")
+    assert kinds(run_match(TOPUP_CHAT, to_yuebao)) == [("uncertain", "possible-chat")]
 
 
 # Final review: entries added in Fava or by hand count as chat entries (I3).
@@ -675,3 +670,55 @@ def test_platform_row_fixes_only_an_entry_that_names_it():
     [item] = run_match(CHAT_LUNCH.replace(CARD, "Assets:WeChat:Change"), WX_LUNCH)
     assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
         "fix", "Assets:WeChat:Change", "Assets:WeChat:Change")
+
+
+LOAN_TRANSFER = (  # the loan's own transfer in the WeChat bill, paid from 零钱
+    '2026-09-06 * "张三" "转账"\n  via: "wechat"\n  orderId: "W31"\n'
+    "  Expenses:Unsorted  500.00 CNY\n  Assets:WeChat:Change  -500.00 CNY\n"
+)
+
+
+def test_transfer_and_payment_are_never_fixed_silently():
+    # Uncategorised, the bill's transfer to 张三 looks like spending: ask.
+    [item] = run_with(WALLETS, LOAN_CHAT, LOAN_TRANSFER)
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+    assert '"lent Zhang San"' in item.existing[0]["text"]
+    # Booked to the loan, the row is a transfer too: fixed, the entry's postings kept.
+    to_loan = LOAN_TRANSFER.replace("Expenses:Unsorted", "Assets:Receivables:Loans:ZhangSan")
+    [item] = run_with(WALLETS, LOAN_CHAT, to_loan)
+    assert (item.kind, item.fix["account_to"]) == ("fix", item.fix["account_from"])
+
+
+@pytest.mark.parametrize("meta", [
+    "", '  via: "chat"\n', '  via: "chat"\n  channel: "alipay"\n',
+], ids=["fava", "chat", "chat-channel"])
+def test_loan_never_absorbs_another_payment(meta):
+    loan = (
+        f'2026-10-06 * "张三" "lent"\n{meta}'
+        f"  Assets:Receivables:Loans:ZhangSan  500.00 CNY\n  {CARD}  -500.00 CNY\n"
+    )
+    [item] = run_match(loan, HEADPHONES.replace("200.00", "500.00"))
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+    assert '"lent"' in item.existing[0]["text"]
+
+
+PAID_BACK = (  # "Zhang San paid back 20 via Alipay"
+    '2026-09-06 * "张三" "paid back"\n  via: "chat"\n  channel: "alipay"\n'
+    "  Assets:Alipay:Balance  20.00 CNY\n  Assets:Receivables:Loans:ZhangSan  -20.00 CNY\n"
+)
+UNPLACED_RECEIPT = (  # money in; the converter could not tell what it is
+    '2026-09-06 * "张三" "收款"\n  via: "alipay"\n  orderId: "A7"\n'
+    "  Assets:Alipay:Balance  20.00 CNY\n  Assets:Unmapped  -20.00 CNY\n"
+)
+
+
+def test_receipt_of_unknown_kind_is_never_fixed_silently():
+    [item] = run_with(WALLETS, PAID_BACK, UNPLACED_RECEIPT)
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
+    # Nor does an entry of unknown kind, even against one of the same kind.
+    unplaced = PAID_BACK.replace("Assets:Receivables:Loans:ZhangSan", "Assets:Unmapped")
+    assert kinds(run_with(WALLETS, unplaced, UNPLACED_RECEIPT)) == [
+        ("uncertain", "possible-duplicate")]
+    # Placed as the loan paid back, it is a transfer like the entry: fixed.
+    placed = UNPLACED_RECEIPT.replace("Assets:Unmapped", "Assets:Receivables:Loans:ZhangSan")
+    assert kinds(run_with(WALLETS, PAID_BACK, placed)) == [("fix", "chat")]
