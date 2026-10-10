@@ -10,7 +10,9 @@ downloads Python packages and can take a minute.
 Every change under `ledger/` follows the write rules in
 `apps/ledger/skills/ledger/SKILL.md` ("Writing to the ledger"): it ends with
 `bean-check ledger/main.beancount`, which must pass, and a commit of `ledger/`
-only: `git add -- ledger && git commit -m "ledger: <what>" -- ledger`.
+only: `git add -- ledger && git commit -m "ledger: <what>" -- ledger`. Commit
+only when `git status --porcelain -- ledger` lists something: on a re-run there
+can be nothing to commit, and `git commit` then fails.
 
 ## 1. Settings
 
@@ -42,6 +44,8 @@ Ask in a few short messages, not one long form. Never guess an answer.
   for each of WeChat and Alipay (and Meituan and JD if they use them), the
   account that "paid with WeChat" usually means. `Assets:WeChat:Change` and
   `Assets:Alipay:Balance` are the usual answers.
+- **Phone.** Whether they want to open Fava on their phone, which needs
+  Tailscale on this machine and on the phone (step 3).
 
 Then write, in this order. Skip whatever is already there.
 
@@ -98,12 +102,14 @@ Then write, in this order. Skip whatever is already there.
    in `ledger/main.beancount`; beancount, Fava and `lk summary` read it.
 5. **config.toml.** Keep its comments and other keys. Set `[ledger] currency`,
    `[chat] default`, a line per channel under `[chat.channels]`
-   (`wechat = "Assets:WeChat:Change"`), and `[import] sources`. Every account
-   named there must be open. Set `[ledger] start` last: it marks this step as
-   done.
-6. Run `bean-check ledger/main.beancount`, fix what it reports, commit
-   (`ledger: set up the books`), and tell the user what you opened, the opening
-   balances and the sources.
+   (`wechat = "Assets:WeChat:Change"`), `[import] sources`, and
+   `[fava] tailscale` (`true` or `false`, their answer about the phone). Every
+   account named there must be open. Do not set `start` yet.
+6. Run `bean-check ledger/main.beancount` and fix what it reports until it
+   passes.
+7. Set `[ledger] start` last. It marks this step as done, so an interrupted run
+   starts this step again. Commit (`ledger: set up the books`) and tell the user
+   what you opened, the opening balances and the sources.
 
 ## 2. Fava
 
@@ -128,8 +134,10 @@ manager, as in a container or WSL without systemd), do what Windows does below.
    `systemctl --user restart cc-hub-ledger-fava`.
 4. If `loginctl show-user "$USER" -p Linger` does not print `Linger=yes`, Fava
    stops when the user logs out. With their OK, try `loginctl enable-linger`.
-   If it needs root, tell the user to run `sudo loginctl enable-linger $USER`
-   and note it as left for the user (step 4).
+   If it needs root, tell the user to run `sudo loginctl enable-linger $USER`.
+   If they decline, or it cannot be done, tell them that Fava stops when they
+   log out and starts again when they log in, and that they can run the command
+   later. Then carry on: this does not hold up the setup.
 
 **macOS.**
 
@@ -160,23 +168,21 @@ login and the server's address as they reach it from outside).
 
 ## 3. Tailscale (optional)
 
-Fava on a phone goes through Tailscale: `tailscale serve` shows Fava to the
-user's own tailnet over HTTPS, nothing public. Do this step when step 1 ran in
-this session, when `[fava] tailscale` is `true` (finish it without asking), or
-when the user later asks for Fava on their phone. Otherwise skip it.
+Skip this step unless `[fava] tailscale` in `ledger/config.toml` is `true`, the
+answer recorded in step 1. If the user later asks for Fava on their phone, set
+it to `true`, commit, and do this step.
 
-1. Unless `[fava] tailscale` is already `true`, ask whether they want Fava on
-   their phone, which needs Tailscale on this machine and on the phone. Record
-   the answer as `[fava] tailscale` (`true` or `false`) in `ledger/config.toml`,
-   commit (`ledger: record the Tailscale choice`), and stop here if `false`.
-2. If `command -v tailscale` finds nothing, or `tailscale status` says it is
+Fava on a phone goes through Tailscale: `tailscale serve` shows Fava to the
+user's own tailnet over HTTPS, nothing public.
+
+1. If `command -v tailscale` finds nothing, or `tailscale status` says it is
    stopped or logged out, you cannot fix it: it needs root and the user's
    login. Give the user the steps: install
    (`curl -fsSL https://tailscale.com/install.sh | sh`, other systems at
    https://tailscale.com/download), then `sudo tailscale up`, which prints a
    login link. Note it as left for the user (step 4) and skip the rest of this
    step.
-3. Run `tailscale serve status`. If it already proxies `/` to
+2. Run `tailscale serve status`. If it already proxies `/` to
    `http://127.0.0.1:<port>`, this step is done. If it serves something else on
    https port 443, ask the user before replacing it. Otherwise run
    `tailscale serve --bg <port>`.
@@ -184,7 +190,7 @@ when the user later asks for Fava on their phone. Otherwise skip it.
      once. A message with a link to enable Serve or HTTPS for the tailnet means
      the user must open that link. Give the user either, note it as left (step
      4) and skip the rest of this step.
-4. Tell the user the address from `tailscale serve status` (it looks like
+3. Tell the user the address from `tailscale serve status` (it looks like
    `https://<machine>.<tailnet>.ts.net`), and that the phone needs Tailscale
    installed and logged in to the same account. Never use `tailscale funnel`:
    it publishes to the internet. On Windows Fava answers only while you have
@@ -192,12 +198,13 @@ when the user later asks for Fava on their phone. Otherwise skip it.
 
 ## 4. What is left for the user
 
-If step 2 or 3 left something only the user can do, tell them the exact
-commands, run
+If step 3 left something only the user can do (installing Tailscale, logging in,
+enabling Serve), tell them the exact commands, run
 `cc-hub app setup-state ledger waiting --note "<what is left>"`
-(for example `--note "run sudo loginctl enable-linger <user>"`), and stop: do not
-register the scheduled tasks or mark the app done. When the user says it is
-done, run this file again from the top; finished steps are skipped.
+(for example `--note "install Tailscale and run sudo tailscale up"`), and stop:
+do not register the scheduled tasks or mark the app done. When the user says it
+is done, run this file again from the top; finished steps are skipped. Linger
+(step 2) is not one of these: it never holds the setup up.
 
 When nothing is left, the scheduled tasks and the rest are the `hub-apps`
 skill's job.

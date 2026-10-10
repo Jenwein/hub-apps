@@ -73,3 +73,33 @@ def test_readme_shows_the_install_commands():
     assert "cc-hub tap add Jenwein/hub-apps" in text
     assert "cc-hub app install hub-apps/ledger" in text
     assert "HTTPS_PROXY" in text and "MIT" in text
+
+
+def test_cron_bodies_survive_a_shell():
+    # The hub-apps skill registers a task with `cc-connect cron add ... --prompt "<body>"`.
+    # Inside double quotes a shell would run a backtick or $( ) and eat quotes and backslashes.
+    forbidden = set("`$\"'\\")
+    for name in ("prices", "monthly"):
+        body = parse_frontmatter(APP / f"cron/{name}.md")[1]
+        assert not forbidden & set(body), f"{name}.md: {sorted(forbidden & set(body))}"
+
+
+def _setup_sections() -> dict[str, str]:
+    text = (APP / "SETUP.md").read_text("utf-8")
+    parts = re.split(r"^## ", text, flags=re.MULTILINE)[1:]
+    return {part.split("\n", 1)[0]: part for part in parts}
+
+
+def test_setup_asks_about_tailscale_in_step_1_and_step_3_only_acts():
+    sections = _setup_sections()
+    settings = next(v for k, v in sections.items() if k.startswith("1."))
+    tailscale = next(v for k, v in sections.items() if k.startswith("3."))
+    assert "[fava] tailscale" in settings
+    assert "Ask " not in tailscale and "ask whether" not in tailscale.lower()
+
+
+def test_setup_does_not_wait_for_linger():
+    sections = _setup_sections()
+    fava = next(v for k, v in sections.items() if k.startswith("2."))
+    left = next(v for k, v in sections.items() if k.startswith("4."))
+    assert "enable-linger" in fava and "enable-linger" not in left

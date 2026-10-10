@@ -94,9 +94,9 @@ Use your own proxy address. The app does not set up a proxy itself.
 
 After the install, say "set up the ledger app". The agent asks for your main
 currency, the day the books start with the balance of each account that day,
-your bank cards, the bill sources you export, and which account a "paid with
-WeChat" entry should use. It then starts Fava and asks whether you want it on
-your phone.
+your bank cards, the bill sources you export, which account a "paid with
+WeChat" entry should use, and whether you want Fava on your phone. It then
+starts Fava.
 
 **Day to day, record when you like; nothing is required.** What you pay with
 Alipay, WeChat or a bank card is filled in when you import the bills, so not
