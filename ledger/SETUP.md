@@ -120,6 +120,22 @@ anything that is neither Linux nor macOS is Windows below. Before you create or
 change the service, tell the user what it is (a background service of their
 account that listens on this machine only) and get their OK.
 
+**Port.** Before you write or enable the service (Linux with systemd, macOS),
+make sure nothing else holds the port. With `<port>` the `[fava] port`, run
+
+```
+curl -s -o /dev/null --noproxy '*' --connect-timeout 3 http://127.0.0.1:<port>/; echo $?
+```
+
+- `7` (refused) or `28` (no answer within 3 seconds): nothing listens there.
+  Keep the port.
+- Any other number: something listens there. If it is this ledger's Fava (the
+  Check below prints a number above 0), keep the port. Otherwise run the same
+  command for 5000, 5001, 5002, … and take the first port that prints `7` or
+  `28`. Set `[fava] port` in `ledger/config.toml` to it, commit
+  (`ledger: Fava on port <port>`), and tell the user that Fava will be at
+  `http://127.0.0.1:<port>` on this machine.
+
 **Linux.** If `systemctl --user show-environment` fails (no systemd user
 manager, as in a container or WSL without systemd), do what Windows does below.
 
@@ -161,8 +177,8 @@ prints a number above 0. A status code alone proves nothing: another program
 that holds the port answers too, while Fava fails to start. If it prints 0,
 read `journalctl --user -u cc-hub-ledger-fava -n 30` (Linux) or run
 `launchctl print gui/$(id -u)/io.cc-hub.ledger.fava` (macOS) and fix it. When
-the port is taken (the log says `port <port> is already in use`), change
-`[fava] port`, commit, and repeat this step.
+the port is taken (the log says `port <port> is already in use`), pick a free
+port as **Port** above says, commit, and repeat this step.
 
 When you created or changed the service, or on Windows, tell the user how to
 open Fava on a computer: `ssh -L <port>:localhost:<port> <user>@<server>`, then
