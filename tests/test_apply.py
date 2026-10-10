@@ -292,6 +292,39 @@ def test_stale_plan_with_another_entry_on_the_same_day(prepare):
     assert snapshot(d) == before
 
 
+@pytest.mark.parametrize("stand_in", [
+    CHAT_LUNCH.replace("35.00", "12.00"),
+    CHAT_LUNCH.replace("Expenses:Food", "Expenses:Other"),
+    CHAT_LUNCH.replace("  Expenses:Food  35.00 CNY\n",
+                       "  Expenses:Food  25.00 CNY\n  Expenses:Other  10.00 CNY\n"),
+    CHAT_LUNCH.replace("  Expenses:Food  35.00 CNY\n", "  Expenses:Food  35.00 USD\n"),
+], ids=["other-amount", "other-account", "extra-posting", "other-currency"])
+def test_stale_plan_with_a_look_alike_entry_at_the_line(prepare, stand_in):
+    # The same day, the same narration and the same funding account: only the postings differ.
+    # This is what a second plan finds once the first apply has inserted lines above its entry.
+    d, plan = prepare(WX_FOOD, existing=CHAT_LUNCH)
+    path = d / "txns" / "2026.beancount"
+    path.write_text(stand_in + "\n" + CHAT_LUNCH, "utf-8", newline="\n")
+    before = snapshot(d)
+    with pytest.raises(LedgerError, match="run match again"):
+        apply_plan(plan, d, {})
+    assert snapshot(d) == before and read_plan(plan)["applied"] is False
+
+
+@pytest.mark.parametrize("food", [
+    "  Expenses:Food\n",
+    "  Expenses:Food  35.0 CNY\n",
+    "  Expenses:Food  (30 + 5) CNY\n",
+], ids=["elided", "other-spelling", "expression"])
+def test_fix_accepts_the_same_postings_written_another_way(prepare, food):
+    chat = CHAT_LUNCH.replace("  Expenses:Food  35.00 CNY\n", food)
+    d, plan = prepare(WX_FOOD, existing=chat)
+    assert apply_plan(plan, d, {})["fixed"] == 1
+    txn = only_transaction(d)
+    assert {p.account for p in txn.postings} == {"Expenses:Food", "Assets:WeChat:Change"}
+    assert txn.meta["orderId"] == "W1"
+
+
 def test_stale_plan_checks_every_fix_before_writing(prepare):
     d, plan = prepare(WX_FOOD + WX_DINNER, existing=CHAT_LUNCH + "\n" + CHAT_DINNER)
     path = d / "txns" / "2026.beancount"

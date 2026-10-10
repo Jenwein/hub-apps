@@ -14,9 +14,11 @@ import re
 import shutil
 from collections import defaultdict
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
-from beancount.core.data import Balance, Close, Open, Transaction
+from beancount.core.amount import Amount
+from beancount.core.data import Balance, Close, Open, Posting, Transaction
 
 from .book import (
     UNMAPPED,
@@ -128,15 +130,50 @@ def _heading(txn: Transaction) -> tuple[date, str, str]:
     return txn.date, txn.payee or "", txn.narration or ""
 
 
+def _stated(posting: Posting) -> tuple[Decimal, str | None] | None:
+    """The amount a posting states: (number, currency), the currency None when it is elided."""
+    units = posting.units
+    if isinstance(units, Amount) and isinstance(units.number, Decimal):
+        return units.number, units.currency if isinstance(units.currency, str) else None
+    return None
+
+
+def _same_postings(txn: Transaction, expected: Transaction) -> bool:
+    """The same accounts in the same order, and the same amounts wherever the file states one.
+
+    The plan holds the entry as beancount loaded it, with elided amounts filled in; an amount the
+    file leaves out for beancount to work out is not a difference.
+    """
+    if [p.account for p in txn.postings] != [p.account for p in expected.postings]:
+        return False
+    for ours, theirs in zip(txn.postings, expected.postings, strict=True):
+        found = _stated(ours)
+        if found is None:
+            continue
+        planned = _stated(theirs)
+        if planned is None or found[0] != planned[0]:
+            return False
+        if found[1] is not None and planned[1] is not None and found[1] != planned[1]:
+            return False
+    return True
+
+
 def _check_entry(lines: list[str], start: int, end: int, expected: Transaction) -> None:
-    """The lines [start, end) must be the entry the plan saw: same date, payee and narration."""
+    """The lines [start, end) must be the entry the plan saw.
+
+    Same date, payee, narration and postings: a line number alone can point at another entry of
+    the same day once the file has changed (a hand edit, or another plan applied first).
+    """
     if not lines[start].startswith(expected.date.isoformat()):
         raise LedgerError(STALE)
     try:
         [txn] = parse_text("\n".join(line.rstrip("\r") for line in lines[start:end]) + "\n")
     except (LedgerError, ValueError):
         raise LedgerError(STALE) from None
-    if not isinstance(txn, Transaction) or _heading(txn) != _heading(expected):
+    if (
+        not isinstance(txn, Transaction) or _heading(txn) != _heading(expected)
+        or not _same_postings(txn, expected)
+    ):
         raise LedgerError(STALE)
 
 
