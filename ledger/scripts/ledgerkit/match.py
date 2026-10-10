@@ -16,17 +16,18 @@ each staged entry S the first rule that applies wins:
    gets S's order id; several at the same distance make S uncertain.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
-   first, then bank lines claim candidates that are transfers; each time nearest first, then in
-   batch and file order. A claim makes S a duplicate. After that, a staged entry that still has
-   unclaimed candidates is uncertain and lists only those: a platform row is never a bank's echo,
-   and another bank line may be a payment of its own.
+   first, then bank lines claim candidates that are transfers when no other candidate is as near;
+   each time nearest first, then in batch and file order. A claim makes S a duplicate. After that,
+   a staged entry that still has unclaimed candidates is uncertain and lists only those: a platform
+   row is never a bank's echo, and another bank line may be a payment of its own.
 4. A bank line that names a payment channel and matched nothing is uncertain.
 5. An open chat entry in the window whose signed funding amount is within max(2, 10 %) of S's, on
    any account, makes S uncertain.
 6. Otherwise S is new.
 
-S's placeholder funding postings stand in for its funding account in rules 2 and 5 only when it
-has no other: a receipt's `Assets:Unmapped` is the payer, not an account of the user's.
+A staged entry's placeholder funding postings stand in for its funding account (rules 1, 2 and 5)
+only when it has no other: a receipt's or refund's `Assets:Unmapped` is the payer, not an account
+of the user's.
 """
 
 from __future__ import annotations
@@ -133,13 +134,10 @@ def _staged_funding(staged: Transaction) -> list[Posting]:
     return [p for p in postings if p.account not in PLACEHOLDERS] or postings
 
 
-def _same_payment(entry: Transaction, staged: Transaction) -> bool:
-    """A funding posting with the same signed amount in each: the same money moving the same way.
-
-    Placeholder postings count: `Assets:Unmapped` stands for the account the user filled in later.
-    """
-    theirs = set(_funding_amounts(staged))
-    return any(amount in theirs for amount in _funding_amounts(entry))
+def _payments(txn: Transaction, staged: bool) -> set[tuple[Decimal, str]]:
+    """The signed funding amounts of an entry; of a staged one, those of `_staged_funding`."""
+    postings = _staged_funding(txn) if staged else funding_postings(txn)
+    return {units for p in postings if (units := _units(p)) is not None}
 
 
 def _same_row(entry: Transaction, staged: Transaction) -> bool:
@@ -300,11 +298,14 @@ class _Matcher:
             key = _order_key(txn.meta["via"], txn)
             if key is None:
                 continue
+            # The same order also needs the same money moving the same way: a refund can carry its
+            # purchase's order id.
+            ours = _payments(txn, staged=True)
             unused = [i for i in by_order[key] if i not in self.used]
-            same = [i for i in unused if _same_payment(self.ledger[i], txn)]
+            same = [i for i in unused if ours & _payments(self.ledger[i], staged=False)]
             if same:
                 self.take(n, same[0], "duplicate", "order-id")
-            elif any(_same_payment(earlier, txn) for earlier in seen[key]):
+            elif any(ours & _payments(earlier, staged=True) for earlier in seen[key]):
                 # Twice in this batch; the first one is decided on its own.
                 self.decided[n] = "duplicate", "order-id", [], None
             elif unused or seen[key]:
@@ -340,7 +341,8 @@ class _Matcher:
     def claims(self) -> None:
         """Rule 3 for bank lines: channel lines claim candidates, then lines claim transfers.
 
-        Each round goes over the whole batch nearest first, then in batch and file order.
+        Each round goes over the whole batch nearest first, then in batch and file order. A line
+        claims a transfer only when it has no other candidate as near as that transfer.
         """
         for reason in ("channel", "transfer"):
             pairs = []
@@ -348,10 +350,16 @@ class _Matcher:
                 if not self.bank[n] or (reason == "channel" and not self.channel[n]):
                     continue
                 txn = self.batch[n]
-                for i in self.candidates(txn):
-                    if reason == "channel" or is_transfer(self.ledger[i]):
-                        where = _location(self.ledger[i])
-                        pairs.append((_days(self.ledger[i], txn), n, where, i))
+                found = self.candidates(txn)
+                # A transfer is claimed only when no other candidate is as near.
+                others = [_days(self.ledger[i], txn) for i in found
+                          if not is_transfer(self.ledger[i])]
+                limit = min(others, default=None)
+                for i in found:
+                    days = _days(self.ledger[i], txn)
+                    if reason == "channel" or (
+                            is_transfer(self.ledger[i]) and (limit is None or days < limit)):
+                        pairs.append((days, n, _location(self.ledger[i]), i))
             for _days_apart, n, _where, i in sorted(pairs):
                 if n not in self.decided and i not in self.used:
                     self.take(n, i, "duplicate", reason)

@@ -406,13 +406,27 @@ def test_row_whose_candidate_was_claimed_is_new():
     assert_no_claimed_entry_listed_again(items)
 
 
-def test_transfer_row_claims_a_farther_transfer():
-    # The nearest candidate is a refund to the card, no transfer; the transfer two days on is.
-    refund = (
-        '2026-09-11 * "某店" "退款"\n  via: "alipay"\n  orderId: "A8"\n'
-        "  Liabilities:CreditCard:ICBC:5678  1000.00 CNY\n  Expenses:Shopping  -1000.00 CNY\n"
-    )
-    items = run_match(refund + CC_PAY.replace("2026-09-10", "2026-09-13"), CC_SIDE)
+CARD_REFUND = (  # shares the card posting with CC_SIDE (09-11), but is no transfer
+    '2026-09-11 * "某店" "退款"\n  via: "alipay"\n  orderId: "A8"\n'
+    "  Liabilities:CreditCard:ICBC:5678  1000.00 CNY\n  Expenses:Shopping  -1000.00 CNY\n"
+)
+
+
+def test_transfer_row_with_a_nearer_other_candidate_is_uncertain():
+    items = run_match(CARD_REFUND + CC_PAY.replace("2026-09-10", "2026-09-13"), CC_SIDE)
+    assert kinds(items) == [("uncertain", "possible-duplicate")]
+    assert ['"退款"' in e["text"] for e in items[0].existing] == [True]
+
+
+def test_transfer_row_with_an_equally_near_other_candidate_is_uncertain():
+    items = run_match(CARD_REFUND + CC_PAY.replace("2026-09-10", "2026-09-11"), CC_SIDE)
+    assert kinds(items) == [("uncertain", "possible-duplicate")]
+    assert len(items[0].existing) == 2
+
+
+def test_transfer_row_claims_its_nearest_transfer():
+    refund = CARD_REFUND.replace("2026-09-11", "2026-09-13")
+    items = run_match(refund + CC_PAY.replace("2026-09-10", "2026-09-11"), CC_SIDE)
     assert kinds(items) == [("duplicate", "transfer")]
     assert '"工行信用卡" "还款"' in items[0].existing[0]["text"]
 
@@ -426,3 +440,46 @@ def test_receipt_never_matches_a_chat_expense():
     assert kinds(run_match(TAXI_CHAT, receipt)) == [("new", "new")]
     near = receipt.replace("20.00", "19.80")
     assert kinds(run_match(TAXI_CHAT, near)) == [("new", "new")]
+
+
+# Fix round 3.
+
+# A refund as the converter writes it: the money comes back to the payment method and the other
+# side is Assets:Unmapped, whose -X looks like the purchase's payment.
+JD_REFUND_CONVERTED = (
+    '2026-09-05 * "京东" "退款-卫衣"\n  via: "jd"\n  orderId: "J1"\n'
+    "  Liabilities:CreditCard:BOC:1875  131.77 CNY\n  Assets:Unmapped  -131.77 CNY\n"
+)
+ALIPAY_SHIRT = (
+    '2026-09-03 * "某店" "衬衫"\n  via: "alipay"\n  orderId: "A20"\n'
+    "  Expenses:Shopping  50.00 CNY\n  Assets:Alipay:Balance  -50.00 CNY\n"
+)
+ALIPAY_SHIRT_REFUND = (
+    '2026-09-05 * "某店" "退款-衬衫"\n  via: "alipay"\n  orderId: "A20"\n'
+    "  Assets:Alipay:Balance  50.00 CNY\n  Assets:Unmapped  -50.00 CNY\n"
+)
+
+
+def test_full_refund_in_the_converter_shape_is_not_its_purchase():
+    mismatch = [("uncertain", "order-id-mismatch")]
+    assert kinds(run_match(JD_BUY, JD_REFUND_CONVERTED)) == mismatch
+    assert kinds(run_match("", JD_BUY + JD_REFUND_CONVERTED)) == [("new", "new"), *mismatch]
+    assert kinds(run_match(ALIPAY_SHIRT, ALIPAY_SHIRT_REFUND)) == mismatch
+    assert kinds(run_match("", ALIPAY_SHIRT + ALIPAY_SHIRT_REFUND)) == [("new", "new"), *mismatch]
+    # Same day, the refund first in the file (bills list the newest row first).
+    same_day = JD_REFUND_CONVERTED.replace("2026-09-05", "2026-09-03")
+    assert kinds(run_match("", same_day + JD_BUY)) == [("new", "new"), *mismatch]
+    # A purchase whose payment method the converter did not know still meets its ledger copy.
+    unknown = JD_BUY.replace("Liabilities:CreditCard:BOC:1875", "Assets:Unmapped")
+    assert kinds(run_match(JD_BUY, unknown)) == [("duplicate", "order-id")]
+
+
+def test_refund_in_the_converter_shape_reimported_is_a_duplicate():
+    # In the ledger the user has put the refund's Assets:Unmapped side on Expenses:Shopping.
+    ledger = JD_BUY + JD_REFUND_CONVERTED.replace("Assets:Unmapped", "Expenses:Shopping")
+    staged = JD_BUY.replace("Expenses:Shopping", "Expenses:Unsorted") + JD_REFUND_CONVERTED
+    assert kinds(run_match(ledger, staged)) == [("duplicate", "order-id")] * 2
+    # The same bill twice in one batch, in date order: buy, buy, refund, refund.
+    assert kinds(run_match("", staged + staged)) == [
+        ("new", "new"), ("duplicate", "order-id"),
+        ("uncertain", "order-id-mismatch"), ("duplicate", "order-id")]
