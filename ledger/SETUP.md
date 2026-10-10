@@ -153,9 +153,10 @@ prints 200 or 302. If not, read `journalctl --user -u cc-hub-ledger-fava -n 30`
 fix it. When the port is taken, change `[fava] port`, commit, and repeat this
 step.
 
-Tell the user how to open Fava on a computer: `ssh -L <port>:localhost:<port> <user>@<server>`,
-then `http://localhost:<port>` in the browser (`<user>` and `<server>` are
-their login and the server's address as they reach it from outside).
+When you created or changed the service, or on Windows, tell the user how to
+open Fava on a computer: `ssh -L <port>:localhost:<port> <user>@<server>`, then
+`http://localhost:<port>` in the browser (`<user>` and `<server>` are their
+login and the server's address as they reach it from outside).
 
 ## 3. Tailscale (optional)
 
