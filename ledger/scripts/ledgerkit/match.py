@@ -1,26 +1,34 @@
 """Match staged entries against the ledger: each one is new, a duplicate, a fix or uncertain.
 
-Staged transactions are taken in date order and get the ids s1, s2, ... An existing entry serves at
-most one staged entry. For each staged entry S the first rule that applies wins:
+Staged transactions are taken in date order and get the ids s1, s2, ...; every staged posting needs
+an amount. An existing entry serves at most one duplicate or fix. The rules run in passes over the
+whole batch, the surest first, so that a weaker match never takes an entry a surer one needs. For
+each staged entry S the first rule that applies wins:
 
-1. order-id: an existing entry from the same bill with the same `orderId`, or an earlier staged
-   entry with both, makes S a duplicate. This rule runs over the whole batch first, so no other rule
-   takes an entry that an order id claims.
-2. chat: a chat entry (`via: "chat"`, no `orderId`) in the window with S's funding amount on the
-   same account, or on the channel S came through. The nearest one is fixed to S's account and gets
-   S's order id; several at the same distance are uncertain.
-3. posting: entries in the window sharing a posting (account and amount, placeholders aside) with S.
-   A bank line that names a payment channel, or matches a transfer, is a duplicate of the nearest
-   one; anything else with such a candidate is uncertain.
+1. Identity.
+   - order-id: an existing entry from the same bill (its `bill`, else its `via`) with the same
+     `orderId`, or an earlier staged entry with both. With a signed funding amount in common S is a
+     duplicate; without one (a refund under its purchase's order id) S is uncertain.
+   - statement-row: for a bank line, an existing entry with the same `via` and date that holds every
+     non-placeholder posting of S, and the same `balances` when both have one, is a duplicate.
+2. chat: an open chat entry (`via: "chat"`, no `orderId`) in the window with S's funding amount on
+   the same account, or on the channel S came through. The nearest one is fixed to S's account and
+   gets S's order id; several at the same distance make S uncertain.
+3. posting: entries in the window that share a posting (account and amount, placeholders aside)
+   with S. Bank lines take their candidates across the batch nearest first, channel lines before
+   other lines at the same distance. A bank line that names a payment channel, or whose candidate is
+   a transfer, is that candidate's duplicate; another bank line is uncertain. A platform row with a
+   candidate is uncertain: it is never a bank's echo.
 4. A bank line that names a payment channel and matched nothing is uncertain.
-5. A chat entry in the window with the same amount on another account makes S uncertain.
+5. An open chat entry in the window whose funding amount is within max(2, 10 %) of S's, on any
+   account, makes S uncertain.
 6. Otherwise S is new.
 """
 
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +56,9 @@ KINDS = ("new", "duplicate", "fix", "uncertain")
 FLAGS = ("unsorted", "unmapped", "investment")
 # The staged keys a fix copies onto the chat entry; `via` goes there as `bill`.
 FIX_KEYS = ("orderId", "payTime")
+# How far a chat entry's amount may be from a bill's and still be asked about (rule 5).
+NEAR_ABSOLUTE = Decimal(2)
+NEAR_RELATIVE = Decimal("0.1")
 
 
 @dataclass
@@ -108,11 +119,42 @@ def _other_order(entry: Transaction, staged: Transaction) -> bool:
     )
 
 
+def _funding_amounts(txn: Transaction) -> list[tuple[Decimal, str]]:
+    return [units for p in funding_postings(txn) if (units := _units(p)) is not None]
+
+
+def _same_payment(entry: Transaction, staged: Transaction) -> bool:
+    """A funding posting with the same signed amount in each: the same money moving the same way.
+
+    Placeholder postings count: `Assets:Unmapped` stands for the account the user filled in later.
+    """
+    theirs = set(_funding_amounts(staged))
+    return any(amount in theirs for amount in _funding_amounts(entry))
+
+
+def _same_row(entry: Transaction, staged: Transaction) -> bool:
+    """An existing entry that is the same bank statement line, imported before.
+
+    The ledger copy holds every non-placeholder posting of the staged line; where the staged line
+    has a placeholder the ledger holds what the user put there instead.
+    """
+    if entry.date != staged.date or entry.meta.get("via") != staged.meta["via"]:
+        return False
+    if _other_order(entry, staged):
+        return False
+    if (
+        "balances" in entry.meta and "balances" in staged.meta
+        and str(entry.meta["balances"]) != str(staged.meta["balances"])
+    ):
+        return False
+    ours = Counter((p.account, _units(p)) for p in entry.postings)
+    theirs = Counter((p.account, _units(p)) for p in staged.postings
+                     if p.account not in PLACEHOLDERS)
+    return bool(theirs) and not theirs - ours
+
+
 def _shares_posting(entry: Transaction, staged: Transaction) -> bool:
-    keys = {
-        (p.account, _units(p)) for p in staged.postings
-        if p.account not in PLACEHOLDERS and _units(p) is not None
-    }
+    keys = {(p.account, _units(p)) for p in staged.postings if p.account not in PLACEHOLDERS}
     return any((p.account, _units(p)) in keys for p in entry.postings)
 
 
@@ -131,13 +173,12 @@ def _chat_pair(entry: Transaction, staged: Transaction) -> tuple[Posting, Postin
     return None
 
 
-def _same_size(entry: Transaction, staged: Transaction) -> bool:
-    """A funding amount of the same size on another account."""
-    for ours in funding_postings(entry):
-        for theirs in funding_postings(staged):
-            a, b = _units(ours), _units(theirs)
-            if (a and b and ours.account != theirs.account
-                    and a[1] == b[1] and abs(a[0]) == abs(b[0])):
+def _near_amount(entry: Transaction, staged: Transaction) -> bool:
+    """A funding amount within max(2, 10 % of the staged amount) of the staged one, any account."""
+    for number, currency in _funding_amounts(entry):
+        for theirs, their_currency in _funding_amounts(staged):
+            limit = max(NEAR_ABSOLUTE, abs(theirs) * NEAR_RELATIVE)
+            if currency == their_currency and abs(abs(number) - abs(theirs)) <= limit:
                 return True
     return False
 
@@ -148,15 +189,6 @@ def _location(entry: Transaction) -> tuple[str, int]:
     return (str(Path(filename)) if filename else ""), int(entry.meta.get("lineno") or 0)
 
 
-def _nearest(found: list[int], ledger: list[Transaction], staged: Transaction) -> list[int]:
-    """The candidates at the smallest date distance, in file order."""
-    if not found:
-        return []
-    best = min(_days(ledger[i], staged) for i in found)
-    return sorted((i for i in found if _days(ledger[i], staged) == best),
-                  key=lambda i: _location(ledger[i]))
-
-
 def _fix(entry: Transaction, ours: Posting, theirs: Posting, staged: Transaction) -> dict:
     file, line = _location(entry)
     meta = {key: str(staged.meta[key]) for key in FIX_KEYS if key in staged.meta}
@@ -165,48 +197,6 @@ def _fix(entry: Transaction, ours: Posting, theirs: Posting, staged: Transaction
     target = ours.account if theirs.account in PLACEHOLDERS else theirs.account
     return {"file": file, "line": line, "account_from": ours.account, "account_to": target,
             "meta": meta}
-
-
-def _decide(staged: Transaction, bank: bool, ledger: list[Transaction], used: set[int],
-            settings: Settings) -> Decision:
-    """Rules 2 to 6 for one staged entry. Marks the entry it matches as used."""
-    near = [i for i, entry in enumerate(ledger)
-            if i not in used and _days(entry, staged) <= settings.window_days]
-
-    pairs = {}
-    for i in near:
-        if _is_open_chat(ledger[i]):
-            pair = _chat_pair(ledger[i], staged)
-            if pair:
-                pairs[i] = pair
-    chats = _nearest(list(pairs), ledger, staged)
-    if len(chats) == 1:
-        [i] = chats
-        used.add(i)
-        return "fix", "chat", [ledger[i]], _fix(ledger[i], *pairs[i], staged)
-    if chats:
-        return "uncertain", "chat", [ledger[i] for i in chats], None
-
-    channel_line = bank and _mentions(staged, settings.channel_keywords)
-    candidates = _nearest(
-        [i for i in near
-         if not _other_order(ledger[i], staged) and _shares_posting(ledger[i], staged)],
-        ledger, staged)
-    if candidates:
-        first = candidates[0]
-        if bank and (channel_line or is_transfer(ledger[first])):
-            used.add(first)
-            return "duplicate", "channel" if channel_line else "transfer", [ledger[first]], None
-        return "uncertain", "possible-duplicate", [ledger[i] for i in candidates], None
-    if channel_line:
-        return "uncertain", "channel-unmatched", [], None
-
-    others = _nearest(
-        [i for i in near if _is_open_chat(ledger[i]) and _same_size(ledger[i], staged)],
-        ledger, staged)
-    if others:
-        return "uncertain", "possible-chat", [ledger[i] for i in others], None
-    return "new", "new", [], None
 
 
 def _flags(txn: Transaction, settings: Settings) -> list[str]:
@@ -226,45 +216,165 @@ def _ref(entry: Transaction) -> dict:
     return {"file": file, "line": line, "text": format_entry(entry)}
 
 
+class _Matcher:
+    """One batch against the ledger. Entries are referred to by index: `n` staged, `i` existing."""
+
+    def __init__(self, existing: list, staged: list, settings: Settings):
+        self.settings = settings
+        # Padding entries come from `pad` directives: they are in no file and pay for nothing.
+        self.ledger = [t for t in transactions(existing) if t.flag != FLAG_PADDING]
+        self.batch = sorted(transactions(staged), key=lambda t: t.date)
+        for txn in self.batch:
+            if "via" not in txn.meta:
+                raise LedgerError(f"staged entry on {txn.date} has no via")
+            if any(_units(p) is None for p in txn.postings):
+                raise LedgerError(f"staged entry on {txn.date} has a posting without an amount")
+        self.bank = [source(settings, t.meta["via"]).kind == "bank" for t in self.batch]
+        self.channel = [
+            bank and _mentions(txn, settings.channel_keywords)
+            for bank, txn in zip(self.bank, self.batch, strict=True)
+        ]
+        self.used: set[int] = set()
+        self.decided: dict[int, Decision] = {}
+
+    def items(self) -> list[Item]:
+        self.identity()
+        self.chats()
+        self.bank_postings()
+        self.rest()
+        items = []
+        for n, txn in enumerate(self.batch):
+            kind, reason, found, fix = self.decided[n]
+            items.append(Item(
+                id=f"s{n + 1}", kind=kind, reason=reason, date=txn.date.isoformat(),
+                text=format_entry(txn), flags=_flags(txn, self.settings),
+                existing=[_ref(entry) for entry in found], fix=fix))
+        return items
+
+    def undecided(self) -> list[int]:
+        return [n for n in range(len(self.batch)) if n not in self.decided]
+
+    def near(self, staged: Transaction) -> list[int]:
+        """The unused existing entries in the window, in file order."""
+        found = [i for i, entry in enumerate(self.ledger)
+                 if i not in self.used and _days(entry, staged) <= self.settings.window_days]
+        return sorted(found, key=lambda i: _location(self.ledger[i]))
+
+    def nearest(self, found: list[int], staged: Transaction) -> list[int]:
+        """The entries of `found` at the smallest date distance, in file order."""
+        if not found:
+            return []
+        best = min(_days(self.ledger[i], staged) for i in found)
+        return [i for i in found if _days(self.ledger[i], staged) == best]
+
+    def candidates(self, staged: Transaction) -> list[int]:
+        """Rule 3: unused entries in the window sharing a posting with S, in file order."""
+        return [i for i in self.near(staged)
+                if not _other_order(self.ledger[i], staged)
+                and _shares_posting(self.ledger[i], staged)]
+
+    def take(self, n: int, i: int, kind: str, reason: str) -> None:
+        self.used.add(i)
+        self.decided[n] = kind, reason, [self.ledger[i]], None
+
+    def identity(self) -> None:
+        """Rule 1: order ids first, then bank lines imported before."""
+        by_order = defaultdict(list)
+        for i, entry in enumerate(self.ledger):
+            key = _order_key(_bill(entry), entry)
+            if key is not None:
+                by_order[key].append(i)
+        seen = defaultdict(list)  # order key -> the staged entries with it so far
+        for n, txn in enumerate(self.batch):
+            key = _order_key(txn.meta["via"], txn)
+            if key is None:
+                continue
+            unused = [i for i in by_order[key] if i not in self.used]
+            same = [i for i in unused if _same_payment(self.ledger[i], txn)]
+            if same:
+                self.take(n, same[0], "duplicate", "order-id")
+            elif any(_same_payment(earlier, txn) for earlier in seen[key]):
+                # Twice in this batch; the first one is decided on its own.
+                self.decided[n] = "duplicate", "order-id", [], None
+            elif unused or seen[key]:
+                found = [self.ledger[i] for i in unused]
+                self.decided[n] = "uncertain", "order-id-mismatch", found, None
+            seen[key].append(txn)
+        for n in self.undecided():
+            if self.bank[n]:
+                txn = self.batch[n]
+                rows = [i for i in self.near(txn) if _same_row(self.ledger[i], txn)]
+                if rows:
+                    self.take(n, rows[0], "duplicate", "statement-row")
+
+    def chats(self) -> None:
+        """Rule 2, in date order."""
+        for n in self.undecided():
+            txn = self.batch[n]
+            pairs = {}
+            for i in self.near(txn):
+                if _is_open_chat(self.ledger[i]):
+                    pair = _chat_pair(self.ledger[i], txn)
+                    if pair:
+                        pairs[i] = pair
+            chats = self.nearest(list(pairs), txn)
+            if len(chats) == 1:
+                [i] = chats
+                self.used.add(i)
+                self.decided[n] = "fix", "chat", [self.ledger[i]], _fix(
+                    self.ledger[i], *pairs[i], txn)
+            elif chats:
+                self.decided[n] = "uncertain", "chat", [self.ledger[i] for i in chats], None
+
+    def bank_postings(self) -> None:
+        """Rule 3 for bank lines: pairs nearest first, channel lines first, then batch and file."""
+        pairs = []
+        for n in self.undecided():
+            if self.bank[n]:
+                txn = self.batch[n]
+                for i in self.candidates(txn):
+                    days = _days(self.ledger[i], txn)
+                    pairs.append((days, not self.channel[n], n, _location(self.ledger[i]), i))
+        for _days_apart, _other, n, _where, i in sorted(pairs):
+            if n in self.decided or i in self.used:
+                continue
+            if self.channel[n]:
+                self.take(n, i, "duplicate", "channel")
+            elif is_transfer(self.ledger[i]):
+                self.take(n, i, "duplicate", "transfer")
+            else:
+                txn = self.batch[n]
+                tied = self.nearest(self.candidates(txn), txn)
+                self.decided[n] = (
+                    "uncertain", "possible-duplicate", [self.ledger[j] for j in tied], None)
+
+    def rest(self) -> None:
+        """Rule 3 for platform rows, then rules 4 to 6."""
+        for n in self.undecided():
+            txn = self.batch[n]
+            # A bank line left with candidates lost them all to nearer lines in bank_postings.
+            tied = [] if self.bank[n] else self.nearest(self.candidates(txn), txn)
+            if tied:
+                self.decided[n] = (
+                    "uncertain", "possible-duplicate", [self.ledger[i] for i in tied], None)
+                continue
+            if self.channel[n]:
+                self.decided[n] = "uncertain", "channel-unmatched", [], None
+                continue
+            chats = self.nearest(
+                [i for i in self.near(txn)
+                 if _is_open_chat(self.ledger[i]) and _near_amount(self.ledger[i], txn)],
+                txn)
+            if chats:
+                self.decided[n] = (
+                    "uncertain", "possible-chat", [self.ledger[i] for i in chats], None)
+            else:
+                self.decided[n] = "new", "new", [], None
+
+
 def match(existing: list, staged: list, settings: Settings) -> list[Item]:
     """Decide every staged transaction against the existing entries. See the module doc."""
-    ledger = [t for t in transactions(existing) if t.flag != FLAG_PADDING]
-    batch = sorted(transactions(staged), key=lambda t: t.date)
-    for txn in batch:
-        if "via" not in txn.meta:
-            raise LedgerError(f"staged entry on {txn.date} has no via")
-    banks = [source(settings, txn.meta["via"]).kind == "bank" for txn in batch]
-
-    used: set[int] = set()
-    decided: dict[int, Decision] = {}
-    by_order = defaultdict(list)
-    for i, entry in enumerate(ledger):
-        key = _order_key(_bill(entry), entry)
-        if key is not None:
-            by_order[key].append(i)
-    seen = set()
-    for n, txn in enumerate(batch):
-        key = _order_key(txn.meta["via"], txn)
-        if key is None:
-            continue
-        found = next((i for i in by_order[key] if i not in used), None)
-        if found is not None:
-            used.add(found)
-            decided[n] = "duplicate", "order-id", [ledger[found]], None
-        elif key in seen:  # twice in this batch; the first one is decided on its own
-            decided[n] = "duplicate", "order-id", [], None
-        seen.add(key)
-
-    items = []
-    for n, txn in enumerate(batch):
-        if n not in decided:
-            decided[n] = _decide(txn, banks[n], ledger, used, settings)
-        kind, reason, found, fix = decided[n]
-        items.append(Item(
-            id=f"s{n + 1}", kind=kind, reason=reason, date=txn.date.isoformat(),
-            text=format_entry(txn), flags=_flags(txn, settings),
-            existing=[_ref(entry) for entry in found], fix=fix))
-    return items
+    return _Matcher(existing, staged, settings).items()
 
 
 def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
@@ -272,6 +382,7 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
 
     The flag counts cover the new and uncertain items, the ones that may be written: a duplicate
     is dropped and a fix keeps the existing entry's postings apart from the funding account.
+    `ledger_errors` counts the errors the ledger already had; they do not stop a match.
     """
     main, staged_path, out = Path(main), Path(staged_path), Path(out)
     for path in (main, staged_path):
@@ -283,7 +394,7 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
         raise LedgerError(f"{staged_path} is not UTF-8 text: {err}") from err
     except LedgerError as err:
         raise LedgerError(f"{staged_path}: {err}") from err
-    entries, _errors, _options = load(main)  # errors the ledger already has do not stop a match
+    entries, errors, _options = load(main)
     items = match(entries, staged, settings)
     plan = {
         "version": 1,
@@ -303,4 +414,5 @@ def run(main: Path, staged_path: Path, out: Path, settings: Settings) -> dict:
             for flag in item.flags:
                 flagged[flag] += 1
     summary["flagged"] = flagged
+    summary["ledger_errors"] = len(errors)
     return summary

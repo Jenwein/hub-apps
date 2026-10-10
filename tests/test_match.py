@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 from ledgerkit.book import format_entry, parse_text
@@ -206,7 +207,7 @@ def test_flag_counts_cover_only_entries_that_may_be_written(make_ledger, tmp_pat
         '2026-09-07 * "蚂蚁财富" "基金申购"\n  via: "alipay"\n  orderId: "A9"\n'
         "  Expenses:Unsorted  500.00 CNY\n  Assets:Unmapped  -500.00 CNY\n"
     )
-    d = make_ledger(txns={2026: ALIPAY_RIDE + CHAT_LUNCH})
+    d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n", txns={2026: ALIPAY_RIDE + CHAT_LUNCH})
     staged = tmp_path / "s.beancount"
     # Every one is unsorted: a duplicate (BANK_RIDE), an uncertain channel line (BANK_TOPUP),
     # a fix (WX_LUNCH, the chat entry keeps its category) and a new one (fund).
@@ -214,7 +215,7 @@ def test_flag_counts_cover_only_entries_that_may_be_written(make_ledger, tmp_pat
     summary = run(d / "main.beancount", staged, tmp_path / "plan.json", SET)
     assert summary == {
         "plan": str(tmp_path / "plan.json"), "new": 1, "duplicate": 1, "fix": 1, "uncertain": 1,
-        "flagged": {"unsorted": 2, "unmapped": 1, "investment": 1},
+        "flagged": {"unsorted": 2, "unmapped": 1, "investment": 1}, "ledger_errors": 0,
     }
 
 
@@ -250,3 +251,122 @@ def test_cli_match(make_ledger, tmp_path, capsys):
     assert main(["match", "--ledger-dir", str(d), "--staged", str(staged), "--out", str(out)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["duplicate"] == 1 and summary["plan"] == str(out) and out.is_file()
+
+
+# Fix round 1.
+
+
+def test_staged_posting_without_an_amount_is_an_error():
+    # The card amount elided: it would share no posting and come out as something new.
+    staged = BANK_RIDE.replace("Assets:Bank:CCB:1234  -20.00 CNY", "Assets:Bank:CCB:1234")
+    with pytest.raises(LedgerError, match="2026-09-04 has a posting without an amount"):
+        run_match(ALIPAY_RIDE, staged)
+
+
+TAXI_CHAT = (
+    '2026-09-03 * "" "taxi"\n  via: "chat"\n  channel: "alipay"\n'
+    "  Expenses:Transport  20.00 CNY\n  Assets:Bank:CCB:1234  -20.00 CNY\n"
+)
+
+
+@pytest.mark.parametrize(("said", "billed", "expected"), [
+    ("20.00", "19.80", ("uncertain", "possible-chat")),
+    ("20.00", "22.00", ("uncertain", "possible-chat")),  # within 2.00
+    ("20.00", "23.00", ("new", "new")),
+    ("200.00", "219.00", ("uncertain", "possible-chat")),  # within 10 % of 219.00
+    ("200.00", "223.00", ("new", "new")),
+])
+def test_chat_entry_with_a_near_amount(said, billed, expected):
+    chat = TAXI_CHAT.replace("20.00", said)
+    assert kinds(run_match(chat, ALIPAY_RIDE.replace("20.00", billed))) == [expected]
+
+
+def test_transfer_goes_to_the_nearest_bank_row():
+    zhang = (
+        '2026-09-04 * "张三" "转账"\n  via: "ccb"\n'
+        "  Expenses:Unsorted  100.00 CNY\n  Assets:Bank:CCB:1234  -100.00 CNY\n"
+    )
+    assert kinds(run_match(TOPUP, zhang + BANK_TOPUP)) == [("new", "new"), ("duplicate", "channel")]
+    # At the same distance the channel line goes first.
+    same_day = zhang.replace("2026-09-04", "2026-09-05")
+    assert kinds(run_match(TOPUP, same_day + BANK_TOPUP)) == [
+        ("new", "new"), ("duplicate", "channel")]
+
+
+def _row(day: str, balance: str, category: str, amount: str = "20.00") -> str:
+    return (
+        f'2026-09-{day} * "某超市" "消费"\n  via: "ccb"\n  balances: "{balance}"\n'
+        f"  {category}  {amount} CNY\n  Assets:Bank:CCB:1234  -{amount} CNY\n"
+    )
+
+
+def test_reimported_statement_is_all_duplicates():
+    salary = (
+        '2026-09-09 * "某公司" "工资"\n  via: "ccb"\n  balances: "5960.00"\n'
+        "  Assets:Bank:CCB:1234  5000.00 CNY\n  {other}  -5000.00 CNY\n"
+    )
+    staged = (_row("08", "980.00", "Expenses:Unsorted") + _row("08", "960.00", "Expenses:Unsorted")
+              + salary.format(other="Assets:Unmapped"))
+    # As written to the ledger: categories filled in, the two same-day rows the other way round.
+    ledger = (_row("08", "960.00", "Expenses:Food") + _row("08", "980.00", "Expenses:Groceries")
+              + salary.format(other="Income:Salary"))
+    items = run_match(ledger, staged)
+    assert kinds(items) == [("duplicate", "statement-row")] * 3
+    matched = [re.search(r'balances: "(.*)"', i.existing[0]["text"])[1] for i in items]
+    assert matched == ["980.00", "960.00", "5960.00"]
+
+
+def test_identical_statement_rows_match_one_to_one():
+    row = (
+        '2026-09-08 * "某超市" "消费"\n  via: "ccb"\n'
+        "  Expenses:Food  20.00 CNY\n  Assets:Bank:CCB:1234  -20.00 CNY\n"
+    )
+    staged = row.replace("Expenses:Food", "Expenses:Unsorted")
+    assert kinds(run_match(row + row, staged * 3)) == [("duplicate", "statement-row")] * 2 + [
+        ("new", "new")]
+
+
+JD_BUY = (
+    '2026-09-03 * "京东" "卫衣"\n  via: "jd"\n  orderId: "J1"\n'
+    "  Expenses:Shopping  131.77 CNY\n  Liabilities:CreditCard:BOC:1875  -131.77 CNY\n"
+)
+JD_REFUND = (
+    '2026-09-05 * "京东" "退款-卫衣"\n  via: "jd"\n  orderId: "J1"\n'
+    "  Income:Unsorted  -89.84 CNY\n  Liabilities:CreditCard:BOC:1875  89.84 CNY\n"
+)
+
+
+def test_same_order_id_with_another_amount_is_uncertain():
+    [item] = run_match(JD_BUY, JD_REFUND)
+    assert (item.kind, item.reason) == ("uncertain", "order-id-mismatch")
+    assert "卫衣" in item.existing[0]["text"]
+    full_refund = JD_REFUND.replace("89.84", "131.77")
+    assert kinds(run_match(JD_BUY, full_refund)) == [("uncertain", "order-id-mismatch")]
+    assert kinds(run_match("", JD_BUY + JD_REFUND)) == [
+        ("new", "new"), ("uncertain", "order-id-mismatch")]
+    assert kinds(run_match(JD_BUY + JD_REFUND, JD_BUY + JD_REFUND)) == [
+        ("duplicate", "order-id")] * 2
+
+
+def test_summary_counts_the_errors_the_ledger_already_has(make_ledger, tmp_path):
+    d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n", txns={2026: ALIPAY_RIDE})
+    staged = tmp_path / "s.beancount"
+    staged.write_text(BANK_RIDE, "utf-8")
+    assert run(d / "main.beancount", staged, tmp_path / "p.json", SET)["ledger_errors"] == 0
+    (d / "txns" / "2025.beancount").write_text(
+        ALIPAY_RIDE.replace("2026", "2025").replace("Expenses:Transport", "Expenses:Nope"), "utf-8")
+    assert run(d / "main.beancount", staged, tmp_path / "p.json", SET)["ledger_errors"] == 1
+
+
+def test_pad_entries_are_never_candidates(make_ledger, tmp_path):
+    pad = (
+        "2026-09-01 pad Assets:Bank:CCB:1234 Equity:Opening-Balances\n"
+        "2026-09-04 balance Assets:Bank:CCB:1234  -20.00 CNY\n"
+    )
+    d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n", txns={2026: pad})
+    staged = tmp_path / "s.beancount"
+    staged.write_text(BANK_RIDE, "utf-8")  # shares Assets:Bank:CCB:1234 -20.00 with the padding
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", SET)
+    assert summary["ledger_errors"] == 0
+    [item] = json.loads((tmp_path / "plan.json").read_text("utf-8"))["items"]
+    assert (item["kind"], item["reason"]) == ("uncertain", "channel-unmatched")
