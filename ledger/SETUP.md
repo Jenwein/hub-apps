@@ -85,9 +85,10 @@ Then write, in this order. Skip whatever is already there.
      use and the table does not mark "(default rule)": `method: <text>` with
      `methodAccount: <account>`. Alipay and WeChat need none for their wallets;
      Meituan and JD do (`美团月付`, `钱包余额`, `白条`).
-   - for each of WeChat and Alipay they also export, the ignore rule the guide
-     gives under "Known issues" (Meituan and JD list orders paid through them,
-     which the other bill books).
+   - in `meituan.yaml` and `jd.yaml` only: for each of WeChat and Alipay they
+     also export, the ignore rule that guide gives under "Known issues"
+     (Meituan and JD list orders paid through them, which the other bill
+     books). `alipay.yaml` and `wechat.yaml` get no ignore rule.
 
    ```yaml
    rules:
