@@ -92,7 +92,7 @@ It writes the plan and prints
 |---|---|---|
 | `new` | not in the ledger | writes it |
 | `duplicate` | already in the ledger; reason `order-id` (same order), `statement-row` (this statement line was imported before), `channel` (a bank line paid through a platform whose entry is in), `transfer` (the other side of a transfer already booked) | skips it |
-| `fix` | the bill's copy of a chat entry: one recorded from chat, or added in Fava or by hand, that no bill has claimed yet | keeps the chat entry, sets its account to the one that paid, adds the bill's order id |
+| `fix` | the bill's copy of a chat entry: one recorded from chat, or added in Fava or by hand, that no bill has claimed yet. Only when it is surely the same payment: the same amount; the entry's `channel` is this bill's source, or the row is a line of that account's own bank statement; both are transfers between the user's accounts, or both are spending or income; no other category. Else the row is uncertain | keeps the chat entry, sets its account to the one that paid, adds the bill's order id |
 | `uncertain` | needs the user | waits for `--decide` |
 
 A `duplicate` with reason `before-start` is a row dated before `[ledger] start`:
@@ -180,10 +180,10 @@ entries. Then decide by `reason`:
 
 | reason | what it is | what to do |
 |---|---|---|
-| `possible-duplicate` | a ledger entry near the date shares an account and amount | ask if it is the same payment: same → `skip`, else `new` |
+| `possible-duplicate` | a ledger entry near the date shares an account and amount | ask if it is the same payment: same → `skip`, else `new`. If that entry is a chat entry (its `via` is `chat` or missing, and it has no `orderId`), do as for `possible-chat` |
 | `channel-unmatched` | a bank line paid through Alipay, WeChat, Meituan or JD, with no entry from that platform's bill | usually: import that platform's bill for the period first, then match this statement again. If the user does not export that bill, `new` (it needs a category first) |
 | `chat` | several chat entries fit equally | ask which one; edit that entry as a fix would (the bill's account, and `orderId` plus `bill: "<source>"` from the staged entry) and match again: it comes back as a `duplicate` |
-| `possible-chat` | a chat entry with the same or a near amount | ask; if it is the same payment, correct the chat entry's amount (and account) to the bill's ([record.md](record.md), Corrections) and match again: it usually comes back as a `fix`; if it is still uncertain, `skip`. Else `new` |
+| `possible-chat` | a chat entry with the same or a near amount, not surely the same payment (see `fix`) | ask; if it is the same payment, edit the chat entry as a fix would: the bill's amount and the account that paid, and `orderId` plus `bill: "<source>"` from the staged entry, keeping its category ([record.md](record.md), Corrections). Match again: a row with an order id comes back as a `duplicate`, a bank line usually as a `fix`; if it is still uncertain, `skip`. Else `new` |
 | `order-id-mismatch` | the same order id with another amount, in the ledger or (when `existing` is empty) earlier in this batch | usually a refund: ask. A refund → `new`, booked against the original expense (Refunds below) |
 
 ## 6. Apply

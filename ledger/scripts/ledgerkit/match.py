@@ -14,11 +14,21 @@ applies wins:
      duplicate; without one (a refund under its purchase's order id) S is uncertain.
    - statement-row: for a bank line, an existing entry with the same `via` and date that holds every
      non-placeholder posting of S, and the same `balances` when both have one, is a duplicate.
-2. chat: an open hand entry in the window with S's signed funding amount on the same account, or,
-   when its `channel` is S's source, on that channel's account (`[chat.channels]`, else
-   `[chat] default`). The nearest one is fixed to S's account and gets S's order id; several at
-   the same distance make S uncertain. A loan, reimbursement or transfer side of the entry never
-   pairs through the channel, and no fix books an account twice in one entry.
+2. chat: an open hand entry in the window that is surely S's payment is fixed to S's account and
+   gets S's order id. All of these hold:
+   - a funding posting of the entry has S's signed funding amount and pairs with it: when the
+     entry's `channel` is S's source, on that channel's account (`[chat.channels]`, else
+     `[chat] default`) or on S's account; when S is a bank line, on S's account, the account's
+     own statement. A platform row never pairs with an entry that names another channel or
+     none: the user said "card", the bill says Alipay.
+   - both are transfers (only `Assets:` and `Liabilities:` accounts, no placeholder) or both are
+     flows (an `Expenses:` or `Income:` posting, placeholders included). An entry that is
+     neither, such as a receipt booked against `Assets:Unmapped`, is never fixed.
+   - where both have an `Expenses:` or `Income:` account other than a placeholder, the same.
+   Across the batch the nearest pairs go first, then in batch and file order, each entry once;
+   several entries left at a staged entry's nearest distance make it uncertain. A loan,
+   reimbursement or transfer side of the entry never pairs through the channel, and no fix books
+   an account twice in one entry. A pair that fails goes on to rules 3 and 5, which ask.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
    first, then bank lines claim candidates that are transfers when no other candidate is as near;
