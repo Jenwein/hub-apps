@@ -186,9 +186,14 @@ def _fix_entry(lines: list[str], item: dict) -> None:
     end = index + 1
     while end < len(lines) and _is_indented(lines[end]):
         end += 1
-    _check_entry(lines, index, end, _existing_header(item))
+    expected = _existing_header(item)
+    _check_entry(lines, index, end, expected)
 
     old, new = fix["account_from"], fix["account_to"]
+    # The posting line changed below is the first one on `old`.
+    moved = next((p for p in expected.postings if p.account == old), None)
+    if any(p.account == new for p in expected.postings if p is not moved):
+        raise LedgerError(f"item {item['id']}: the fix would book {new} twice in one entry")
     if new != old:
         # A posting line: indentation, an optional flag, then the account. The amount may be absent.
         posting = re.compile(r"([ \t]+(?:\S[ \t]+)?)" + re.escape(old) + r"(?=[ \t;\r]|$)")

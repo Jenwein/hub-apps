@@ -7,7 +7,9 @@ from ledgerkit.cli import main
 from ledgerkit.match import match, run
 from ledgerkit.settings import LedgerError, parse_settings
 
-SET = parse_settings({})
+CARD = "Assets:Bank:CCB:1234"
+# The chat entries below that name a channel are on the account the user's settings give it.
+SET = parse_settings({"chat": {"channels": {"wechat": CARD, "alipay": CARD}}})
 ALIPAY_RIDE = '2026-09-03 * "高德打车" "打车"\n  via: "alipay"\n  orderId: "A1"\n  Expenses:Transport  20.00 CNY\n  Assets:Bank:CCB:1234  -20.00 CNY\n'
 BANK_RIDE = '2026-09-04 * "高***公司" "支付宝-支付宝外部商户-高德打车"\n  via: "ccb"\n  Expenses:Unsorted  20.00 CNY\n  Assets:Bank:CCB:1234  -20.00 CNY\n'
 TOPUP = '2026-09-05 * "支付宝" "充值"\n  via: "alipay"\n  orderId: "A2"\n  Assets:Alipay:Balance  100.00 CNY\n  Assets:Bank:CCB:1234  -100.00 CNY\n'
@@ -483,3 +485,71 @@ def test_refund_in_the_converter_shape_reimported_is_a_duplicate():
     assert kinds(run_match("", staged + staged)) == [
         ("new", "new"), ("duplicate", "order-id"),
         ("uncertain", "order-id-mismatch"), ("duplicate", "order-id")]
+
+
+# Final review: rule 2 pairs through a channel only on the channel's account (C1).
+
+LOAN_CHAT = (  # "lent Zhang San 500 via WeChat"
+    '2026-09-06 * "张三" "lent Zhang San"\n  via: "chat"\n  channel: "wechat"\n'
+    "  Assets:Receivables:Loans:ZhangSan  500.00 CNY\n  Assets:WeChat:Change  -500.00 CNY\n"
+)
+WX_RECEIPT = (  # an unrelated receipt, its targetAccount resolved
+    '2026-09-07 * "李四" "转账"\n  via: "wechat"\n  orderId: "W30"\n'
+    "  Assets:WeChat:Change  500.00 CNY\n  Income:Gifts  -500.00 CNY\n"
+)
+TOPUP_CHAT = (  # "topped up Alipay with 100 from the card"
+    '2026-09-06 * "" "top up Alipay"\n  via: "chat"\n  channel: "alipay"\n'
+    f"  Assets:Alipay:Balance  100.00 CNY\n  {CARD}  -100.00 CNY\n"
+)
+ALIPAY_MEAL = (
+    '2026-09-06 * "某饭店" "晚餐"\n  via: "alipay"\n  orderId: "A40"\n'
+    "  Expenses:Food  100.00 CNY\n  Assets:Alipay:Balance  -100.00 CNY\n"
+)
+WALLETS = parse_settings(
+    {"chat": {"channels": {"wechat": "Assets:WeChat:Change", "alipay": "Assets:Alipay:Balance"}}})
+
+
+def run_with(settings, existing, staged):
+    return match(parse_text(existing), parse_text(staged), settings)
+
+
+@pytest.mark.parametrize("settings", [SET, WALLETS], ids=["channel-on-card", "channel-on-wallet"])
+@pytest.mark.parametrize(("chat", "staged"), [
+    (LOAN_CHAT, WX_RECEIPT),
+    (LOAN_CHAT.replace("Loans:ZhangSan", "Reimbursement").replace("500.00", "80.00"),
+     WX_RECEIPT.replace("500.00", "80.00")),
+    (TOPUP_CHAT, ALIPAY_MEAL),
+], ids=["loan", "reimbursement", "transfer"])
+def test_channel_never_pairs_another_posting(settings, chat, staged):
+    # The bill row's amount is on the entry's receivable or transfer side, not on its channel's
+    # account: no fix. The entry is near enough to ask about.
+    assert kinds(run_with(settings, chat, staged)) == [("uncertain", "possible-chat")]
+
+
+def test_channel_pairs_on_the_channel_account_only():
+    on_cash = CHAT_LUNCH.replace(CARD, "Assets:Cash")  # channel wechat, but not on its account
+    assert kinds(run_match(on_cash, WX_LUNCH)) == [("uncertain", "possible-chat")]
+    assert kinds(run_with(WALLETS, CHAT_LUNCH, WX_LUNCH)) == [("uncertain", "possible-chat")]
+
+
+def test_channel_account_falls_back_to_the_chat_default():
+    default = parse_settings({"chat": {"default": CARD}})
+    [item] = run_with(default, CHAT_LUNCH, WX_LUNCH)
+    assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
+        "fix", CARD, "Assets:WeChat:Change")
+    assert kinds(run_with(parse_settings({}), CHAT_LUNCH, WX_LUNCH)) == [
+        ("uncertain", "possible-chat")]
+
+
+def test_fix_never_books_an_account_twice():
+    # The channel's account is the card: the card side of the top-up pays the meal, but moving it
+    # to Assets:Alipay:Balance would put that account on the entry twice.
+    assert kinds(run_match(TOPUP_CHAT, ALIPAY_MEAL)) == [("uncertain", "possible-chat")]
+    # The loan's own transfer in the bill, paid from 零钱, is the loan: fixed, its postings kept.
+    transfer = (
+        '2026-09-06 * "张三" "转账"\n  via: "wechat"\n  orderId: "W31"\n'
+        "  Expenses:Unsorted  500.00 CNY\n  Assets:WeChat:Change  -500.00 CNY\n"
+    )
+    [item] = run_with(WALLETS, LOAN_CHAT, transfer)
+    assert (item.kind, item.fix["account_from"], item.fix["account_to"]) == (
+        "fix", "Assets:WeChat:Change", "Assets:WeChat:Change")

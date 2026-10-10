@@ -9,10 +9,9 @@ from ledgerkit.apply import NeedsDecision, apply_plan
 from ledgerkit.book import load, transactions
 from ledgerkit.cli import main
 from ledgerkit.match import run
-from ledgerkit.settings import LedgerError, parse_settings
-from test_match import ALIPAY_RIDE, BANK_RIDE, CHAT_LUNCH, WX_LUNCH
+from ledgerkit.settings import LedgerError
+from test_match import ALIPAY_RIDE, BANK_RIDE, CHAT_LUNCH, SET, WX_LUNCH
 
-SET = parse_settings({})
 OPEN = "2000-01-01 open Assets:Bank:CCB:1234\n2000-01-01 open Assets:WeChat:Change\n"
 CARD = "Assets:Bank:CCB:1234"
 WX_FOOD = WX_LUNCH.replace("Expenses:Unsorted", "Expenses:Food")  # a bill row the user sorted
@@ -494,3 +493,13 @@ def test_cli_errors_exit_1(prepare, capsys):
     capsys.readouterr()
     assert main(args) == 1
     assert "plan already applied" in capsys.readouterr().err
+
+
+def test_fix_that_books_an_account_twice_is_refused(prepare):
+    d, plan = prepare(WX_FOOD, existing=CHAT_LUNCH)
+    # Expenses:Food is the entry's other posting.
+    edit_plan(plan, lambda p: p["items"][0]["fix"].update(account_to="Expenses:Food"))
+    before = snapshot(d)
+    with pytest.raises(LedgerError, match="s1: .*Expenses:Food twice"):
+        apply_plan(plan, d, {})
+    assert snapshot(d) == before and read_plan(plan)["applied"] is False

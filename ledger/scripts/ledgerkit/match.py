@@ -11,9 +11,11 @@ each staged entry S the first rule that applies wins:
      duplicate; without one (a refund under its purchase's order id) S is uncertain.
    - statement-row: for a bank line, an existing entry with the same `via` and date that holds every
      non-placeholder posting of S, and the same `balances` when both have one, is a duplicate.
-2. chat: an open chat entry (`via: "chat"`, no `orderId`) in the window with S's funding amount on
-   the same account, or on the channel S came through. The nearest one is fixed to S's account and
-   gets S's order id; several at the same distance make S uncertain.
+2. chat: an open chat entry (`via: "chat"`, no `orderId`) in the window with S's signed funding
+   amount on the same account, or, when its `channel` is S's source, on that channel's account
+   (`[chat.channels]`, else `[chat] default`). The nearest one is fixed to S's account and gets S's
+   order id; several at the same distance make S uncertain. A loan, reimbursement or transfer side
+   of the entry never pairs through the channel, and no fix books an account twice in one entry.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
    first, then bank lines claim candidates that are transfers when no other candidate is as near;
@@ -166,18 +168,42 @@ def _shares_posting(entry: Transaction, staged: Transaction) -> bool:
     return any((p.account, _units(p)) in keys for p in entry.postings)
 
 
-def _chat_pair(entry: Transaction, staged: Transaction) -> tuple[Posting, Posting] | None:
-    """The funding postings that make a chat entry and a staged entry the same payment, if any."""
-    pairs = [
-        (ours, theirs)
-        for ours in funding_postings(entry) for theirs in _staged_funding(staged)
-        if _units(ours) is not None and _units(ours) == _units(theirs)
-    ]
-    for ours, theirs in pairs:
-        if ours.account == theirs.account and ours.account not in PLACEHOLDERS:
+def _target(ours: Posting, theirs: Posting) -> str:
+    """The account a fix gives the chat entry's posting: the bill's, unless the bill does not
+    know it (a placeholder); the chat entry's account then stays."""
+    return ours.account if theirs.account in PLACEHOLDERS else theirs.account
+
+
+def _books_twice(entry: Transaction, ours: Posting, account: str) -> bool:
+    """`account` is on another posting of the entry: moving `ours` there makes nonsense of it."""
+    return any(p.account == account for p in entry.postings if p is not ours)
+
+
+def _chat_pair(
+        entry: Transaction, staged: Transaction, settings: Settings,
+) -> tuple[Posting, Posting] | None:
+    """The funding postings that make a chat entry and a staged entry the same payment, if any.
+
+    Either both have the same account and signed amount, or the entry's `channel` is S's source
+    and its posting on that channel's account (`[chat.channels]`, else `[chat] default`) has S's
+    signed funding amount. A pair whose fix would book an account twice in the entry is none.
+    """
+    channel = entry.meta.get("channel")
+    through = None
+    if channel is not None and channel == staged.meta["via"]:
+        through = settings.chat_channels.get(channel) or settings.chat_default
+    same, channelled = [], []
+    for ours in funding_postings(entry):
+        for theirs in _staged_funding(staged):
+            if _units(ours) is None or _units(ours) != _units(theirs):
+                continue
+            if ours.account == theirs.account and ours.account not in PLACEHOLDERS:
+                same.append((ours, theirs))
+            elif ours.account == through:
+                channelled.append((ours, theirs))
+    for ours, theirs in same + channelled:
+        if not _books_twice(entry, ours, _target(ours, theirs)):
             return ours, theirs
-    if pairs and entry.meta.get("channel") == staged.meta["via"]:
-        return pairs[0]
     return None
 
 
@@ -202,10 +228,8 @@ def _fix(entry: Transaction, ours: Posting, theirs: Posting, staged: Transaction
     file, line = _location(entry)
     meta = {key: str(staged.meta[key]) for key in FIX_KEYS if key in staged.meta}
     meta["bill"] = staged.meta["via"]
-    # The bill may not know the account (a placeholder); the chat entry's account then stays.
-    target = ours.account if theirs.account in PLACEHOLDERS else theirs.account
-    return {"file": file, "line": line, "account_from": ours.account, "account_to": target,
-            "meta": meta}
+    return {"file": file, "line": line, "account_from": ours.account,
+            "account_to": _target(ours, theirs), "meta": meta}
 
 
 def _flags(txn: Transaction, settings: Settings) -> list[str]:
@@ -326,7 +350,7 @@ class _Matcher:
             pairs = {}
             for i in self.near(txn):
                 if _is_open_chat(self.ledger[i]):
-                    pair = _chat_pair(self.ledger[i], txn)
+                    pair = _chat_pair(self.ledger[i], txn, self.settings)
                     if pair:
                         pairs[i] = pair
             chats = self.nearest(list(pairs), txn)
