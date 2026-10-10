@@ -154,12 +154,14 @@ manager, as in a container or WSL without systemd), do what Windows does below.
 stay running here: when they want to see the books you start it in the
 background (`apps/ledger/skills/ledger/fava.md`).
 
-**Check** (Linux and macOS):
-`curl -s --noproxy '*' --retry 5 --retry-connrefused -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<port>/`
-prints 200 or 302. If not, read `journalctl --user -u cc-hub-ledger-fava -n 30`
-(Linux) or run `launchctl print gui/$(id -u)/io.cc-hub.ledger.fava` (macOS) and
-fix it. When the port is taken, change `[fava] port`, commit, and repeat this
-step.
+**Check** (Linux and macOS): Fava answers for this ledger when
+`curl -sL --noproxy '*' --connect-timeout 5 --retry 5 --retry-connrefused http://127.0.0.1:<port>/ | grep -c "$(pwd -P)/ledger/main.beancount"`
+prints a number above 0. A status code alone proves nothing: another program
+that holds the port answers too, while Fava fails to start. If it prints 0,
+read `journalctl --user -u cc-hub-ledger-fava -n 30` (Linux) or run
+`launchctl print gui/$(id -u)/io.cc-hub.ledger.fava` (macOS) and fix it. When
+the port is taken (the log says `port <port> is already in use`), change
+`[fava] port`, commit, and repeat this step.
 
 When you created or changed the service, or on Windows, tell the user how to
 open Fava on a computer: `ssh -L <port>:localhost:<port> <user>@<server>`, then
