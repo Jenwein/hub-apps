@@ -157,11 +157,37 @@ def test_order_id_match_is_not_taken_by_an_earlier_row():
     assert kinds(run_match(paid, earlier + paid)) == [("new", "new"), ("duplicate", "order-id")]
 
 
-def test_fix_never_moves_to_a_placeholder():
-    [item] = run_match(CHAT_LUNCH, WX_LUNCH.replace("Assets:WeChat:Change", "Assets:Unmapped"))
-    assert (item.kind, item.reason) == ("fix", "chat")
-    assert item.fix["account_from"] == item.fix["account_to"] == "Assets:Bank:CCB:1234"
+WX_LUNCH_UNMAPPED = WX_LUNCH.replace("Assets:WeChat:Change", "Assets:Unmapped")
+
+
+def test_unknown_payer_never_closes_a_hand_entry(make_ledger, tmp_path):
+    # The WeChat row's payment method has no rule yet: the converter could not tell what paid.
+    # A fix would stamp the chat entry with the order id and leave it on the card, maybe wrongly,
+    # and no later import would look at it again. The row asks, flagged, until the rule is in.
+    [item] = run_match(CHAT_LUNCH, WX_LUNCH_UNMAPPED)
+    assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-chat", None)
+    assert '"lunch"' in item.existing[0]["text"]
     assert "unmapped" in item.flags
+    # With a category the bill shares with the entry, it asks too.
+    food = WX_LUNCH_UNMAPPED.replace("Expenses:Unsorted", "Expenses:Food")
+    [item] = run_match(CHAT_LUNCH, food)
+    assert (item.kind, item.fix) == ("uncertain", None) and "unmapped" in item.flags
+    # The flag counts: settle it (the `methodAccount` rule), then convert and match again.
+    d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n", txns={2026: CHAT_LUNCH})
+    staged = tmp_path / "s.beancount"
+    staged.write_text(WX_LUNCH_UNMAPPED, "utf-8")
+    summary = run(d / "main.beancount", staged, tmp_path / "plan.json", SET)
+    assert (summary["fix"], summary["uncertain"], summary["flagged"]["unmapped"]) == (0, 1, 1)
+    # Mapped, the same row fixes the entry (test_chat_entry_gets_fixed).
+    assert kinds(run_match(CHAT_LUNCH, WX_LUNCH)) == [("fix", "chat")]
+
+
+def test_row_with_an_unknown_payer_still_contests_a_hand_entry():
+    # It may be the lunch: the next day's row of the same amount is not surely the lunch either.
+    other = WX_LUNCH.replace("2026-09-06", "2026-09-07").replace('"W1"', '"W2"')
+    items = run_match(CHAT_LUNCH, WX_LUNCH_UNMAPPED + other)
+    assert kinds(items) == [("uncertain", "possible-chat")] * 2
+    assert all(i.fix is None and '"lunch"' in i.existing[0]["text"] for i in items)
 
 
 def test_chat_on_the_same_account_keeps_it():

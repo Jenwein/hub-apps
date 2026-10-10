@@ -21,6 +21,10 @@ applies wins:
    never an entry a bill or statement line was matched to before. E's candidates are the
    staged entries it is a candidate of, apart from those already duplicates (before the start,
    or by rule 1); those rule 1 left uncertain count. The pair must also:
+   - show the account that paid: S's posting in the pair is never a placeholder. A row whose
+     only funding posting is `Assets:Unmapped` (a payment method with no rule yet) never fixes
+     E. It stays E's candidate, goes on to rules 3 to 6 and keeps its `unmapped` flag, until a
+     rule names the account and the bill is converted again.
    - pair a funding posting of E with S's, with the same signed amount: when E's `channel` is
      S's source, on that channel's account (`[chat.channels]`, else `[chat] default`) or on S's
      account; when S is a bank line that names no payment channel, on S's account, the
@@ -50,9 +54,9 @@ missing or "chat" and no bill or statement line has been matched to it, so it ha
 `orderId` nor a `bill`. Pad entries and opening balances (an entry with a posting on an `Equity:`
 account) pay for nothing and are never candidates of any rule.
 
-A staged entry's placeholder funding postings stand in for its funding account (rules 1, 2 and 5)
-only when it has no other: a receipt's or refund's `Assets:Unmapped` is the payer, not an account
-of the user's.
+A staged entry's placeholder funding postings stand in for its funding account (rule 1, the
+candidates of rule 2, rule 5) only when it has no other: a receipt's or refund's
+`Assets:Unmapped` is the payer, not an account of the user's. A fix never pairs with one.
 """
 
 from __future__ import annotations
@@ -207,12 +211,6 @@ def _shares_posting(entry: Transaction, staged: Transaction) -> bool:
     return any((p.account, _units(p)) in keys for p in entry.postings)
 
 
-def _target(ours: Posting, theirs: Posting) -> str:
-    """The account a fix gives the hand entry's posting: the bill's, unless the bill does not
-    know it (a placeholder); the hand entry's account then stays."""
-    return ours.account if theirs.account in PLACEHOLDERS else theirs.account
-
-
 def _books_twice(entry: Transaction, ours: Posting, account: str) -> bool:
     """`account` is on another posting of the entry: moving `ours` there makes nonsense of it."""
     return any(p.account == account for p in entry.postings if p is not ours)
@@ -223,7 +221,9 @@ def _chat_pair(
 ) -> tuple[Posting, Posting] | None:
     """The funding postings that make a hand entry and a staged entry the same payment, if any.
 
-    The two postings have the same signed amount, and one of these holds:
+    S's posting is on an account of the user's, never a placeholder: a row whose paying account
+    the converter could not tell (only `Assets:Unmapped`) pairs with nothing. The two postings
+    have the same signed amount, and one of these holds:
     - the entry's `channel` is S's source, and its posting is on that channel's account
       (`[chat.channels]`, else `[chat] default`) or on S's account;
     - S is a bank line that names no payment channel (`own_statement`) and both postings are on
@@ -236,20 +236,18 @@ def _chat_pair(
     channel = entry.meta.get("channel")
     named = channel is not None and channel == staged.meta["via"]
     through = (settings.chat_channels.get(channel) or settings.chat_default) if named else None
+    known = [p for p in funding_postings(staged) if p.account not in PLACEHOLDERS]
     same, channelled = [], []
     for ours in funding_postings(entry):
-        for theirs in _staged_funding(staged):
+        for theirs in known:
             if _units(ours) is None or _units(ours) != _units(theirs):
                 continue
-            if (
-                (own_statement or named) and ours.account == theirs.account
-                and ours.account not in PLACEHOLDERS
-            ):
+            if (own_statement or named) and ours.account == theirs.account:
                 same.append((ours, theirs))
             elif ours.account == through:
                 channelled.append((ours, theirs))
     for ours, theirs in same + channelled:
-        if not _books_twice(entry, ours, _target(ours, theirs)):
+        if not _books_twice(entry, ours, theirs.account):
             return ours, theirs
     return None
 
@@ -308,7 +306,7 @@ def _fix(entry: Transaction, ours: Posting, theirs: Posting, staged: Transaction
     meta = {key: str(staged.meta[key]) for key in FIX_KEYS if key in staged.meta}
     meta["bill"] = staged.meta["via"]
     return {"file": file, "line": line, "account_from": ours.account,
-            "account_to": _target(ours, theirs), "meta": meta}
+            "account_to": theirs.account, "meta": meta}
 
 
 def _start(settings: Settings) -> date | None:
