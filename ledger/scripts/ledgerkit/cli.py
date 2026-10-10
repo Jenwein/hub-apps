@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
 
-from . import apply, book, convert, match
+from . import apply, book, convert, match, table
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
@@ -72,6 +73,11 @@ def run_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_table(args: argparse.Namespace) -> None:
+    rows = table.read_table(args.file, sheet=args.sheet, password=args.password)
+    csv.writer(sys.stdout, lineterminator="\n").writerows(rows)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -110,6 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--document-account", metavar="ACCOUNT",
                    help="the account the document belongs to (an open account)")
     p.set_defaults(func=run_apply)
+    p = sub.add_parser(
+        "table", help="print a bill (csv, txt, xlsx, xls or pdf) as CSV text for the agent to read")
+    p.add_argument("file", type=Path, metavar="FILE", help="the bill as exported")
+    p.add_argument("--sheet", type=int, default=0, metavar="N",
+                   help="the sheet of a spreadsheet to print, counting from 0 (default 0)")
+    p.add_argument("--password", metavar="P",
+                   help="the password of an encrypted PDF; used for this read only")
+    p.set_defaults(func=run_table)
     return parser
 
 
