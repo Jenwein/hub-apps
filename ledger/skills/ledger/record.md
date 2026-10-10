@@ -52,7 +52,9 @@
 
 Record in chat what no bill will show: cash, Douyin 月付 and other sources the
 user does not import. A bill cannot tell a loan or a reimbursement from a
-purchase, so record those in chat too, even when a bill will show the payment.
+purchase, so record those in chat too, even when a bill will show the payment
+later; a payment in the past may already be in the ledger ("Loans, debts,
+reimbursements" below).
 
 ## Corrections
 
@@ -60,9 +62,19 @@ purchase, so record those in chat too, even when a bill will show the payment.
 `ledger/txns/` for the date and payee), edit it in place, run
 `bean-check ledger/main.beancount`, reply with the entry as it is now, and
 commit. If bean-check reports `Balance failed`, undo the edit and settle it
-with the user as in [import.md](import.md), "When a balance check fails". To delete an entry, remove its lines. Keep its `orderId`, `via` and
-`bill` metadata as they are: they stop the next import from booking the
-payment again.
+with the user as in [import.md](import.md), "When a balance check fails".
+Keep an entry's `orderId`, `via` and `bill` metadata as they are: they stop
+the next import from booking the payment again.
+
+To delete an entry, remove its lines, then run bean-check, reply and commit as
+above. An entry that came from a bill (it has an `orderId`, or its `via` is a
+bill source such as `alipay` or `ccb`) comes back the next time that bill is
+imported. To drop a bill row for good, tell the user so and keep a note in its
+place, a comment with its date, amount and `orderId`:
+`; dropped 2026-09-03 滴滴 20.00 CNY, orderId 2026090322001: paid by a friend`.
+When an import brings that row back, take it out of the staged file before you
+match. If rows like it should never be imported, add an `ignore` rule for them
+instead ([import.md](import.md), Rules).
 
 ## Loans, debts, reimbursements
 
@@ -74,6 +86,21 @@ payment again.
 | "paid Li Si back" | `Liabilities:Payables:LiSi 1000.00 CNY`, funding `-1000.00 CNY` |
 | "the 80 taxi is to be reimbursed" | `Assets:Receivables:Reimbursement 80.00 CNY`, funding `-80.00 CNY`, narration says what it was |
 | "the company paid the reimbursement" | funding `80.00 CNY`, `Assets:Receivables:Reimbursement -80.00 CNY` |
+
+A payment dated in the past may already be in the ledger: its bill was
+imported, or the user told you about it then ("the 80 taxi last Thursday is to
+be reimbursed" after the month's bills are in). Look for it first, by its date
+(give or take a day or two) and amount:
+
+```
+bean-query ledger/main.beancount "SELECT date, payee, narration, account, position, filename, lineno WHERE date >= 2026-10-01 AND date <= 2026-10-03 AND (number = 80 OR number = -80)"
+```
+
+If it is there, do not add an entry: edit that one in place (Corrections
+above). Change its category, the `Expenses:` or `Income:` posting, to the
+receivable or payable of the table; keep its date, amount, funding account and
+metadata. If you are not sure it is the same payment, ask. Add a new entry
+only when there is no such entry.
 
 A reimbursement that is paid only in part: ask the user whether the rest is
 still to come or is their own expense.
