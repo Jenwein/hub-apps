@@ -1,0 +1,9 @@
+# Default WeChat Pay rules of the ledger app. Your own rules in ledger/importers/wechat.yaml
+# (in the ledger directory) come after these, and the last matching rule wins, field by field.
+rules:
+  - method: 零钱
+    fullMatch: true
+    methodAccount: Assets:WeChat:Change
+  - method: 零钱通
+    fullMatch: true
+    methodAccount: Assets:WeChat:LingQianTong

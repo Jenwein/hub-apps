@@ -7,8 +7,11 @@ import json
 import sys
 from pathlib import Path
 
-from . import book
-from .settings import LedgerError
+from . import book, convert
+from .settings import LedgerError, load_settings, source
+
+# The default rules of the app: <app>/importers, next to <app>/scripts.
+DEFAULTS_DIR = Path(__file__).resolve().parents[2] / "importers"
 
 
 def print_json(data) -> None:
@@ -29,6 +32,13 @@ def run_add(args: argparse.Namespace) -> None:
     print_json(book.add_text(args.ledger_dir, text))
 
 
+def run_convert(args: argparse.Namespace) -> None:
+    settings = load_settings(args.ledger_dir)
+    print_json(convert.convert(
+        source(settings, args.source), args.file, args.out, settings=settings,
+        defaults_dir=DEFAULTS_DIR, ledger_dir=args.ledger_dir, account=args.account))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
@@ -38,6 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("add", help="write beancount entries read from stdin to the ledger")
     add_ledger_dir(p)
     p.set_defaults(func=run_add)
+    p = sub.add_parser(
+        "convert", help="convert a bill to staged beancount entries with double-entry-generator")
+    add_ledger_dir(p)
+    p.add_argument("--source", required=True, help="the bill source, e.g. alipay, wechat, ccb")
+    p.add_argument("--file", type=Path, required=True, metavar="BILL", help="the bill as exported")
+    p.add_argument("--out", type=Path, required=True, metavar="STAGED",
+                   help="the staged beancount file to write")
+    p.add_argument("--account", help="the account of the card (required for bank statements)")
+    p.set_defaults(func=run_convert)
     return parser
 
 

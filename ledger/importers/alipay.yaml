@@ -1,0 +1,24 @@
+# Default Alipay rules of the ledger app. Your own rules in ledger/importers/alipay.yaml
+# (in the ledger directory) come after these, and the last matching rule wins, field by field.
+rules:
+  # Payment methods
+  - method: 余额
+    fullMatch: true
+    methodAccount: Assets:Alipay:Balance
+  - method: 余额宝
+    fullMatch: true
+    methodAccount: Assets:Alipay:YuEBao
+  - method: 花呗
+    methodAccount: Liabilities:Alipay:Huabei
+
+  # Categories Alipay assigns
+  - category: 餐饮美食
+    targetAccount: Expenses:Food
+  - category: 交通出行
+    targetAccount: Expenses:Transport
+  - category: 日用百货
+    targetAccount: Expenses:Groceries
+  - category: 充值缴费
+    targetAccount: Expenses:Utilities
+  - category: 医疗健康
+    targetAccount: Expenses:Health

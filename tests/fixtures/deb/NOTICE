@@ -1,0 +1,14 @@
+The bill files in this directory are copied, byte for byte, from the example/ directory of
+double-entry-generator at tag v2.16.0:
+
+    https://github.com/deb-sig/double-entry-generator/tree/v2.16.0/example
+
+double-entry-generator is licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). They are test data only.
+
+    alipay/example-alipay-records.csv                  example/alipay/
+    wechat/example-wechat-records.csv                  example/wechat/
+    mt/example-mt-records.csv                          example/mt/
+    jd/example-jd-records.csv                          example/jd/
+    ccb/交易明细_xxxx_2025xxxx_2025xxxx.xls            example/ccb/
+    icbc/example-icbc-debit-v2-records.csv             example/icbc/debit-v2/
