@@ -42,7 +42,7 @@ def run_add(args: argparse.Namespace) -> None:
         text = sys.stdin.buffer.read().decode("utf-8-sig")
     except UnicodeDecodeError as err:
         raise LedgerError(f"the entries on stdin must be UTF-8 text: {err}") from err
-    print_json(book.add_text(args.ledger_dir, text))
+    print_json(book.add_text(args.ledger_dir, text, via=args.via))
 
 
 def run_convert(args: argparse.Namespace) -> None:
@@ -130,6 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     # run_name(args) returns the exit status; None means 0.
     p = sub.add_parser("add", help="write beancount entries read from stdin to the ledger")
     add_ledger_dir(p)
+    p.add_argument(
+        "--via", default=book.CHAT, metavar="NAME",
+        help="the via of transactions that have none (default: chat, a payment the user told "
+        "about); ledger for entries the agent books itself, such as interest")
     p.set_defaults(func=run_add)
     p = sub.add_parser(
         "convert", help="convert a bill to staged beancount entries with double-entry-generator")

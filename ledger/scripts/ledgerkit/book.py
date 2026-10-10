@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +18,8 @@ from .settings import LedgerError
 UNSORTED_EXPENSE = "Expenses:Unsorted"
 UNSORTED_INCOME = "Income:Unsorted"
 UNMAPPED = "Assets:Unmapped"
+# The `via` of an entry the user told about in chat.
+CHAT = "chat"
 # Accounts that mark entries which still need the user. They are never opened.
 PLACEHOLDERS = frozenset({UNSORTED_EXPENSE, UNSORTED_INCOME, UNMAPPED})
 
@@ -159,16 +162,22 @@ def append_entries(ledger_dir: Path, entries: list) -> list[Path]:
     return touched
 
 
-def _via_chat(entry):
+def _with_via(entry, via: str):
     if isinstance(entry, Transaction) and "via" not in entry.meta:
-        return entry._replace(meta={**entry.meta, "via": "chat"})
+        return entry._replace(meta={**entry.meta, "via": via})
     return entry
 
 
-def add_text(ledger_dir: Path, text: str) -> dict:
-    """Write the entries in `text` to the ledger. Transactions without `via` get `via: "chat"`."""
+def add_text(ledger_dir: Path, text: str, via: str = CHAT) -> dict:
+    """Write the entries in `text` to the ledger. Transactions without `via` get this one.
+
+    `chat` marks a payment the user told about, which a bill row may fix later; an entry the
+    agent books itself (interest, a correction) takes another, such as `ledger`.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9_-]*", via):
+        raise LedgerError(f"via must be a lower-case name such as chat or ledger, got {via!r}")
     ledger_dir = Path(ledger_dir)
-    entries = [_via_chat(entry) for entry in parse_text(text)]
+    entries = [_with_via(entry, via) for entry in parse_text(text)]
     with guarded(ledger_dir):
         files = append_entries(ledger_dir, entries)
     return {"written": len(entries), "files": [p.relative_to(ledger_dir).as_posix() for p in files]}

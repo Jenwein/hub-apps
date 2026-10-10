@@ -266,11 +266,12 @@ its purchase when both are in the bill.
 
   - Yu'E Bao (`Assets:Alipay:YuEBao`) or LingQianTong
     (`Assets:WeChat:LingQianTong`) holding more than the ledger shows: the
-    gain is interest. `lk add` an entry dated today,
+    gain is interest. `lk add --via ledger` an entry dated today,
     `<account> X CNY` / `Income:Interest -X CNY`.
   - Any other difference, including less on Yu'E Bao or LingQianTong than
     the ledger shows: look into it with the user before going on. Never book
-    negative interest.
+    negative interest. A correction the user agrees to is written with
+    `lk add --via ledger`.
   - Then `lk add` one `balance` directive per account, dated tomorrow. A
     liability's balance is negative: owing 300 on Huabei is
     `<tomorrow> balance Liabilities:Alipay:Huabei  -300.00 CNY`.

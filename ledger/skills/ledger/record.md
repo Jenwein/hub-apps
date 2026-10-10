@@ -41,6 +41,12 @@
    balance check of that account: never change an amount to satisfy it;
    settle it with the user as in [import.md](import.md), "When a balance check
    fails".
+
+   `via: "chat"` marks a payment the user told you about, which a bill row may
+   fix later. An entry that is not one (Yu'E Bao or LingQianTong interest, a
+   refund you book yourself, a balance correction) is written with
+   `lk add --via ledger --ledger-dir ledger`, so that matching never takes it
+   for a chat entry.
 4. Reply with the entry as written, then commit (SKILL.md, "Writing to the
    ledger").
 

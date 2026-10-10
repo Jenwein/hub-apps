@@ -19,7 +19,8 @@ from ledgerkit.book import (
     year_file,
 )
 from ledgerkit.cli import main
-from ledgerkit.settings import LedgerError
+from ledgerkit.match import run
+from ledgerkit.settings import LedgerError, parse_settings
 
 ACCTS = "2000-01-01 open Assets:Bank:CCB:1234\n"
 LUNCH = '2026-09-03 * "Canteen" "lunch"\n  Expenses:Food  35.00 CNY\n  Assets:Bank:CCB:1234\n'
@@ -211,3 +212,33 @@ def test_digest_covers_the_ledger_files_but_the_inbox(make_ledger):
     assert second != first
     (d / "txns" / "2026.beancount").rename(d / "txns" / "2027.beancount")
     assert digest(d) not in (first, second)  # a path counts, not only the bytes
+
+
+INTEREST = (
+    '2026-09-30 * "LingQianTong" "interest"\n'
+    "  Assets:WeChat:Change  5.00 CNY\n  Income:Interest  -5.00 CNY\n"
+)
+
+
+def test_add_with_another_via(make_ledger, monkeypatch, capsys):
+    d = make_ledger("2000-01-01 open Assets:WeChat:Change\n")
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(INTEREST.encode("utf-8"))))
+    assert main(["add", "--ledger-dir", str(d), "--via", "ledger"]) == 0
+    capsys.readouterr()
+    text = (d / "txns/2026.beancount").read_text("utf-8")
+    assert 'via: "ledger"' in text and 'via: "chat"' not in text
+    # Matching never takes it for a payment told in chat: a bill row is not folded into it.
+    staged = d.parent / "staged.beancount"
+    staged.write_text(
+        '2026-09-30 * "李四" "转账"\n  via: "wechat"\n  orderId: "W60"\n'
+        "  Assets:WeChat:Change  5.00 CNY\n  Income:Gifts  -5.00 CNY\n", "utf-8")
+    summary = run(d / "main.beancount", staged, d.parent / "plan.json", parse_settings({}))
+    assert (summary["fix"], summary["uncertain"]) == (0, 1)
+
+
+@pytest.mark.parametrize("via", ["", "Ledger", "my ledger"])
+def test_add_refuses_a_bad_via(make_ledger, via):
+    d = make_ledger(ACCTS)
+    with pytest.raises(LedgerError, match="via"):
+        add_text(d, LUNCH, via=via)
+    assert not (d / "txns/2026.beancount").exists()

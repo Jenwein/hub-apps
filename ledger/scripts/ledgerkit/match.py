@@ -53,6 +53,7 @@ from beancount.core.data import Balance, Posting, Transaction
 from beancount.core.flags import FLAG_PADDING
 
 from .book import (
+    CHAT,
     PLACEHOLDERS,
     UNMAPPED,
     UNSORTED_EXPENSE,
@@ -67,7 +68,6 @@ from .book import (
 )
 from .settings import LedgerError, Settings, source
 
-CHAT = "chat"
 EQUITY = "Equity:"
 KINDS = ("new", "duplicate", "fix", "uncertain")
 FLAGS = ("unsorted", "unmapped", "investment")
