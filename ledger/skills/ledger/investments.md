@@ -78,7 +78,8 @@ that file. Commit only `ledger/prices.beancount`.
 
 ## In bills
 
-`lk match` flags rows that mention funds, shares or wealth management
+`lk match` flags rows that mention funds, shares or wealth management in the
+payee, the narration, or the bill's own `txType`, `type` or `category`
 (`investment`; the words are `[import] invest_keywords` in
 `ledger/config.toml`). Ask the user what each one is:
 

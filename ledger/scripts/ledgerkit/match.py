@@ -92,6 +92,8 @@ EQUITY = "Equity:"
 FLOW_ROOTS = ("Expenses:", "Income:")
 KINDS = ("new", "duplicate", "fix", "uncertain")
 FLAGS = ("unsorted", "unmapped", "investment")
+# The bill's own words for a row, kept as metadata: ICBC puts its 摘要 in `txType`.
+INVEST_META = ("txType", "type", "category")
 # The staged keys a fix copies onto the hand entry; `via` goes there as `bill`.
 FIX_KEYS = ("orderId", "payTime")
 # How far a hand entry's amount may be from a bill's and still be asked about (rule 5).
@@ -128,8 +130,11 @@ def _days(a: Transaction, b: Transaction) -> int:
     return abs((a.date - b.date).days)
 
 
-def _mentions(txn: Transaction, words: tuple[str, ...]) -> bool:
-    text = f"{txn.payee or ''}\n{txn.narration or ''}"
+def _mentions(txn: Transaction, words: tuple[str, ...], keys: tuple[str, ...] = ()) -> bool:
+    """One of `words` is in the payee or narration, or in a text value of the metadata `keys`."""
+    values = [txn.meta.get(key) for key in keys]
+    text = "\n".join([txn.payee or "", txn.narration or "",
+                      *(value for value in values if isinstance(value, str))])
     return any(word and word in text for word in words)
 
 
@@ -315,13 +320,15 @@ def _start(settings: Settings) -> date | None:
 
 
 def _flags(txn: Transaction, settings: Settings) -> list[str]:
+    """`unsorted` and `unmapped` for the placeholders S holds; `investment` when an invest
+    keyword is in its payee, narration, or the bill's `txType`, `type` or `category`."""
     accounts = {posting.account for posting in txn.postings}
     found = []
     if accounts & {UNSORTED_EXPENSE, UNSORTED_INCOME}:
         found.append("unsorted")
     if UNMAPPED in accounts:
         found.append("unmapped")
-    if _mentions(txn, settings.invest_keywords):
+    if _mentions(txn, settings.invest_keywords, INVEST_META):
         found.append("investment")
     return found
 

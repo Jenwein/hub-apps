@@ -116,7 +116,8 @@ that is `unsorted` or `unmapped`.
     (`Assets:Receivables:Loans:<Name>`), a reimbursement
     (`Assets:Receivables:Reimbursement`), or another account of the user's.
     A refund goes against the original expense (Refunds below).
-- `investment`: the row mentions a fund, shares or wealth management. Ask; a
+- `investment`: the row mentions a fund, shares or wealth management, in its
+  payee, narration, or the bill's `txType`, `type` or `category`. Ask; a
   purchase or sale is a holding, not spending ([investments.md](investments.md)).
 
 Transfers between the user's own accounts are not spending: top-ups,

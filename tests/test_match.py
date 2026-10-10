@@ -97,6 +97,25 @@ def test_flags():
     assert set(item.flags) == {"unsorted", "unmapped", "investment"}
 
 
+ICBC_REDEMPTION = (  # ICBC puts its 摘要 in txType; the payee and narration name no fund
+    '2023-02-28 * "支付宝（中国）网络技术有限公司" ""\n  via: "icbc"\n'
+    '  txType: "蚂蚁基金赎回到银行"\n'
+    "  Assets:Bank:ICBC:9876  341.58 CNY\n  Income:Other  -341.58 CNY\n"
+)
+
+
+@pytest.mark.parametrize("key", ["txType", "type", "category"])
+def test_investment_keywords_in_the_bill_metadata(key):
+    [item] = run_match("", ICBC_REDEMPTION.replace("txType:", f"{key}:"))
+    assert item.flags == ["investment"]
+
+
+def test_investment_keywords_only_in_those_metadata_keys():
+    for meta in ('  method: "理财通"\n', "  txType: 3\n", '  txType: "转账"\n'):
+        [item] = run_match("", ICBC_REDEMPTION.replace('  txType: "蚂蚁基金赎回到银行"\n', meta))
+        assert item.flags == [], meta
+
+
 def test_run_writes_plan(make_ledger, tmp_path):
     d = make_ledger("2000-01-01 open Assets:Bank:CCB:1234\n", txns={2026: ALIPAY_RIDE})
     staged = tmp_path / "s.beancount"
