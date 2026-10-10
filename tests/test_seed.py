@@ -87,10 +87,30 @@ def test_unknown_source_message():
 
 
 def test_cli_without_a_command_prints_usage_and_fails(capsys):
+    assert main([]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("usage: lk")
+    assert err.endswith("lk: the following arguments are required: <command>\n")
+
+
+@pytest.mark.parametrize(("argv", "message"), [
+    (["nope"], "invalid choice: 'nope'"),
+    (["apply", "--ledger-dir", "x"], "the following arguments are required: --plan"),
+    (["table", "bill.xls", "--sheet", "one"], "invalid int value: 'one'"),
+    (["summary", "--ledger-dir", "x", "--nope"], "unrecognized arguments: --nope"),
+])
+def test_usage_errors_exit_1_not_2(capsys, argv, message):
+    # Exit 2 is `lk apply` asking for decisions; a usage error must never look like that.
+    assert main(argv) == 1
+    err = capsys.readouterr().err
+    last = err.splitlines()[-1]
+    assert err.startswith("usage: lk ") and last.startswith("lk: ") and message in last
+
+
+def test_help_still_exits_0(capsys):
     with pytest.raises(SystemExit) as stop:
-        main([])
-    assert stop.value.code != 0
-    assert "usage" in capsys.readouterr().err
+        main(["apply", "--help"])
+    assert stop.value.code == 0 and "--decide" in capsys.readouterr().out
 
 
 def test_ledger_error_becomes_exit_1(monkeypatch, capsys):

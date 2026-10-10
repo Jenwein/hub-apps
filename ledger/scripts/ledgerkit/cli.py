@@ -9,12 +9,22 @@ import shutil
 import sys
 from datetime import date
 from pathlib import Path
+from typing import NoReturn
 
 from . import apply, book, chart, convert, match, report, service, table
 from .settings import LedgerError, load_settings, source
 
 # The default rules of the app: <app>/importers, next to <app>/scripts.
 DEFAULTS_DIR = Path(__file__).resolve().parents[2] / "importers"
+
+
+class Parser(argparse.ArgumentParser):
+    """A usage error is `lk: <message>` and exit 1, like any other error: exit 2 is `lk apply`
+    asking for decisions. The subparsers are of this class too."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        raise LedgerError(message)
 
 
 def print_json(data) -> None:
@@ -50,8 +60,8 @@ def run_match(args: argparse.Namespace) -> None:
 def parse_decisions(pairs: list[str]) -> dict[str, str]:
     """`ID=new|skip` arguments as a dict.
 
-    A bad one is a LedgerError (exit 1) here: an argparse error would exit 2, which means that
-    apply needs decisions. The same decision twice is harmless, two different ones are an error.
+    A bad one is a LedgerError (exit 1). The same decision twice is harmless, two different ones
+    are an error.
     """
     decisions = {}
     for pair in pairs:
@@ -113,7 +123,7 @@ def run_fava_unit(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lk", description="Tools for the ledger app.")
+    parser = Parser(prog="lk", description="Tools for the ledger app.")
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
     # Add a command as
     #     p = sub.add_parser("name", help="..."); add_ledger_dir(p); p.set_defaults(func=run_name)
@@ -190,8 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
     try:
+        args = build_parser().parse_args(argv)
         return args.func(args) or 0
     except LedgerError as err:
         print(f"lk: {err}", file=sys.stderr)
