@@ -50,11 +50,15 @@ the entry balances. Write it with `lk add` ([record.md](record.md)).
   Assets:Invest:Stock:MAOTAI     -100 MAOTAI {} @ 1600.00 CNY
   Expenses:Fees                  5.00 CNY
   Assets:Bank:CCB:1234       159995.00 CNY
-  Income:Investment
+  Income:Investment         -10000.00 CNY
 ```
 
-`{}` takes the oldest units, `@` is the sale price, and `Income:Investment`
-without an amount takes the gain or loss. A dividend:
+`{}` takes the oldest units and `@` is the sale price. `Income:Investment` is
+the gain, negative (a loss is positive): what the units sold for minus what
+they cost, here 100 × (1600.00 − 1500.00). Read the cost of the units held with
+`bean-query ledger/main.beancount "SELECT sum(position) WHERE account = 'Assets:Invest:Stock:MAOTAI'"`.
+Give it its amount like every other posting: `lk match` refuses a staged entry
+with a posting left empty. A dividend:
 `Assets:Bank:CCB:1234 120.00 CNY` / `Income:Investment -120.00 CNY`.
 
 ## Prices
