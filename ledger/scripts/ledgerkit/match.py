@@ -28,7 +28,10 @@ applies wins:
    Across the batch the nearest pairs go first, then in batch and file order, each entry once;
    several entries left at a staged entry's nearest distance make it uncertain. A loan,
    reimbursement or transfer side of the entry never pairs through the channel, and no fix books
-   an account twice in one entry. A pair that fails goes on to rules 3 and 5, which ask.
+   an account twice in one entry. A pair that fails goes on to rules 3 and 5, which ask. A hand
+   entry that two or more staged entries may be (in their window, with the same or a near signed
+   funding amount as in rule 5, whatever the kind, category or account) is contested: rule 2
+   fixes it for none of them and no claim of rule 3 takes it; it stays for rules 3 and 5 to ask.
 3. posting: entries in the window that share a posting (account and amount, placeholders aside)
    with S are its candidates. Across the batch, bank lines that name a payment channel claim theirs
    first, then bank lines claim candidates that are transfers when no other candidate is as near;
@@ -346,6 +349,8 @@ class _Matcher:
         ]
         self.used: set[int] = set()
         self.decided: dict[int, Decision] = {}
+        # Open hand entries that two or more staged entries may be (see `contest`).
+        self.contested: set[int] = set()
 
     def items(self) -> list[Item]:
         self.before_start()
@@ -429,11 +434,29 @@ class _Matcher:
                 if rows:
                     self.take(n, rows[0], "duplicate", "statement-row")
 
+    def contest(self) -> None:
+        """Find the open hand entries that two or more undecided staged entries may be.
+
+        A staged entry may be one when the entry is in its window and has a signed funding amount
+        the same as or near its own (rule 5's measure), whatever the kind, category or account.
+        Rule 2 fixes such an entry for none of them and no claim of rule 3 takes it, so that each
+        of them is asked about it.
+        """
+        rows: Counter = Counter()
+        for n in self.undecided():
+            txn = self.batch[n]
+            for i in self.near(txn):
+                if _is_open_hand(self.ledger[i]) and _near_amount(self.ledger[i], txn):
+                    rows[i] += 1
+        self.contested = {i for i, count in rows.items() if count > 1}
+
     def chats(self) -> None:
         """Rule 2 over the whole batch: nearest first, then in batch and file order.
 
-        A staged entry whose nearest open hand entries left are several is uncertain.
+        A staged entry whose nearest open hand entries left are several is uncertain. A contested
+        entry is never fixed.
         """
+        self.contest()
         found: dict[int, dict[int, tuple[Posting, Posting]]] = {}
         order = []
         for n in self.undecided():
@@ -441,6 +464,8 @@ class _Matcher:
             found[n] = {}
             for i in self.near(txn):
                 entry = self.ledger[i]
+                if i in self.contested:
+                    continue
                 if _is_open_hand(entry) and _same_kind(entry, txn):
                     pair = _chat_pair(entry, txn, self.settings, self.bank[n])
                     if pair:
@@ -463,7 +488,8 @@ class _Matcher:
         """Rule 3 for bank lines: channel lines claim candidates, then lines claim transfers.
 
         Each round goes over the whole batch nearest first, then in batch and file order. A line
-        claims a transfer only when it has no other candidate as near as that transfer.
+        claims a transfer only when it has no other candidate as near as that transfer. A
+        contested hand entry is never claimed; it still counts as a candidate.
         """
         for reason in ("channel", "transfer"):
             pairs = []
@@ -477,6 +503,8 @@ class _Matcher:
                           if not is_transfer(self.ledger[i])]
                 limit = min(others, default=None)
                 for i in found:
+                    if i in self.contested:
+                        continue
                     days = _days(self.ledger[i], txn)
                     if reason == "channel" or (
                             is_transfer(self.ledger[i]) and (limit is None or days < limit)):

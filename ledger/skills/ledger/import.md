@@ -92,7 +92,7 @@ It writes the plan and prints
 |---|---|---|
 | `new` | not in the ledger | writes it |
 | `duplicate` | already in the ledger; reason `order-id` (same order), `statement-row` (this statement line was imported before), `channel` (a bank line paid through a platform whose entry is in), `transfer` (the other side of a transfer already booked) | skips it |
-| `fix` | the bill's copy of a chat entry: one recorded from chat, or added in Fava or by hand, that no bill has claimed yet. Only when it is surely the same payment: the same amount; the entry's `channel` is this bill's source, or the row is a line of that account's own bank statement; both are transfers between the user's accounts, or both are spending or income; no other category. Else the row is uncertain | keeps the chat entry, sets its account to the one that paid, adds the bill's order id |
+| `fix` | the bill's copy of a chat entry: one recorded from chat, or added in Fava or by hand, that no bill has claimed yet. Only when it is surely the same payment: the same amount; the entry's `channel` is this bill's source, or the row is a line of that account's own bank statement; both are transfers between the user's accounts, or both are spending or income; no other category; and no other row of the batch, near in date, has the same or a near amount. Else the row is uncertain | keeps the chat entry, sets its account to the one that paid, adds the bill's order id |
 | `uncertain` | needs the user | waits for `--decide` |
 
 A `duplicate` with reason `before-start` is a row dated before `[ledger] start`:

@@ -649,12 +649,17 @@ def test_platform_row_never_fixes_an_entry_paid_by_card():  # probe C
         assert (item.kind, item.reason, item.fix) == ("uncertain", "possible-duplicate", None)
         assert '"dinner"' in item.existing[0]["text"]
     # The headphones are another payment. The card's own statement fixes the dinner with its POS
-    # line; its Alipay line is the headphones' echo.
+    # line, when no other line of the statement could be the dinner.
+    pos_only = CCB_DINNER_AND_HEADPHONES.split("\n\n")[0] + "\n"
+    [item] = run_match(CHAT_DINNER + "\n" + HEADPHONES, pos_only)
+    assert (item.kind, item.reason) == ("fix", "chat")
+    assert item.fix == {"file": "<string>", "line": 1, "account_from": CARD,
+                        "account_to": CARD, "meta": {"bill": "ccb"}}
+    # Its Alipay line of the same amount could be the dinner too: the POS line asks, and the
+    # Alipay line is the headphones' echo.
     items = run_match(CHAT_DINNER + "\n" + HEADPHONES, CCB_DINNER_AND_HEADPHONES)
-    assert kinds(items) == [("fix", "chat"), ("duplicate", "channel")]
-    assert '"dinner"' in items[0].existing[0]["text"]
-    assert items[0].fix == {"file": "<string>", "line": 1, "account_from": CARD,
-                            "account_to": CARD, "meta": {"bill": "ccb"}}
+    assert kinds(items) == [("uncertain", "possible-duplicate"), ("duplicate", "channel")]
+    assert ['"dinner"' in e["text"] for e in items[0].existing] == [True]
     assert '"耳机"' in items[1].existing[0]["text"]
 
 
@@ -743,22 +748,31 @@ def test_another_category_is_never_fixed_silently():
         ("fix", "chat")]
 
 
-def test_each_row_fixes_its_nearest_hand_entry():
-    snack = CHAT_LUNCH.replace("2026-09-06", "2026-09-03").replace("lunch", "snack")
-    rows = WX_LUNCH.replace('"W1"', '"W2"') + WX_LUNCH.replace("2026-09-06", "2026-09-03")
-    items = run_match(snack + CHAT_LUNCH, rows)  # in the file 09-06 comes before 09-03
+def test_each_row_fixes_its_own_hand_entry():
+    def rows_and_entries(day):  # a snack on `day` and the lunch on 09-06, a row for each
+        snack = CHAT_LUNCH.replace("2026-09-06", day).replace("lunch", "snack")
+        rows = WX_LUNCH.replace('"W1"', '"W2"') + WX_LUNCH.replace("2026-09-06", day)
+        return snack + CHAT_LUNCH, rows  # in the file the 09-06 row comes first
+
+    # Five days apart, each entry has one row in its window: each row fixes its own.
+    items = run_match(*rows_and_entries("2026-09-01"))
     assert kinds(items) == [("fix", "chat")] * 2
     assert [(i.date, i.fix["meta"]["orderId"]) for i in items] == [
-        ("2026-09-03", "W1"), ("2026-09-06", "W2")]
+        ("2026-09-01", "W1"), ("2026-09-06", "W2")]
     assert ['"snack"' in i.existing[0]["text"] for i in items] == [True, False]
-    # A row a day off never takes the entry from its same-day row, though it comes first.
+    # Three days apart, either row may be either entry: both ask, each about its nearest.
+    items = run_match(*rows_and_entries("2026-09-03"))
+    assert kinds(items) == [("uncertain", "possible-chat")] * 2
+    assert [['"snack"' in e["text"] for e in i.existing] for i in items] == [[True], [False]]
+    # A row a day off may be the lunch too: neither fixes it, neither is new.
     earlier = WX_LUNCH.replace("2026-09-06", "2026-09-05").replace('"W1"', '"W0"')
     items = run_match(CHAT_LUNCH, earlier + WX_LUNCH)
-    assert kinds(items) == [("new", "new"), ("fix", "chat")]
-    assert items[1].fix["meta"]["orderId"] == "W1"
-    # Two entries as near as each other still make the row uncertain.
+    assert kinds(items) == [("uncertain", "possible-chat")] * 2
+    assert all('"lunch"' in i.existing[0]["text"] for i in items)
     twins = CHAT_LUNCH + CHAT_LUNCH.replace("lunch", "snack")
-    assert kinds(run_match(twins, earlier + WX_LUNCH)) == [("uncertain", "chat")] * 2
+    items = run_match(twins, earlier + WX_LUNCH)
+    assert kinds(items) == [("uncertain", "possible-chat")] * 2
+    assert [len(i.existing) for i in items] == [2, 2]
 
 
 ALIPAY_ONLY = parse_settings({"chat": {"channels": {"alipay": "Assets:Alipay:Balance"}}})
@@ -775,15 +789,87 @@ DINNER_AND_TOPUP = (  # an Alipay bill: a dinner paid by card, then the top-up
 
 
 def test_card_paid_dinner_never_fixes_a_top_up():  # probe G
-    # Named as an Alipay top-up: the top-up row fixes it, the dinner is new.
-    for meta in ('  channel: "alipay"\n', '  via: "chat"\n  channel: "alipay"\n'):
-        named = FAVA_TOPUP.replace('"top up Alipay"\n', f'"top up Alipay"\n{meta}')
-        items = run_with(ALIPAY_ONLY, named, DINNER_AND_TOPUP)
-        assert kinds(items) == [("new", "new"), ("fix", "chat")]
-        assert items[1].fix["meta"]["orderId"] == "A41"
-    # Without a channel no platform row fixes it. Both rows share its card posting: ask.
-    for meta in ("", '  via: "chat"\n'):
+    # Both rows could be the top-up, named as an Alipay one or not: neither fixes it, both ask.
+    metas = ("", '  via: "chat"\n', '  channel: "alipay"\n', '  via: "chat"\n  channel: "alipay"\n')
+    for meta in metas:
         entry = FAVA_TOPUP.replace('"top up Alipay"\n', f'"top up Alipay"\n{meta}')
         items = run_with(ALIPAY_ONLY, entry, DINNER_AND_TOPUP)
         assert kinds(items) == [("uncertain", "possible-duplicate")] * 2
         assert all('"top up Alipay"' in i.existing[0]["text"] for i in items)
+    # The dinner five days earlier is no candidate: the top-up row fixes the named entry, and the
+    # dinner is new.
+    bill = DINNER_AND_TOPUP.replace("2026-10-05", "2026-10-01")
+    for meta in metas[2:]:
+        named = FAVA_TOPUP.replace('"top up Alipay"\n', f'"top up Alipay"\n{meta}')
+        items = run_with(ALIPAY_ONLY, named, bill)
+        assert kinds(items) == [("new", "new"), ("fix", "chat")]
+        assert items[1].fix["meta"]["orderId"] == "A41"
+
+
+# N1 follow-up: a hand entry that two staged rows may be is fixed by neither (contested).
+
+LUNCH_AND_ANOTHER = (  # the lunch, sorted as shopping by a rule; another 35 the next day
+    '2026-09-06 * "食堂" "午餐"\n  via: "wechat"\n  orderId: "W1"\n'
+    "  Expenses:Shopping  35.00 CNY\n  Assets:WeChat:Change  -35.00 CNY\n\n"
+    '2026-09-07 * "某店" "其他"\n  via: "wechat"\n  orderId: "W2"\n'
+    "  Expenses:Unsorted  35.00 CNY\n  Assets:WeChat:Change  -35.00 CNY\n"
+)
+LOAN_AND_ANOTHER = (  # the loan's transfer, uncategorised; a loan to Li Si a rule booked
+    LOAN_TRANSFER + "\n"
+    '2026-09-07 * "李四" "转账"\n  via: "wechat"\n  orderId: "W32"\n'
+    "  Assets:Receivables:Loans:LiSi  500.00 CNY\n  Assets:WeChat:Change  -500.00 CNY\n"
+)
+CCB_DINNER_AND_ALIPAY = (  # the dinner's POS line, sorted as groceries; an Alipay line
+    '2026-10-03 * "某饭店" "POS消费"\n  via: "ccb"\n'
+    f"  Expenses:Groceries  200.00 CNY\n  {CARD}  -200.00 CNY\n\n"
+    '2026-10-04 * "支付宝" "支付宝-淘宝"\n  via: "ccb"\n'
+    f"  Expenses:Unsorted  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+LOAN_ON_CARD = (  # "lent Zhang San 200": no channel
+    '2026-10-03 * "张三" "lent"\n  via: "chat"\n'
+    f"  Assets:Receivables:Loans:ZhangSan  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+CCB_LOAN_AND_REPAYMENT = (  # the loan's line, uncategorised; a card repayment a rule booked
+    '2026-10-03 * "张三" "转账"\n  via: "ccb"\n'
+    f"  Expenses:Unsorted  200.00 CNY\n  {CARD}  -200.00 CNY\n\n"
+    '2026-10-04 * "工行信用卡" "还款"\n  via: "ccb"\n'
+    f"  Liabilities:CreditCard:ICBC:5678  200.00 CNY\n  {CARD}  -200.00 CNY\n"
+)
+
+
+@pytest.mark.parametrize(("settings", "entry", "rows", "reason"), [
+    (SET, CHAT_LUNCH, LUNCH_AND_ANOTHER, "possible-chat"),
+    (WALLETS, LOAN_CHAT, LOAN_AND_ANOTHER, "possible-duplicate"),
+    (SET, CHAT_DINNER, CCB_DINNER_AND_ALIPAY, "possible-duplicate"),
+    (SET, LOAN_ON_CARD, CCB_LOAN_AND_REPAYMENT, "possible-duplicate"),
+], ids=["platform-category", "platform-shape", "bank-category", "bank-shape"])
+def test_hand_entry_two_rows_may_be_is_fixed_by_neither(settings, entry, rows, reason):
+    # The true row fails the category or kind check; the other row would pass. Neither fixes
+    # the entry, no claim takes it, and both ask about it.
+    items = run_with(settings, entry, rows)
+    assert kinds(items) == [("uncertain", reason)] * 2
+    narration = f'"{parse_text(entry)[0].narration}"'
+    assert all(i.fix is None and narration in i.existing[0]["text"] for i in items)
+
+
+def test_single_row_for_a_hand_entry_still_fixes_it():
+    other = (
+        '{day} * "某店" "其他"\n  via: "wechat"\n  orderId: "W2"\n'
+        "  Expenses:Unsorted  {amount} CNY\n  Assets:WeChat:Change  -{amount} CNY\n"
+    )
+    # The other row has an amount not near the entry's, or is outside the entry's window.
+    for row in (other.format(day="2026-09-07", amount="50.00"),
+                other.format(day="2026-09-10", amount="35.00")):
+        items = run_match(CHAT_LUNCH, WX_LUNCH + row)
+        assert kinds(items) == [("fix", "chat"), ("new", "new")]
+        assert items[0].fix["meta"]["orderId"] == "W1"
+    # A POS line alone fixes the dinner; the Alipay line of another amount waits for its bill.
+    pos = CCB_DINNER_AND_ALIPAY.replace("Expenses:Groceries", "Expenses:Food")
+    statement = pos.replace("Unsorted  200.00 CNY\n  Assets:Bank:CCB:1234  -200.00",
+                            "Unsorted  150.00 CNY\n  Assets:Bank:CCB:1234  -150.00")
+    assert kinds(run_match(CHAT_DINNER, statement)) == [
+        ("fix", "chat"), ("uncertain", "channel-unmatched")]
+    # A row its order id already settles is no candidate for the entry.
+    imported = WX_LUNCH.replace("2026-09-06", "2026-09-05").replace('"W1"', '"W0"')
+    items = run_match(CHAT_LUNCH + "\n" + imported, imported + WX_LUNCH)
+    assert kinds(items) == [("duplicate", "order-id"), ("fix", "chat")]
