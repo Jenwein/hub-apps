@@ -633,9 +633,10 @@ def test_digest_items_and_mark_digested(store):
     assert [m["id"] for m in listing["items"]] == [other, routed, judged]
     assert listing["items"][0]["text"] == "see you on Wednesday"
 
-    assert store.mark_digested(t(60)) == 3
+    assert listing["up_to"] > 0
+    assert store.mark_digested(t(60), up_to=listing["up_to"]) == 3
     assert store.last_digest() == iso(t(60))
-    assert store.digest_items(1, 10) == {"items": [], "total": 0, "next_page": None}
+    assert store.digest_items(1, 10) == {"items": [], "total": 0, "next_page": None, "up_to": 0}
     assert store.message(routed)["status"] == "digested"
     assert store.message(routed)["digested_at"] == iso(t(60))
     # nothing else moved
@@ -653,6 +654,73 @@ def test_digest_items_page(store):
     assert first["total"] == 12 and first["next_page"] == 2
     assert store.digest_items(3, 5)["next_page"] is None
     assert len(store.digest_items(3, 5)["items"]) == 2
+
+
+def test_mail_that_becomes_digest_after_the_listing_is_not_marked_digested(store):
+    listed = [put(store, 1, status="digest"), put(store, 2, status="digest")]
+    early = put(store, 3)  # pending when the digest was listed, with an id below the digest rows
+    listed.append(put(store, 4, status="digest"))  # so the highest listed id is above `early`
+    listing = store.digest_items(1, 10)
+    assert [m["id"] for m in listing["items"]] == listed
+
+    routed = put(store, 5, status="digest")  # a poll routes a muted sender's mail
+    store.judge({early: "digest"}, t(1))  # a triage judges an older mail, id below the listing
+    assert store.digest_items(1, 10)["total"] == 5
+
+    assert store.mark_digested(t(2), up_to=listing["up_to"]) == 3
+    assert store.message(routed)["status"] == "digest"
+    assert store.message(early)["status"] == "digest"
+    assert {m["id"] for m in store.digest_items(1, 10)["items"]} == {routed, early}
+    # ... and they are what the next digest lists, then marks
+    nxt = store.digest_items(1, 10)
+    assert nxt["up_to"] > listing["up_to"]
+    assert store.mark_digested(t(3), up_to=nxt["up_to"]) == 2
+    assert store.digest_items(1, 10)["total"] == 0
+
+
+def test_digest_paging_does_not_shift_when_mail_arrives_between_pages(store):
+    # the new mail goes to a mailbox that sorts first, where it would push every item down a page
+    ids = [put(store, n, status="digest") for n in range(1, 13)]
+    first = store.digest_items(1, 5)
+    assert [m["id"] for m in first["items"]] == ids[:5] and first["next_page"] == 2
+    up_to = first["up_to"]
+
+    for n in range(100, 104):
+        put(store, n, address=B, status="digest")
+    store.judge({put(store, 200): "digest"}, t(1))
+
+    seen, page = [m["id"] for m in first["items"]], first["next_page"]
+    while page:
+        more = store.digest_items(page, 5, up_to=up_to)
+        assert more["total"] == 12 and more["up_to"] == up_to
+        seen += [m["id"] for m in more["items"]]
+        page = more["next_page"]
+    assert seen == ids  # every listed message once, in order, none of the new ones
+    # without the cutoff the listing is the new state: 17 messages
+    assert store.digest_items(1, 50)["total"] == 17
+
+
+def test_nothing_listed_means_nothing_is_marked(store):
+    listing = store.digest_items(1, 10)
+    assert listing["items"] == [] and listing["up_to"] == 0
+    late = put(store, 1, status="digest")
+    assert store.mark_digested(t(1), up_to=listing["up_to"]) == 0
+    assert store.message(late)["status"] == "digest"
+    assert store.last_digest() == iso(t(1))
+
+
+def test_digest_cutoff_survives_forget_and_earlier_digests(store):
+    put(store, 1, status="digest")
+    put(store, 2, address=B, status="digest")
+    put(store, 3, address=B, status="digest")
+    listing = store.digest_items(1, 10)
+    store.forget(B)  # the highest numbers go away; new ones must not reuse them
+    new = put(store, 4, status="digest")
+    assert store.mark_digested(t(1), up_to=listing["up_to"]) == 1  # only A's message 1
+    assert store.message(new)["status"] == "digest"
+    assert listing["total"] == 3
+    again = store.digest_items(1, 10)
+    assert again["up_to"] > listing["up_to"] and [m["id"] for m in again["items"]] == [new]
 
 
 # -- shape -----------------------------------------------------------------------------------

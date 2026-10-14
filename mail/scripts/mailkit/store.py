@@ -79,6 +79,7 @@ _SCHEMA = (
         judged_at TEXT,
         pushed_at TEXT,
         digested_at TEXT,
+        digest_seq INTEGER,
         UNIQUE (address, uidvalidity, uid)
     )""",
     "CREATE INDEX IF NOT EXISTS messages_status ON messages (status, address, id)",
@@ -387,10 +388,24 @@ class Store:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (address, uidvalidity, uid) DO NOTHING", values)
             if cursor.rowcount == 1:
+                if status == "digest":
+                    self._enter_digest(db, cursor.lastrowid)
                 return cursor.lastrowid
             return db.execute(
                 "SELECT id FROM messages WHERE address = ? AND uidvalidity = ? AND uid = ?",
                 (address, uidvalidity, uid)).fetchone()["id"]
+
+    @staticmethod
+    def _enter_digest(db: sqlite3.Connection, mid: int) -> None:
+        """Number a message that has just become `digest`. The numbers only grow (they are never
+        reused, not even after `forget`), so "the digest as it was when it was listed" is the
+        messages numbered up to a value, whatever their ids: a pending message with a low id can
+        be judged `digest` after a higher-id one was routed there."""
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('digest_seq', '1') "
+            "ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
+        seq = db.execute("SELECT value FROM meta WHERE key = 'digest_seq'").fetchone()[0]
+        db.execute("UPDATE messages SET digest_seq = ? WHERE id = ?", (int(seq), mid))
 
     def message(self, id: int) -> dict:
         """The stored message with all its fields, text included."""
@@ -452,6 +467,8 @@ class Store:
                     cursor = db.execute(
                         "UPDATE messages SET status = 'digest', judged_at = ? "
                         "WHERE id = ? AND status = 'pending'", (when, mid))
+                    if cursor.rowcount:
+                        self._enter_digest(db, mid)
                 judged += cursor.rowcount
             self._sync_batch(db)
         return judged
@@ -631,22 +648,37 @@ class Store:
             return db.execute(
                 "SELECT COUNT(*) FROM pushes WHERE pushed_at > ?", (_iso(since),)).fetchone()[0]
 
-    def digest_items(self, page: int = 1, per_page: int = 10) -> dict:
+    def digest_items(self, page: int = 1, per_page: int = 10, up_to: int | None = None) -> dict:
         """The messages waiting for the next digest as `{"items": [full messages], "total",
-        "next_page"}`, grouped by mailbox (ordered by address, then arrival)."""
-        with self._transaction() as db:
-            return self._paged(
-                db, _MESSAGE_COLUMNS, "status = 'digest'", [], "address, id", page, per_page,
-                _message)
+        "next_page", "up_to"}`, grouped by mailbox (ordered by address, then arrival).
 
-    def mark_digested(self, now: datetime) -> int:
-        """A digest was sent: every `digest` message becomes `digested`, and `last_digest` is
-        `now`. Returns how many messages moved."""
+        The listing is a fixed set. Without `up_to` it is every `digest` message now, and the
+        result's `up_to` names that set; pass the same `up_to` for the later pages and to
+        `mark_digested`. Mail that becomes `digest` meanwhile (a poll that routes a muted
+        sender's mail, a triage that judges one) is outside it: it cannot shift the pages, and
+        it is not marked digested without having been listed. `up_to` is a number from this
+        method, not a message id; 0 means there was nothing."""
+        with self._transaction() as db:
+            if up_to is None:
+                up_to = db.execute(
+                    "SELECT COALESCE(MAX(digest_seq), 0) FROM messages WHERE status = 'digest'"
+                ).fetchone()[0]
+            listing = self._paged(
+                db, _MESSAGE_COLUMNS, "status = 'digest' AND digest_seq <= ?", [up_to],
+                "address, id", page, per_page, _message)
+        listing["up_to"] = up_to
+        return listing
+
+    def mark_digested(self, now: datetime, up_to: int | None = None) -> int:
+        """A digest was sent: the `digest` messages become `digested`, and `last_digest` is
+        `now`. With `up_to` from `digest_items`, only the messages that listing covered; without
+        it, every `digest` message. Returns how many messages moved."""
         when = _iso(now)
+        bound, params = ("", [when]) if up_to is None else (" AND digest_seq <= ?", [when, up_to])
         with self._transaction(write=True) as db:
             moved = db.execute(
-                "UPDATE messages SET status = 'digested', digested_at = ? WHERE status = 'digest'",
-                (when,)).rowcount
+                "UPDATE messages SET status = 'digested', digested_at = ? "
+                f"WHERE status = 'digest'{bound}", params).rowcount
             db.execute(
                 "INSERT INTO meta (key, value) VALUES ('last_digest', ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (when,))
