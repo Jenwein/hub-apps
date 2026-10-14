@@ -5,24 +5,28 @@ full and has not changed since. The tool holds to it, so that no slip of the age
 
 - `create` saves a draft in `mail/.state/drafts/<draft id>.json`: a new mail, a reply to a
   message of the index (`reply_to`), or a forward of one with its attachments (`forward_of`).
-  Attachment files are read when they are added. `edit` changes a draft.
-- `show` renders the whole draft as text: the mailbox and address it goes out from, To, Cc,
-  Subject, each attachment with its size, the total size with the provider's limit and a
-  WARNING line when the mail is over it, then the text that is sent. It reads every attachment
-  file again and records a hash of everything it showed (`shown_hash`), the content of each
+  Attachment files are read and hashed when they are added; a file of the hub's `secrets/`
+  folder or a `.env` file is refused (the command line refuses them as a body file too).
+  `edit` changes a draft.
+- `show` renders the whole draft as text: the mailbox and address it goes out from, To, Cc, a
+  Note when a reply does not go to the original's sender, Subject, each attachment with its
+  size, the total size with the provider's limit and a WARNING line when the mail is over it,
+  then the text that is sent. It refuses an attachment file that changed on disk since it was
+  attached, and records a hash of everything it showed (`shown_hash`), the content of each
   attachment included.
 - `send` refuses a draft that was never shown, one whose hash is not the one shown (an edit
   since, or an attachment file that changed on disk: the files are read again, and what is sent
-  is exactly the bytes that were checked), and one over the size limit. Then it builds the
-  message, sends it, deletes the draft and saves a copy in Sent unless the provider does that
-  itself.
+  is exactly the bytes that were checked), one over the size limit, and one that holds the
+  sending mailbox's password. Then it builds the message, sends it, deletes the draft and saves
+  a copy in Sent unless the provider does that itself.
 
 Replies: from the mailbox that received the original (unless another is named), to its Reply-To
 addresses, else to its sender; `reply_all` adds its To and Cc. A message the user sent
 themselves is answered to its recipients. The user's own addresses (every mailbox in
 config.toml, whatever the case of the letters or a `+tag`) are never among the recipients
 taken from the original, and no address is there twice. The subject gets one `Re: `;
-In-Reply-To and References keep the thread.
+In-Reply-To and References keep the thread, written as they are (folded between ids, never
+encoded) and only with ids of plain ASCII.
 
 Forwards: `Fwd: ` once, the original's attachments (downloaded with BODY.PEEK, so it stays
 unread), and the original quoted below the user's text.
@@ -43,6 +47,7 @@ import re
 import secrets
 import stat
 from datetime import UTC, datetime
+from email import headerregistry
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formatdate, make_msgid
@@ -72,9 +77,35 @@ MAX_REFERENCES = 20  # ids kept in References: the first of the thread and the l
 SENT = "\\Sent"
 KINDS = ("new", "reply", "forward")
 EDITABLE = ("mailbox", "to", "cc", "subject", "body", "attach", "drop")
+SECRETS_DIR = "secrets"  # in the hub: passwords and tokens, never attached nor used as a text
+
+
+class _IdsHeader(headerregistry.UnstructuredHeader):
+    """Message-ID, In-Reply-To and References: message ids, which must reach the other side
+    exactly as they are. The stdlib folds them as free text, and an id longer than a line (an
+    Exchange id is often 80-100 characters) comes out as an RFC 2047 encoded word, which is no
+    id at all and breaks the thread. Here they are folded only at the spaces between ids and
+    never encoded; an id longer than a line stays whole (a line may have 998 characters)."""
+
+    max_count = 1
+
+    def fold(self, *, policy) -> str:
+        lines, line = [], f"{self.name}:"
+        for count, ident in enumerate(str(self).split()):
+            if count and len(line) + 1 + len(ident) > policy.max_line_length:
+                lines.append(line)
+                line = ""
+            line += f" {ident}"
+        lines.append(line)
+        return policy.linesep.join(lines) + policy.linesep
+
+
+_HEADERS = headerregistry.HeaderRegistry()
+for _name in ("message-id", "in-reply-to", "references"):
+    _HEADERS.map_to_type(_name, _IdsHeader)
 # CRLF line ends, and 7-bit: a header with non-ASCII text is RFC 2047, a file name RFC 2231, the
-# text base64 or quoted-printable, so no server needs 8BITMIME
-POLICY = SMTP.clone(cte_type="7bit")
+# text base64 or quoted-printable, so no server needs 8BITMIME; message ids as they are
+POLICY = SMTP.clone(cte_type="7bit", header_factory=_HEADERS)
 # what the hash of a draft covers, besides its attachments (name, type, size and content)
 _HASHED = ("kind", "source", "mailbox", "address", "provider", "to", "cc", "subject", "body",
            "quoted", "in_reply_to", "references")
@@ -85,6 +116,8 @@ _CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _REPLY = re.compile(r"\s*(re|回复|答复|回覆)\s*(\[\d+\])?\s*[:：]", re.IGNORECASE)
 _FORWARD = re.compile(r"\s*(fwd?|转发|轉發|转寄|轉寄)\s*(\[\d+\])?\s*[:：]", re.IGNORECASE)
 _CONTENT_TYPE = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", re.IGNORECASE)
+# a message id that can go in a header as it is: printable ASCII in angle brackets
+_MESSAGE_ID = re.compile(r"<[\x21-\x3b\x3d\x3f-\x7e]+>")
 
 
 # -- values ----------------------------------------------------------------------------------
@@ -145,6 +178,10 @@ def _unique(addresses: list[str], besides: list[str] = ()) -> list[str]:
         if not any(accounts.same_address(address, other) for other in (*besides, *kept)):
             kept.append(address)
     return kept
+
+
+def _message_id(value) -> bool:
+    return isinstance(value, str) and _MESSAGE_ID.fullmatch(value) is not None
 
 
 def _one_line(value) -> bool:
@@ -218,9 +255,9 @@ def _valid(data) -> bool:
             and _one_line(data.get("subject"))
             and all(isinstance(data.get(key), list) for key in lists)
             and all(_usable(address) for key in ("to", "cc") for address in data[key])
-            and all(_one_line(ref) and " " not in ref for ref in data["references"])
-            and (data.get("in_reply_to") is None or (
-                _one_line(data["in_reply_to"]) and " " not in data["in_reply_to"]))
+            and all(_message_id(ref) for ref in data["references"])
+            and (data.get("in_reply_to") is None or _message_id(data["in_reply_to"]))
+            and (data.get("reply_note") is None or _one_line(data["reply_note"]))
             and (source is None or (isinstance(source, int) and not isinstance(source, bool)))
             and (data.get("shown_hash") is None or isinstance(data["shown_hash"], str))
             and isinstance(data.get("attachments"), list)
@@ -287,10 +324,27 @@ def _content_type(name: str, given: str | None) -> str:
     return kind.lower()
 
 
-def _attachment(path, *, name: str | None = None, content_type: str | None = None,
+def refuse_secret_file(path, hub: Path, what: str) -> None:
+    """MailError when the file `path` must never go into a mail: anything in the hub's
+    `secrets/` folder (the mailbox passwords live there), followed through links and compared
+    without case, and any file whose name starts with `.env`. `what` names the file in the
+    message ("the attachment", "the body file")."""
+    given = Path(path)
+    real = Path(os.path.realpath(given))
+    inside = [part.casefold() for part in Path(os.path.realpath(Path(hub) / SECRETS_DIR)).parts]
+    in_secrets = [part.casefold() for part in real.parts][:len(inside)] == inside
+    if in_secrets or any(name.casefold().startswith(".env") for name in (given.name, real.name)):
+        raise MailError(
+            f"{what} {given} is refused: files in the hub's {SECRETS_DIR}/ folder and .env "
+            "files hold passwords and keys, and are never sent")
+
+
+def _attachment(path, hub: Path, *, name: str | None = None, content_type: str | None = None,
                 index: int = 0) -> dict:
     """The draft entry of the file `path`, read now: where it is, the name it is sent under
-    (`name`, default the file's own), its type, size and content hash."""
+    (`name`, default the file's own), its type, size and content hash. A file of the hub's
+    secrets, or a .env file, is refused."""
+    refuse_secret_file(path, hub, "the attachment")
     path = Path(os.path.abspath(path))
     data = _read_file(path)
     name = safe_filename(path.name if name is None else name, index)
@@ -342,8 +396,10 @@ def _render(draft_id: str, draft: dict) -> str:
         f"From: {draft['mailbox']} <{draft['address']}>",
         f"To: {', '.join(draft['to'])}",
         f"Cc: {', '.join(draft['cc']) or '(none)'}",
-        f"Subject: {draft['subject'] or '(none)'}",
     ]
+    if draft.get("reply_note"):  # a reply that does not go to the original's sender
+        lines.append(f"Note: {draft['reply_note']}")
+    lines.append(f"Subject: {draft['subject'] or '(none)'}")
     attachments = draft["attachments"]
     if attachments:
         lines.append(f"Attachments: {len(attachments)}")
@@ -406,8 +462,11 @@ def _receiving(settings: Settings, original: dict) -> Mailbox:
 
 
 def _reply_recipients(original: dict, own: list[str], reply_all: bool):
-    """(to, cc, warnings) of a reply to `original`; `own` are the user's addresses."""
+    """(to, cc, note, warnings) of a reply to `original`; `own` are the user's addresses.
+    `note` says why To is not the original's sender, when it is not (None otherwise)."""
     warnings: list[str] = []
+    note = None
+    mid = original["id"]
 
     def others(addresses, header):
         kept = []
@@ -422,23 +481,28 @@ def _reply_recipients(original: dict, own: list[str], reply_all: bool):
 
     sender = original["from_addr"]
     if sender and _mine(sender, own):  # the user's own mail: answer its recipients
-        # (sent to nobody but the user: answer the user)
-        to = others(original["to"], "To") or ([sender.strip()] if _usable(sender) else [])
+        to = others(original["to"], "To")
+        if to:
+            note = (f"message {mid} is from your own address {sender}, so the reply goes to "
+                    "its recipients")
+        elif _usable(sender):  # sent to nobody but the user: answer the user
+            to = [sender.strip()]
+            note = (f"message {mid} is from your own address {sender} and went only to you, so "
+                    "the reply goes back to you")
     else:
         to = others(original["reply_to"], "Reply-To")
         if to and not (sender and all(accounts.same_address(a, sender) for a in to)):
-            warnings.append(
-                f"the reply goes to {', '.join(to)}, the Reply-To of the original, not to its "
-                f"sender {sender or '(none)'}: tell the user")
+            note = (f"To is the Reply-To of message {mid} ({', '.join(to)}), not its sender "
+                    f"{sender or '(none)'}")
         to = to or (others([sender], "From") if sender else [])
         if to and reply_all:
             to += others(original["to"], "To")
     if not to:
         raise MailError(
-            f"message {original['id']} has no sender address to reply to; write a new mail "
-            "to the right address instead")
+            f"message {mid} has no sender address to reply to; write a new mail to the right "
+            "address instead")
     cc = others(original["cc"], "Cc") if reply_all else []
-    return to, cc, warnings
+    return to, cc, note, warnings
 
 
 def _references(original: dict) -> list[str]:
@@ -448,6 +512,7 @@ def _references(original: dict) -> list[str]:
         [original["in_reply_to"]] if original["in_reply_to"] else [])
     if original["message_id"] and original["message_id"] not in refs:
         refs.append(original["message_id"])
+    refs = [ref for ref in refs if _message_id(ref)]  # (an id with 8-bit text cannot go out)
     if len(refs) > MAX_REFERENCES:
         refs = [refs[0], *refs[-(MAX_REFERENCES - 1):]]
     return refs
@@ -482,7 +547,7 @@ def _forwarded(hub: Path, mail_dir: Path, original: dict, connect) -> list[dict]
         except MailError as err:
             raise MailError(
                 f"cannot forward message {original['id']} with its attachments: {err}") from None
-        entries.append(_attachment(path, name=item["filename"],
+        entries.append(_attachment(path, hub, name=item["filename"],
                                    content_type=item["content_type"], index=item["index"]))
     return entries
 
@@ -500,8 +565,9 @@ def create(hub: Path, mail_dir: Path, *, mailbox: str | None, to: list[str], cc:
     - `forward_of=<message id>`: to `to` (at least one), with its attachments and its text
       quoted below `body`; `subject` replaces `Fwd: <its subject>`.
 
-    `attach` are files, read now; `warnings` says what was left out of a reply and whether the
-    mail is too large for the provider."""
+    `attach` are files, read now (never one of the hub's secrets or a .env file); `warnings`
+    says why a reply does not go to the original's sender (also shown by `show`), what was
+    left out of it, and whether the mail is too large for the provider."""
     mail_dir, hub = Path(mail_dir), Path(hub)
     if reply_to is not None and forward_of is not None:
         raise MailError("a draft is a reply or a forward, not both")
@@ -511,10 +577,10 @@ def create(hub: Path, mail_dir: Path, *, mailbox: str | None, to: list[str], cc:
     subject = None if subject is None else _subject(subject)
     body = _clean_body(body)
     settings = config.load(mail_dir)
-    files = [_attachment(path, index=number) for number, path in enumerate(attach or ())]
+    files = [_attachment(path, hub, index=number) for number, path in enumerate(attach or ())]
     draft = {"format": FORMAT, "kind": "new", "source": None, "created_at": _now(),
-             "in_reply_to": None, "references": [], "quoted": "", "shown_hash": None,
-             "shown_at": None}
+             "in_reply_to": None, "references": [], "quoted": "", "reply_note": None,
+             "shown_hash": None, "shown_at": None}
     warnings: list[str] = []
     attachments: list[dict] = []
     if reply_to is None and forward_of is None:
@@ -530,10 +596,12 @@ def create(hub: Path, mail_dir: Path, *, mailbox: str | None, to: list[str], cc:
         draft["source"] = source
         if reply_to is not None:
             own = [box.address for box in settings.mailboxes.values()]
-            first, copies, warnings = _reply_recipients(original, own, reply_all)
+            first, copies, note, skipped = _reply_recipients(original, own, reply_all)
             to, cc = [*first, *to], [*copies, *cc]
-            draft.update(kind="reply", in_reply_to=original["message_id"],
-                         references=_references(original))
+            warnings = [*([note] if note else []), *skipped]
+            parent = original["message_id"]
+            draft.update(kind="reply", reply_note=note, references=_references(original),
+                         in_reply_to=parent if _message_id(parent) else None)
             subject = reply_subject(original["subject"]) if subject is None else subject
         else:
             if not to:
@@ -552,12 +620,14 @@ def create(hub: Path, mail_dir: Path, *, mailbox: str | None, to: list[str], cc:
             "warnings": [*warnings, *([warning] if warning else [])]}
 
 
-def edit(mail_dir: Path, draft_id: str, **changes) -> dict:
+def edit(mail_dir: Path, draft_id: str, *, hub: Path | None = None, **changes) -> dict:
     """Change a draft: `mailbox` (send from another), `to` and `cc` (replace the lists),
     `subject`, `body`, `attach` (files to add) and `drop` (attachment numbers to remove, as
-    `show` numbers them, from 1). A change needs a new `show` before `send`. Returns
-    `{"draft_id", "mailbox", "changed", "warnings"}`."""
+    `show` numbers them, from 1; dropped before the new files are added). A change needs a new
+    `show` before `send`. `hub` is where secrets/ is (default: the parent of `mail_dir`).
+    Returns `{"draft_id", "mailbox", "changed", "warnings"}`."""
     mail_dir = Path(mail_dir)
+    hub = Path(mail_dir).parent if hub is None else Path(hub)
     _check_draft_id(draft_id)
     unknown = sorted(set(changes) - set(EDITABLE))
     if unknown:
@@ -577,6 +647,7 @@ def edit(mail_dir: Path, draft_id: str, **changes) -> dict:
         draft["to"] = _addresses(changes["to"], "To")
         if not draft["to"]:
             raise MailError("a mail needs at least one To address")
+        draft["reply_note"] = None  # (To is the user's choice now, not the original's)
     if "cc" in changes:
         draft["cc"] = _addresses(changes["cc"], "Cc")
     if "subject" in changes:
@@ -595,7 +666,7 @@ def edit(mail_dir: Path, draft_id: str, **changes) -> dict:
                                 if number not in changes["drop"]]
     if "attach" in changes:
         start = len(draft["attachments"])
-        draft["attachments"] += [_attachment(path, index=start + number)
+        draft["attachments"] += [_attachment(path, hub, index=start + number)
                                  for number, path in enumerate(changes["attach"])]
     draft["to"] = _unique(draft["to"])
     draft["cc"] = _unique(draft["cc"], besides=draft["to"])
@@ -609,20 +680,25 @@ def edit(mail_dir: Path, draft_id: str, **changes) -> dict:
 
 
 def show(mail_dir: Path, draft_id: str) -> str:
-    """The whole draft as the text to show the user, and the record that it was shown: the
-    attachment files are read again (their size and content as they are now are what is shown
-    and what `send` checks), and the hash of it all is kept as `shown_hash`."""
+    """The whole draft as the text to show the user, and the record that it was shown: the hash
+    of it all is kept as `shown_hash`. Every attachment file is read again and must still be
+    what was attached (its content hash from `create` or `edit`); one that changed on disk, or
+    is gone, is refused and nothing is recorded: drop it and attach it again."""
     mail_dir = Path(mail_dir)
     draft = read(mail_dir, draft_id)
     for number, entry in enumerate(draft["attachments"], 1):
+        again = (f"drop it and attach it again (mk draft edit {draft_id} --drop {number} "
+                 "--attach PATH), or only drop it")
         try:
             data = _read_file(Path(entry["path"]))
         except MailError as err:
             raise MailError(
-                f"attachment {number} of draft {draft_id} ({entry['name']}) cannot be read: "
-                f"{err}; drop it (mk draft edit {draft_id} --drop {number}) or attach the file "
-                "again") from None
-        entry.update(size=len(data), sha256=_sha256(data))
+                f"attachment {number} ({entry['name']}) of draft {draft_id} cannot be read: "
+                f"{err}; {again}") from None
+        if len(data) != entry["size"] or _sha256(data) != entry["sha256"]:
+            raise MailError(
+                f"attachment {number} ({entry['name']}) of draft {draft_id} changed on disk "
+                f"since it was attached; {again}")
     draft["shown_hash"] = _digest(draft)
     draft["shown_at"] = _now()
     _write(mail_dir, draft_id, draft)
@@ -712,6 +788,23 @@ def _save_copy(srv: MailServer, mb: Mailbox, raw: bytes, password: str):
     return folder, []
 
 
+def _refuse_password(draft_id: str, draft: dict, contents: list[bytes], mb: Mailbox,
+                     password: str) -> None:
+    """MailError when the password of the sending mailbox is in the subject, the text or the
+    bytes of an attachment. The message says where, never what."""
+    found = [where for where, text in (("the subject", draft["subject"]),
+                                       ("the text", _text(draft))) if password in text]
+    needle = password.encode("utf-8")
+    found += [f"attachment {number} ({entry['name']})"
+              for number, (entry, data) in enumerate(zip(draft["attachments"], contents), 1)
+              if needle in data]
+    if found:
+        raise MailError(
+            f"draft {draft_id} holds the password of {mb.name} in {', '.join(found)}; nothing "
+            f"was sent. Take it out (mk draft edit {draft_id}), show the draft again, and tell "
+            "the user")
+
+
 def send(hub: Path, mail_dir: Path, draft_id: str, *, connect=None) -> dict:
     """Send draft `draft_id`, which must have been shown (`show`) and not changed since, and
     delete it. `{"ok": True, "draft_id", "mailbox", "from", "to", "cc", "subject",
@@ -719,8 +812,9 @@ def send(hub: Path, mail_dir: Path, draft_id: str, *, connect=None) -> dict:
     did not take, with its reply; `sent_copy` is "server" (the provider saves sent mail
     itself), the folder the copy went to, or None (see `warnings`).
 
-    MailError, and nothing sent, for a draft never shown, changed since, or too large. A send
-    that fails keeps the draft and says whether the mail may have gone out."""
+    MailError, and nothing sent, for a draft never shown, changed since, too large, or holding
+    the mailbox's password. A send that fails keeps the draft and says whether the mail may
+    have gone out."""
     mail_dir = Path(mail_dir)
     draft = read(mail_dir, draft_id)
     again = (f"run mk draft show {draft_id}, show the user the whole text, and send only after "
@@ -750,9 +844,10 @@ def send(hub: Path, mail_dir: Path, draft_id: str, *, connect=None) -> dict:
         raise MailError(
             f"draft {draft_id} goes out from {draft['address']}, which is not in config.toml "
             "any more; nothing was sent")
+    password = accounts.read_password(Path(hub), mb.address)
+    _refuse_password(draft_id, draft, contents, mb, password)
     raw, message_id = _build(draft, contents)
     recipients = [*draft["to"], *draft["cc"]]
-    password = accounts.read_password(Path(hub), mb.address)
     srv = None
     try:
         try:

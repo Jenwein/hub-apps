@@ -72,7 +72,12 @@ class World:
 
     def receive(self, subject, *, sender="boss@x.example", to=WORK, fake=None, **options) -> int:
         """A message arrives and is polled into the index; returns its id."""
-        (fake or self.work).deliver(make_raw(subject, sender, to, f"body of {subject}", **options))
+        raw = make_raw(subject, sender, to, f"body of {subject}", **options)
+        return self.receive_raw(raw, subject, fake=fake)
+
+    def receive_raw(self, raw: bytes, subject: str, *, fake=None) -> int:
+        """Raw bytes arrive and are polled into the index; returns the id of `subject`."""
+        (fake or self.work).deliver(raw)
         self.minutes += 1
         poll.poll(self.hub, self.mail, connect=self.connect(),
                   now=NOW + timedelta(minutes=self.minutes))
@@ -101,7 +106,7 @@ class World:
         return drafts.send(self.hub, self.mail, draft_id, connect=self.connect())
 
     def edit(self, draft_id, **changes) -> dict:
-        return drafts.edit(self.mail, draft_id, **changes)
+        return drafts.edit(self.mail, draft_id, hub=self.hub, **changes)
 
     def draft_files(self) -> list[Path]:
         folder = self.mail / ".state" / "drafts"
@@ -214,6 +219,71 @@ def test_a_long_thread_keeps_the_first_and_the_last_references(world):
     kept = world.stored(world.draft(reply_to=mid))["references"]
     assert len(kept) == drafts.MAX_REFERENCES
     assert kept[0] == "<r0@x.example>" and kept[-2:] == ["<r39@x.example>", "<m@x.example>"]
+
+
+def test_long_message_ids_are_folded_but_never_encoded(world):
+    local = ("DM6PR11MB4691" + "0F1C2E3D4B5A6978" * 2)[:43]
+    long_id = f"<{local}@DM6PR11MB4691.namprd11.prod.outlook.com>"  # an Exchange-style id
+    assert len(long_id) == 85
+    refs = [f"<{'r' * 50}{n}@x.example>" for n in range(3)]
+    mid = world.receive("plan", headers={"Message-ID": long_id, "References": " ".join(refs)})
+    d = world.draft(reply_to=mid)
+    assert world.stored(d)["references"] == [*refs, long_id]
+    world.show(d)
+    world.send(d)
+    raw = world.work.sent[0].raw
+    head = raw.split(b"\r\n\r\n", 1)[0]
+    assert f"In-Reply-To: {long_id}".encode() in head
+    assert long_id.encode() in head.split(b"References:", 1)[1]
+    assert b"=?" not in raw
+    assert all(len(line) <= 998 for line in head.split(b"\r\n"))
+    got = parse(raw)
+    assert got.in_reply_to == long_id and got.references == [*refs, long_id]
+    assert as_email(raw)["References"].split() == [*refs, long_id]
+
+
+def test_ids_that_are_not_plain_ascii_are_left_out_of_the_thread_headers(world):
+    def raw(subject, *headers):
+        return "\r\n".join(["From: boss@x.example", f"To: {WORK}", f"Subject: {subject}",
+                            *headers, "", "hi", ""]).encode("utf-8")  # 8-bit header bytes
+
+    mid = world.receive_raw(raw("x", "Message-ID: <ok@x.example>",
+                                "References: <ünï@x.example> <fine@x.example>"), "x")
+    stored = world.stored(world.draft(reply_to=mid))
+    assert (stored["in_reply_to"], stored["references"]) == (
+        "<ok@x.example>", ["<fine@x.example>", "<ok@x.example>"])
+    odd = world.receive_raw(raw("y", "Message-ID: <ïd@x.example>",
+                                "In-Reply-To: <ünï@x.example>"), "y")
+    stored = world.stored(world.draft(reply_to=odd))
+    assert (stored["in_reply_to"], stored["references"]) == (None, [])
+    d = world.draft(reply_to=odd)
+    world.show(d)
+    world.send(d)
+    msg = as_email(world.work.sent[0].raw)
+    assert msg["In-Reply-To"] is None and msg["References"] is None
+
+
+def test_show_says_when_a_reply_does_not_go_to_the_sender(world):
+    mid = world.receive("job", sender="noreply@hr.example", headers={"Reply-To": "hr@corp.example"})
+    d = world.draft(reply_to=mid)
+    lines = world.show(d).splitlines()
+    note = (f"Note: To is the Reply-To of message {mid} (hr@corp.example), not its sender "
+            "noreply@hr.example")
+    assert lines[lines.index("Cc: (none)") + 1] == note
+
+    own = world.receive("周报", sender=WORK, to="boss@x.example")
+    assert (f"Note: message {own} is from your own address {WORK}, so the reply goes to its "
+            "recipients") in world.show(world.draft(reply_to=own)).splitlines()
+    self_note = world.receive("note", sender=WORK, to=WORK)
+    assert (f"Note: message {self_note} is from your own address {WORK} and went only to you, "
+            "so the reply goes back to you") in world.show(
+                world.draft(reply_to=self_note)).splitlines()
+
+    plain = world.receive("plain")
+    assert not [line for line in world.show(world.draft(reply_to=plain)).splitlines()
+                if line.startswith("Note:")]
+    world.edit(d, to=["boss@x.example"])  # the user chose To: the note no longer applies
+    assert not [line for line in world.show(d).splitlines() if line.startswith("Note:")]
 
 
 @pytest.mark.parametrize("original, expected", [
@@ -350,11 +420,16 @@ def test_an_attachment_changed_on_disk_after_show_is_refused(world, tmp_path):
     assert attachment_bytes(world.work.sent[0].raw, 0) == ("plan.pdf", PDF)
 
 
-def test_show_reads_the_attachments_as_they_are_now(world, tmp_path):
+def test_an_attachment_changed_between_create_and_show_is_refused_at_show(world, tmp_path):
     pdf = tmp_path / "plan.pdf"
     pdf.write_bytes(b"short")
     d = world.draft(mailbox="工作", to=["boss@x.example"], subject="plan", attach=[pdf])
-    pdf.write_bytes(PDF)  # before show: show and send use the new content
+    pdf.write_bytes(PDF)  # the file is not what was attached any more
+    with pytest.raises(MailError, match="attachment 1 .*changed on disk since it was attached"):
+        world.show(d)
+    with pytest.raises(MailError, match="never shown"):  # the failed show recorded nothing
+        world.send(d)
+    world.edit(d, drop=[1], attach=[pdf])  # attached again: its content now
     assert "plan.pdf (1.4 KB)" in world.show(d)
     world.send(d)
     assert attachment_bytes(world.work.sent[0].raw, 0)[1] == PDF
@@ -548,6 +623,41 @@ def test_the_password_is_in_no_draft_and_no_error(world):
     with pytest.raises(MailError) as caught:
         world.send(d)
     assert PASSWORD not in str(caught.value)
+
+
+def test_the_hubs_secrets_and_env_files_are_never_attached(world, tmp_path):
+    secret = accounts.secret_path(world.hub, WORK)
+    assert secret.is_file()
+    other_case = world.hub / "SECRETS" / "mail" / secret.name
+    env = tmp_path / ".env.local"
+    env.write_text("TOKEN=x", "utf-8")
+    for path in (secret, other_case, env, world.hub / "secrets"):
+        with pytest.raises(MailError, match="never sent") as caught:
+            world.draft(mailbox="工作", to=["a@x.example"], subject="s", attach=[path])
+        assert PASSWORD not in str(caught.value)
+    assert world.draft_files() == []
+    d = world.draft(mailbox="工作", to=["a@x.example"], subject="s")
+    with pytest.raises(MailError, match="never sent"):
+        world.edit(d, attach=[secret])
+    assert world.stored(d)["attachments"] == []
+
+
+def test_send_refuses_a_draft_that_holds_the_password(world, tmp_path):
+    def refused(draft_id, where):
+        world.show(draft_id)
+        with pytest.raises(MailError, match=f"password of 工作 in {where}") as caught:
+            world.send(draft_id)
+        assert PASSWORD not in str(caught.value)
+
+    refused(world.draft(f"my code is {PASSWORD}", mailbox="工作", to=["a@x.example"],
+                        subject="s"), "the text")
+    refused(world.draft(mailbox="工作", to=["a@x.example"], subject=f"code {PASSWORD}"),
+            "the subject")
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"login: " + PASSWORD.encode())
+    refused(world.draft(mailbox="工作", to=["a@x.example"], subject="s", attach=[notes]),
+            "attachment 1")
+    assert world.work.sent == [] and "send" not in world.work.names()
 
 
 def test_a_mailbox_removed_after_show_cannot_send(world):
@@ -766,6 +876,20 @@ def test_cli_usage_errors_are_mk_errors(mk, argv, message):
     status, out, err = mk(*argv)
     assert status == 1 and out == ""
     assert "mk: " in err and message in err and "Traceback" not in err
+
+
+def test_cli_refuses_a_body_file_from_the_secrets(world, mk, tmp_path):
+    secret = accounts.secret_path(world.hub, WORK)
+    env = tmp_path / ".env"
+    env.write_text("A=1", "utf-8")
+    d = world.draft(mailbox="工作", to=["a@x.example"], subject="s")
+    for path in (secret, env):
+        for argv in (["draft", "new", "--from", "工作", "--to", "a@x.example", "--subject", "s",
+                      "--body-file", str(path)],
+                     ["draft", "edit", d, "--body-file", str(path)]):
+            status, out, err = mk(*argv)
+            assert status == 1 and out == "" and "never sent" in err and PASSWORD not in err
+    assert world.stored(d)["body"] == "好的，周三见。"
 
 
 def test_cli_a_body_file_that_is_not_utf8(mk, tmp_path):

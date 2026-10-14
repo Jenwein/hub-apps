@@ -399,9 +399,10 @@ def add_mail_commands(sub) -> None:
     a.set_defaults(func=run_attachment_get)
 
 
-def read_body(path: Path) -> str:
+def read_body(path: Path, hub: Path) -> str:
     """The text of a mail from the file the agent wrote: UTF-8 (a byte order mark is dropped
-    by drafts)."""
+    by drafts). A file of the hub's secrets, or a .env file, is refused."""
+    drafts.refuse_secret_file(path, hub, "the body file")
     try:
         data = Path(path).read_bytes()
     except OSError as err:
@@ -415,28 +416,28 @@ def read_body(path: Path) -> str:
 def run_draft_new(args: argparse.Namespace) -> None:
     print_json(drafts.create(
         args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
-        subject=args.subject, body=read_body(args.body_file), attach=args.attach))
+        subject=args.subject, body=read_body(args.body_file, args.hub), attach=args.attach))
 
 
 def run_draft_reply(args: argparse.Namespace) -> None:
     print_json(drafts.create(
         args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
-        subject=args.subject, body=read_body(args.body_file), attach=args.attach,
+        subject=args.subject, body=read_body(args.body_file, args.hub), attach=args.attach,
         reply_to=args.id, reply_all=args.all))
 
 
 def run_draft_forward(args: argparse.Namespace) -> None:
     print_json(drafts.create(
         args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
-        subject=args.subject, body=read_body(args.body_file), attach=args.attach,
+        subject=args.subject, body=read_body(args.body_file, args.hub), attach=args.attach,
         forward_of=args.id))
 
 
 def run_draft_edit(args: argparse.Namespace) -> None:
     print_json(drafts.edit(
-        args.mail_dir, args.draft_id, mailbox=args.mailbox, to=args.to,
+        args.mail_dir, args.draft_id, hub=args.hub, mailbox=args.mailbox, to=args.to,
         cc=[] if args.no_cc else args.cc, subject=args.subject,
-        body=None if args.body_file is None else read_body(args.body_file),
+        body=None if args.body_file is None else read_body(args.body_file, args.hub),
         attach=args.attach, drop=args.drop))
 
 
