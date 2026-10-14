@@ -155,8 +155,9 @@ def non_negative_int(text: str) -> int:
 
 
 def run_poll(args: argparse.Namespace) -> None:
+    """`mk poll --wake` is the poll task: only that run counts for `bg status`."""
     wake = (lambda: poll.wake_triage(args.hub)) if args.wake else None
-    print_json(poll.poll(args.hub, args.mail_dir, wake=wake))
+    print_json(poll.poll(args.hub, args.mail_dir, wake=wake, background=args.wake))
 
 
 def add_poll_command(sub) -> None:
@@ -168,12 +169,14 @@ def add_poll_command(sub) -> None:
         "runs this")
     p.add_argument("--wake", action="store_true",
                    help="wake the mail/triage task (cc-hub cron wake) when there is mail to "
-                   "judge or a mailbox problem to report")
+                   "judge or a mailbox problem to report; the poll task runs this, and only "
+                   "this run counts as the background check in `bg status`")
     p.set_defaults(func=run_poll)
 
 
 def run_bg_poll(args: argparse.Namespace) -> None:
-    print_json(poll.poll(args.hub, args.mail_dir))
+    """Polls, but is no run of the background check: `bg status` stays as it was."""
+    print_json(poll.poll(args.hub, args.mail_dir, background=False))
 
 
 def run_bg_pending(args: argparse.Namespace) -> None:
@@ -235,7 +238,8 @@ def add_bg_commands(sub) -> None:
 
     a = actions.add_parser(
         "poll", help="take new mail from every mailbox's INBOX into the index without "
-        "changing anything on the server (it never wakes triage; `mk poll --wake` does)")
+        "changing anything on the server (it never wakes triage, and `bg status` does not "
+        "count it as a run of the background check; `mk poll --wake` does both)")
     a.set_defaults(func=run_bg_poll)
 
     a = actions.add_parser(
@@ -303,8 +307,8 @@ def add_bg_commands(sub) -> None:
     a.set_defaults(func=run_bg_digest_done)
 
     a = actions.add_parser(
-        "status", help="when the last poll ran, whether that is too long ago, and the state "
-        "of each mailbox")
+        "status", help="when the poll task (mk poll --wake) last ran, whether that is too "
+        "long ago, and the state of each mailbox")
     a.set_defaults(func=run_bg_status)
 
     a = actions.add_parser(

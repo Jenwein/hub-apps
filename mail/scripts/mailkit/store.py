@@ -857,6 +857,17 @@ class Store:
         listing["up_to"] = up_to
         return listing
 
+    def digest_counts(self, up_to: int) -> dict[str, int]:
+        """How many messages of the listing named by `up_to` (see `digest_items`) each mailbox
+        holds, `{address: count}` in the listing's order. The pages run by address, so one
+        mailbox can sit wholly on a late page; these counts cover them all."""
+        with self._transaction() as db:
+            rows = db.execute(
+                "SELECT address, COUNT(*) AS n FROM messages "
+                "WHERE status = 'digest' AND digest_seq <= ? GROUP BY address ORDER BY address",
+                (up_to,)).fetchall()
+        return {row["address"]: row["n"] for row in rows}
+
     def mark_digested(self, now: datetime, up_to: int | None = None) -> int:
         """A digest was sent: the `digest` messages become `digested`, and `last_digest` is
         `now`. With `up_to` from `digest_items`, only the messages that listing covered; without

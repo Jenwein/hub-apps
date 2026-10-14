@@ -172,9 +172,15 @@ def test_digest_reads_the_status_before_it_polls():
     order = ["bg status", "bg poll", "bg pending", "bg judge", "bg digest-items", "bg digest-done"]
     positions = [body.index(step) for step in order]
     assert positions == sorted(positions), dict(zip(order, positions))
-    for needed in ("--up-to", "up_to", "skipped", "stale", "hub.toml", "--mark-reported", "5"):
-        assert needed in body, needed
+    for needed in ("--up-to", "up_to", "skipped", "stale", "hub.toml", "--mark-reported", "5",
+                   "mailbox_totals", "still waiting for a verdict"):
+        assert needed in " ".join(body.split()), needed
     assert "NO_REPLY" not in body  # the digest always says something
+    # the backstop: mail left unjudged and every mailbox's count reach the message
+    compose = " ".join(body.split("## 5. Compose", 1)[1].split("## 6.", 1)[0].split())
+    assert "still waiting for a verdict" in compose and "mailbox_totals" in compose
+    listing = " ".join(body.split("## 4.", 1)[1].split("## 5.", 1)[0].split())
+    assert "read every page" in listing
 
 
 # -- mk commands and flags named anywhere ---------------------------------------------------

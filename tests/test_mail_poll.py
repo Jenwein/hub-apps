@@ -43,6 +43,8 @@ def add(hub, fake, name="工作", address=WORK, provider="feishu", password="pw"
 
 
 def run(hub, servers, minutes: float = 0, **options):
+    """A run of the poll task (`background`), unless the test says otherwise."""
+    options.setdefault("background", True)
     return poll.poll(hub, hub / "mail", connect=fake_connect(servers), now=t(minutes), **options)
 
 
@@ -929,6 +931,32 @@ def test_cli_bg_poll_without_wake(hub_dir, mk):
     status, out, _ = mk("bg", "poll")
     assert status == 0 and out["pending"] == 1 and out["woke"] is False
     assert mk.woken == []
+    with Store.open(hub_dir / "mail") as store:
+        assert store.poll_times() == []  # the digest's own poll is no run of the poll task
+
+
+def test_only_the_poll_task_counts_as_a_run_of_the_background_check(hub_dir, mk):
+    """`bg status` judges by the runs of the poll task (`mk poll --wake`) alone: a poll by
+    hand or by the digest must not hide that the task stopped (spec 6.5)."""
+    add(hub_dir, mk.fake)
+    mk.fake.deliver(mail_from("boss@corp.example"))
+    assert mk("poll")[0] == 0
+    assert mk("bg", "poll")[0] == 0
+    with Store.open(hub_dir / "mail") as store:
+        assert store.poll_times() == []
+    assert mk("poll", "--wake")[0] == 0
+    with Store.open(hub_dir / "mail") as store:
+        assert len(store.poll_times()) == 1
+
+
+def test_a_poll_is_no_run_of_the_background_check_unless_it_says_so(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example"))
+    r = poll.poll(hub_dir, hub_dir / "mail", connect=fake_connect(fake), now=t(1))
+    assert r["pending"] == 1  # it polled
+    with Store.open(hub_dir / "mail") as store:
+        assert store.poll_times() == []
 
 
 def test_cli_bg_poll_cannot_wake(hub_dir, mk):

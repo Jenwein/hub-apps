@@ -22,7 +22,8 @@ there are in `problems_total`.
 - `problems`: mailbox problems not reported yet; `mark_reported` marks them.
 - `digest-items` and `digest-done`: the digest. The listing is a fixed set named by `up_to`;
   every page after the first, and `digest-done`, pass the `up_to` of the first.
-- `status`: when the last poll ran, whether that is too long ago, and each mailbox's state.
+- `status`: when the poll task last ran, whether that is too long ago, and each mailbox's
+  state.
 
 Problems and recoveries are read from the index only, so `problems`, `status` and the listings
 work when config.toml is missing or broken: mailbox names are then the addresses, `rules` is
@@ -457,14 +458,16 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
                  now: datetime | None = None) -> dict:
     """The mail waiting for the digest, one page of it grouped by mailbox:
     `{"since", "up_to", "groups": [{"mailbox", "count", "items"}], "total", "next_page",
-    "pushed_count", "problems", "problems_total", "stale", "last_poll", "rules",
-    "config_error"}`.
+    "pushed_count", "mailbox_totals": [{"mailbox", "total"}], "problems", "problems_total",
+    "stale", "last_poll", "rules", "config_error"}`.
 
     `since` is when the last digest was sent (None: never); `pushed_count` the pushes since;
     `problems` every open problem, reported before or not, and the recoveries not reported yet.
     The set listed is fixed by `up_to`: the first page returns it, and later pages pass it back
-    (and `digest_done` too). `count` is the number of items of that mailbox on this page.
-    `stale` and `last_poll` are as in `status`, as of this call."""
+    (and `digest_done` too). `count` is the number of items of that mailbox on this page;
+    `mailbox_totals` how many the whole listing holds for each mailbox, on every page, since the
+    pages run by mailbox and one can sit wholly on a late page. `stale` and `last_poll` are as
+    in `status`: they go by the runs of the poll task only, never by this digest's own poll."""
     _check_page(page)
     if up_to is not None:
         _check_number(up_to, "up_to", minimum=0)
@@ -472,6 +475,7 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
     settings, config_error = _settings(mail_dir)
     with Store.open(mail_dir) as store:
         listing = store.digest_items(page=page, per_page=PER_PAGE, up_to=up_to)
+        counts = store.digest_counts(listing["up_to"])
         since = store.last_digest()
         pushed = store.push_count(since)
         raw = store.problems(unreported_only=False)
@@ -486,6 +490,8 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
         "groups": [{"mailbox": _name(settings, address), "count": len(items), "items": items}
                    for address, items in groups.items()],
         "total": listing["total"], "next_page": listing["next_page"], "pushed_count": pushed,
+        "mailbox_totals": [{"mailbox": _name(settings, address), "total": n}
+                           for address, n in counts.items()],
         "problems": shown, "problems_total": total, "stale": stale, "last_poll": last_poll,
         "rules": _rules(settings), "config_error": config_error,
     }
@@ -505,11 +511,15 @@ def digest_done(mail_dir: Path, up_to: int, *, now: datetime | None = None) -> d
 
 
 def _staleness(store: Store, now: datetime) -> tuple[str | None, bool, int]:
-    """(time of the last poll, whether it was too long ago, the limit in minutes).
+    """(time of the last run of the poll task, whether it was too long ago, the limit in
+    minutes).
 
-    Too long is more than two median spacings of the last polls plus 10 minutes: a poll every 5
-    minutes is late after 20, a daily one after 2 days and 10 minutes. With fewer than two polls
-    the spacing is taken as 5 minutes. No poll at all is stale: the check never ran."""
+    Only the runs of the poll task are recorded (`mk poll --wake`, the background check); a
+    poll by hand, or the digest's own `bg poll`, is not, so it can never make a check that
+    stopped look alive. Too long is more than two median spacings of the last runs plus 10
+    minutes: a run every 5 minutes is late after 20, a daily one after 2 days and 10 minutes.
+    With fewer than two runs the spacing is taken as 5 minutes. No run at all is stale: the
+    check never ran."""
     times = [datetime.fromisoformat(t) for t in store.poll_times(POLLS_SAMPLED)]  # newest first
     gaps = [max((later - earlier).total_seconds() / 60, 0.0)
             for later, earlier in itertools.pairwise(times)]
@@ -523,7 +533,8 @@ def _staleness(store: Store, now: datetime) -> tuple[str | None, bool, int]:
 
 def status(mail_dir: Path, *, now: datetime | None = None) -> dict:
     """`{"last_poll", "stale", "threshold_minutes", "mailboxes": [{"name", "address",
-    "last_ok", "problem"}], "config_error"}`. `problem` is the mailbox's open problem
+    "last_ok", "problem"}], "config_error"}`. `last_poll` and `stale` are about the poll task,
+    the background check (see `_staleness`). `problem` is the mailbox's open problem
     (`{"kind", "message", "first_seen"}`) or None; `last_ok` when the mailbox last answered a
     poll. Without a readable config.toml `mailboxes` is empty and `config_error` says why."""
     now = _now(now)

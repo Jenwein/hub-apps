@@ -57,6 +57,8 @@ def two_boxes(hub):
 
 
 def run(hub, servers, minutes: float = 0, **options):
+    """A run of the poll task (`background`), unless the test says otherwise."""
+    options.setdefault("background", True)
     return poll.poll(hub, mail(hub), connect=fake_connect(servers), now=t(minutes), **options)
 
 
@@ -750,8 +752,8 @@ def test_digest_items_groups_by_mailbox(hub_dir):
     digest_scene(hub_dir)
     out = background.digest_items(mail(hub_dir), now=t(3))
     assert set(out) == {"since", "up_to", "groups", "total", "next_page", "pushed_count",
-                        "problems", "problems_total", "stale", "last_poll", "rules",
-                        "config_error"}
+                        "mailbox_totals", "problems", "problems_total", "stale", "last_poll",
+                        "rules", "config_error"}
     assert out["since"] is None and out["pushed_count"] == 1
     assert (out["total"], out["next_page"], out["problems"], out["config_error"]) == (
         4, None, [], None)
@@ -803,6 +805,33 @@ def test_digest_items_pages_with_a_fixed_up_to_and_done_marks_only_what_was_list
     nxt = background.digest_items(mail(hub_dir), now=t(6))
     assert (nxt["since"], nxt["total"]) == ("2026-10-14T04:05:00+00:00", 1)
     assert subjects(nxt["groups"][0]) == ["late"]
+
+
+def test_digest_items_total_every_mailbox_on_every_page(hub_dir):
+    """Pages run by address, so a mailbox can sit wholly on a late page: every page says how
+    much of the listing each mailbox holds."""
+    work, qq = two_boxes(hub_dir)
+    servers = {WORK: work, QQ: qq}
+    set_mailbox(hub_dir, "工作", "delivery", "digest")
+    set_mailbox(hub_dir, "QQ", "delivery", "digest")
+    for i in range(15):
+        work.deliver(mail_from("ads@shop.example", f"w{i:02d}"))
+    for i in range(12):
+        qq.deliver(mail_from("ads@shop.example", f"q{i:02d}", to=QQ))
+    run(hub_dir, servers, minutes=1)
+
+    totals = [{"mailbox": "工作", "total": 15}, {"mailbox": "QQ", "total": 12}]
+    one = background.digest_items(mail(hub_dir), now=t(2))
+    assert one["mailbox_totals"] == totals
+    assert [g["mailbox"] for g in one["groups"]] == ["工作"]  # QQ is not on page 1
+    qq.deliver(mail_from("ads@shop.example", "late", to=QQ))
+    run(hub_dir, servers, minutes=3)  # outside the listing
+    three = background.digest_items(mail(hub_dir), page=3, up_to=one["up_to"], now=t(4))
+    assert three["mailbox_totals"] == totals
+    assert background.digest_items(mail(hub_dir), now=t(5))["mailbox_totals"][1] == {
+        "mailbox": "QQ", "total": 13}
+    empty = background.digest_items(mail(hub_dir), up_to=0, now=t(5))
+    assert empty["mailbox_totals"] == []
 
 
 def test_digest_done_with_nothing_listed_still_records_the_digest(hub_dir):
@@ -881,6 +910,36 @@ def test_digest_items_say_when_the_poll_stopped(hub_dir):
     assert background.digest_items(mail(hub_dir), now=t(20 + 21))["stale"] is True
 
 
+def test_the_digests_own_polls_never_make_a_dead_check_look_alive(hub_dir):
+    """The poll task runs every 5 minutes, then dies; only the daily digest polls (`bg poll`)
+    for eleven days. The check stays stale, with the time of its last real run."""
+    fake = FakeServer()
+    add(hub_dir, fake)
+    for n in range(5):
+        run(hub_dir, fake, minutes=5 * n)
+    for day in range(1, 12):
+        fake.deliver(mail_from("ads@shop.example", f"day {day}"))
+        assert run(hub_dir, fake, minutes=day * 1440, background=False)["pending"] >= 1
+    now = t(11 * 1440 + 1)
+    out = background.status(mail(hub_dir), now=now)
+    assert (out["stale"], out["last_poll"], out["threshold_minutes"]) == (
+        True, "2026-10-14T04:20:00+00:00", 20)
+    digest = background.digest_items(mail(hub_dir), now=now)
+    assert (digest["stale"], digest["last_poll"]) == (True, "2026-10-14T04:20:00+00:00")
+
+
+def test_the_cli_bg_poll_leaves_the_status_stale(hub_dir, monkeypatch, capsys):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    monkeypatch.setattr(server, "connect", fake_connect(fake))
+    argv = ["--mail-dir", str(mail(hub_dir)), "--hub", str(hub_dir)]
+    assert cli.main([*argv, "bg", "poll"]) == 0
+    capsys.readouterr()
+    assert cli.main([*argv, "bg", "status"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert (out["last_poll"], out["stale"]) == (None, True)
+
+
 # -- status ----------------------------------------------------------------------------------
 
 
@@ -923,7 +982,7 @@ def test_status_threshold_follows_a_slow_cadence(hub_dir):
 
 
 def test_status_uses_the_median_so_an_extra_poll_does_not_shorten_it(hub_dir):
-    # the cron every 5 minutes, and a digest's own poll 3 minutes after one of them
+    # the cron every 5 minutes, and the task run by hand (cron exec) 3 minutes after one of them
     record_polls(hub_dir, [0, 5, 10, 13, 15, 20, 25, 30])
     assert background.status(mail(hub_dir), now=t(30))["threshold_minutes"] == 20
 
@@ -1015,7 +1074,8 @@ def test_cli_bg_commands_print_json(hub_dir, mk):
     status, out, _ = mk("bg", "problems")
     assert (status, out["problems"]) == (0, [])
     status, out, _ = mk("bg", "status")
-    assert status == 0 and out["mailboxes"][0]["name"] == "工作" and out["last_poll"]
+    assert status == 0 and out["mailboxes"][0]["name"] == "工作"
+    assert (out["last_poll"], out["stale"]) == (None, True)  # `bg poll` is no run of the task
 
     status, out, _ = mk("bg", "digest-items")
     assert status == 0 and out["total"] == 1 and out["pushed_count"] == 1

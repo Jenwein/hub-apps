@@ -29,8 +29,10 @@ no stored password; `connect`: the server cannot be reached or dropped the conne
 ends its problems (each a recovery, told once with the next message). A config.toml that cannot
 be read is one problem of address and kind `config`, and no mailbox is polled.
 
-After the mailboxes the poll is recorded, and with `wake` the on-demand `mail/triage` task is
-woken when the batch of pending mail needs it (never woken, or woken 10 minutes ago and still
+After the mailboxes, a run of the poll task (`background`: `mk poll --wake`, the cc-hub script
+task) is recorded; `bg status` and the digest judge whether the background check still runs by
+these records alone, so a poll by hand or the digest's own `mk bg poll` never makes a stopped
+task look alive. With `wake` the on-demand `mail/triage` task is woken when the batch of pending mail needs it (never woken, or woken 10 minutes ago and still
 pending) or when an open problem needs telling (`Store.problems_need_wake`: not reported, not
 told for that mailbox and kind in the last day, and no wake for problems in the last 10
 minutes). A recovery never wakes triage. Two polls never run at once: the second finds the
@@ -334,11 +336,12 @@ def _wake(store: Store, wake: Callable[[], str | None] | None,
 
 def poll(hub: Path, mail_dir: Path, *, connect=None,
          wake: Callable[[], str | None] | None = None, now: datetime | None = None,
-         backfill_chunk: int = BACKFILL_CHUNK) -> dict:
+         backfill_chunk: int = BACKFILL_CHUNK, background: bool = False) -> dict:
     """Poll every mailbox once; see the module docstring.
 
     `connect` is the server factory (default: `server.connect`); `wake` wakes triage and
-    returns None, or an error text (default: no wake). Returns
+    returns None, or an error text (default: no wake); `background` says this is a run of the
+    poll task, the only kind of poll that is recorded for `bg status`. Returns
     `{"mailboxes": [{"name", "new", "error"}], "pending", "woke", "wake_error",
     "config_error"}`: `new` counts the new messages stored for that mailbox, `error` says why
     it could not be polled (None: it was); `pending` is how many messages wait for a verdict
@@ -369,7 +372,8 @@ def poll(hub: Path, mail_dir: Path, *, connect=None,
                     polled.append(mb.address)
                     mailboxes.append(
                         _poll_mailbox(store, hub, settings, mb, connect, now, backfill_chunk))
-            store.record_poll(now)
+            if background:
+                store.record_poll(now)
             batch = store.open_batch(now)
             woke, wake_error = _wake(store, wake, now)
             return {

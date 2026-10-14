@@ -77,9 +77,11 @@ running: it checks the poll itself). It prints `last_poll`, `stale`,
 `threshold_minutes`, each mailbox's `last_ok` and open `problem`, and
 `config_error`.
 
-- `stale: true`: the background check has not run for longer than it
-  should. Say so first, with the time of the last check (or that it never
-  ran): until it runs, no mail is pushed. Then offer to look into it:
+- `stale: true`: the background check (the poll task) has not run for longer
+  than it should. Say so first, with the time of the last check (or that it
+  never ran): until it runs, no mail is pushed. Polling by hand
+  (`bg poll`) takes in new mail but does not change `stale`: only the task's
+  own runs count. Then offer to look into it:
   `cc-hub cron list --json` (the row `mail/poll`: is it `enabled`, which
   `schedule`), `cc-connect cron list` (is `hub:mail/poll` registered), and
   "Script tasks and PATH" in cc-hub's

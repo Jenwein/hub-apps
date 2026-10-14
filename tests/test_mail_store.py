@@ -779,6 +779,21 @@ def test_digest_items_page(store):
     assert len(store.digest_items(3, 5)["items"]) == 2
 
 
+def test_digest_counts_cover_the_whole_listing_by_mailbox(store):
+    for n in range(1, 4):
+        put(store, n, status="digest")
+    put(store, 1, address=B, status="digest")
+    put(store, 9, status="pending")
+    put(store, 8, status="old")
+    listing = store.digest_items(1, 2)  # a page holds two; the counts cover all four
+    put(store, 10, status="digest")  # routed after the listing: outside it
+    counts = store.digest_counts(listing["up_to"])
+    assert counts == {A: 3, B: 1}
+    assert list(counts) == sorted(counts)  # the listing's order: by address
+    assert store.digest_counts(0) == {}
+    assert store.digest_counts(store.digest_items(1, 2)["up_to"]) == {A: 4, B: 1}
+
+
 def test_mail_that_becomes_digest_after_the_listing_is_not_marked_digested(store):
     listed = [put(store, 1, status="digest"), put(store, 2, status="digest")]
     early = put(store, 3)  # pending when the digest was listed, with an id below the digest rows

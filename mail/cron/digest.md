@@ -31,9 +31,10 @@ subjects and file names as they are. Give times in the user's local time.
 
 ## 1. Is the background check running?
 
-Before anything polls, run `uv run apps/mail/scripts/mk.py bg status`. Keep
-its `stale` and `last_poll`: the poll of step 2 makes the check look fresh, so
-this is the only true answer. When `stale` is false, there is nothing to say.
+First run `uv run apps/mail/scripts/mk.py bg status`. Keep its `stale` and
+`last_poll`: they go by the runs of the poll task alone (the background
+check), so the poll of step 2 does not change them. When `stale` is false,
+there is nothing to say.
 
 When `stale` is true, read `hub.toml` with Read:
 
@@ -41,8 +42,8 @@ When `stale` is true, read `hub.toml` with Read:
   background check off. The message starts with one line saying that mail is
   checked only when the digest runs, so nothing is pushed in between.
 - A `[cron."mail/poll"]` table with a `schedule`: the check may have been
-  retimed. `stale` judges by the median spacing of the recent polls, so for a
-  few polls after a change it can be wrong. If `last_poll` is no older than
+  retimed. `stale` judges by the median spacing of the task's recent runs, so
+  for a few runs after a change it can be wrong. If `last_poll` is no older than
   that schedule allows, plus 10 minutes, the check is running: say nothing.
 - Otherwise the background check has stopped. The message starts with that:
   the time of the last check (or that it never ran), that no mail is pushed
@@ -60,8 +61,9 @@ shows up among the problems in step 4.
 
 Run `uv run apps/mail/scripts/mk.py bg pending`. It prints `rules` (the rules
 of each mailbox, by its short name), `config_error`, and `items`: up to 10
-mails waiting for a verdict, oldest first. If `config_error` is set, judge
-nothing (step 4 lists the problem) and go on.
+mails waiting for a verdict, oldest first, and their `total`. If
+`config_error` is set, judge nothing (step 4 lists the problem): the `total`
+is the mail still waiting for a verdict, and you go on.
 
 Decide `important` or `digest` for each item with `rules[<mailbox>]`:
 `important` is the sentence of what counts as important there (already the
@@ -74,8 +76,10 @@ characters; when it is not enough, read the mail with
 Record the verdicts of the page in one command, for example
 `uv run apps/mail/scripts/mk.py bg judge 12=important 13=digest`, then run
 `bg pending` again (judged mail leaves the list) until `items` is empty, at
-most 5 rounds. The mail judged important here goes at the top of the digest,
-as mail that needs the user.
+most 10 rounds (100 mails). After the tenth `bg judge`, run `bg pending` once
+more: its `total` is the mail still waiting for a verdict, which the message
+must mention (step 5). The mail judged important here goes at the top of the
+digest, as mail that needs the user.
 
 ## 4. List the digest
 
@@ -83,13 +87,16 @@ Run `uv run apps/mail/scripts/mk.py bg digest-items`. It lists the mail waiting
 for the digest, 10 to a page, grouped by mailbox (`groups`, each with
 `mailbox`, `count` on this page and `items`), with `up_to`, `total`,
 `next_page`, `since` (when the last digest went out; null before the first),
+`mailbox_totals` (how many mails the whole listing holds for each mailbox),
 `problems` (every open problem, and the recoveries not reported yet) and
-`rules`. Ignore its `stale`: step 1 has the true one.
+`rules`. Its `stale` is the same as in step 1.
 
 For the next pages pass back the `up_to` of the first page, so the listing
 stays the same set: `uv run apps/mail/scripts/mk.py bg digest-items --page 2 --up-to 57`
-(with your page and `up_to`). Read at most 20 pages; when there are more,
-count the rest as "and N more" without sorting them.
+(with your page and `up_to`). The pages run by mailbox, so a mailbox can sit
+wholly on a late page: read every page. Only when the listing is longer than
+30 pages (300 mails), stop there; `mailbox_totals` still gives every
+mailbox's count, and the message says how many mails were not read.
 
 Sort each mail into a category in the user's language, such as promotions,
 notifications, newsletters, receipts, personal, work or other, by its sender,
@@ -98,8 +105,10 @@ subject and excerpt.
 The mail of a mailbox whose `delivery` is `digest`, or that is `paused`, was
 never judged: check it against that mailbox's `important` sentence the same
 way (its `excerpt` is 500 characters; read the mail when that is not enough);
-what matches also goes at the top, as mail that needs the user. Mail from a
-sender in `muted_senders` is only counted, never named.
+what matches also goes at the top, as mail that needs the user. If such a
+mailbox has mail on pages you did not read, the message says that this many
+of its mails were not checked. Mail from a sender in `muted_senders` is only
+counted, never named.
 
 ## 5. Compose
 
@@ -110,9 +119,12 @@ parts:
 2. Needs you: the mail judged important in step 3 and the mail that matched in
    step 4. For each: the mailbox, the sender, the subject, what to do, the
    deadline if any, and the attachment file names. At most 10; with more, one
-   line saying how many more.
-3. Per mailbox, one line of counts by category, such as
-   "工作: 通知 5, 推广 12, 其他 3".
+   line saying how many more. When mail is still waiting for a verdict after
+   step 3, one line: how many, and that they come with the next push or
+   digest.
+3. Per mailbox in `mailbox_totals`, one line: its total and the counts by
+   category, such as "工作 20: 通知 5, 推广 12, 其他 3"; mail on pages you did
+   not read is "not read N".
 4. Up to 5 other mails worth a look, one line each: mailbox, sender, subject,
    and why.
 5. Mailbox problems: every open problem of step 4 (which mailbox, what is
