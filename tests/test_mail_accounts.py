@@ -100,7 +100,29 @@ def test_add_sets_baseline_so_old_mail_is_not_new(hub_dir):
     fake.deliver(make_raw("month", "a@x.example", WORK, "m"), received=NOW - timedelta(days=30))
     fake.deliver(make_raw("today", "a@x.example", WORK, "t"), received=NOW)
     assert add(hub_dir, server=fake)["ok"]
-    assert state(hub_dir) == {"uidvalidity": 777, "last_uid": 3, "backfill_before": 2}
+    # backfill runs downward from just above the newest old mail
+    assert state(hub_dir) == {"uidvalidity": 777, "last_uid": 3, "backfill_before": 4}
+
+
+def test_add_backfill_starts_above_last_uid_even_with_gaps(hub_dir):
+    fake = FakeServer({2: make_raw("month", "a@x.example", WORK, "m")},
+                      received={2: NOW - timedelta(days=30)})
+    fake.uidnext = 7  # mail 3..6 came and went
+    assert add(hub_dir, server=fake)["ok"]
+    assert state(hub_dir) == {"uidvalidity": 1, "last_uid": 6, "backfill_before": 7}
+
+
+def test_mail_that_arrives_during_the_add_is_not_backfill(hub_dir):
+    class Late(FakeServer):
+        def uids_since(self, day):
+            uids = super().uids_since(day)
+            self.deliver(make_raw("late", "a@x.example", WORK, "l"), received=NOW)
+            return uids + [self.uidnext - 1]
+
+    fake = Late({1: make_raw("old", "a@x.example", WORK, "o")},
+                received={1: NOW - timedelta(days=200)})
+    assert add(hub_dir, server=fake)["ok"]
+    assert state(hub_dir) == {"uidvalidity": 1, "last_uid": 1, "backfill_before": None}
 
 
 def test_add_baseline_with_gaps_and_nothing_recent(hub_dir):

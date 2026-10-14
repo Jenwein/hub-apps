@@ -33,7 +33,7 @@ from .store import Store
 
 SECRETS = ("secrets", "mail")  # under the hub
 GUIDES = "skills/mail/providers"  # where the provider guides are, in the app
-RECENT_DAYS = 90  # mail of the last 90 days is indexed (as old mail) after a mailbox is added
+RECENT_DAYS = 90  # mail of the last 90 days is backfilled (as old mail) after a mailbox is added
 NAME_LIMIT = 200  # characters of a file name made from an address
 PER_PAGE = 10
 
@@ -235,9 +235,11 @@ def add(hub: Path, mail_dir: Path, name: str, address: str, password: str, *,
     what was written and raises MailError. Success: `{"ok": true, "mailbox", "address",
     "provider"}`.
 
-    The baseline makes all mail already in INBOX old: last_uid is UIDNEXT-1, and
-    backfill_before is the lowest UID of mail from the last 90 days (None when there is none),
-    for the poll to index as old mail.
+    The baseline makes all mail already in INBOX old: last_uid is UIDNEXT-1. The backfill of
+    the last 90 days runs downward: backfill_before is last_uid+1 when INBOX holds mail from
+    the last 90 days, else None. Each poll then indexes, as old mail, a chunk of those UIDs
+    below backfill_before, highest first, and lowers backfill_before to the smallest it took
+    (None when none are left).
     """
     hub, mail_dir, now = Path(hub), Path(mail_dir), _now(now)
     config._check_name(name)
@@ -272,7 +274,8 @@ def add(hub: Path, mail_dir: Path, name: str, address: str, password: str, *,
         uidvalidity, uidnext = srv.inbox_status()
         last_uid = max(uidnext - 1, 0)
         since = now.astimezone(UTC).date() - timedelta(days=RECENT_DAYS)
-        recent = [uid for uid in srv.uids_since(since) if uid <= last_uid]
+        # mail that came after UIDNEXT was read is new mail, not backfill
+        has_recent = any(uid <= last_uid for uid in srv.uids_since(since))
     except LoginError as err:
         return _login_failed(err, mb, password)
     except MailError as err:
@@ -290,7 +293,8 @@ def add(hub: Path, mail_dir: Path, name: str, address: str, password: str, *,
         undo.append(lambda: _remove_section(mail_dir, name, written, before))
         with Store.open(mail_dir) as store:
             store.forget(address)  # nothing from an earlier mailbox of this address stays
-            store.set_baseline(address, uidvalidity, last_uid, min(recent) if recent else None)
+            store.set_baseline(
+                address, uidvalidity, last_uid, last_uid + 1 if has_recent else None)
     except BaseException as err:
         _rolled_back(err, undo)
         raise

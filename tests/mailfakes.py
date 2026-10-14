@@ -51,6 +51,9 @@ class FakeServer(MailServer):
       "smtp-login" for send).
     - `error`: when set, every operation after login raises it (a dropped connection, say
       `ServerError("connection reset")`).
+    - `caps`: the IMAP capabilities that matter to `move` (default {"MOVE", "UIDPLUS"}). With
+      neither, `move` copies, leaves the originals in INBOX flagged `\\Deleted` and returns
+      `{"expunged": False}`, as ImapSmtpServer does on such a server.
     - `sent`: a SentMail for each send; `calls`: (method, arguments...) for each call.
     """
 
@@ -66,6 +69,7 @@ class FakeServer(MailServer):
         fail_login: str | None = None,
         password: str | None = None,
         error: Exception | None = None,
+        caps: set[str] | frozenset[str] = frozenset({"MOVE", "UIDPLUS"}),
     ):
         if fail_login is not None and fail_login not in LOGIN_STEPS:
             raise ValueError(f"fail_login must be one of {LOGIN_STEPS}, got {fail_login!r}")
@@ -80,6 +84,7 @@ class FakeServer(MailServer):
         self.fail_login = fail_login
         self.password = password
         self.error = error
+        self.caps = set(caps)
         self.sent: list[SentMail] = []
         self.calls: list[tuple] = []
         self.logins: list[tuple[str, str]] = []  # (address, password) of each connect
@@ -206,14 +211,23 @@ class FakeServer(MailServer):
         return [("INBOX", self.folder_flags.get("INBOX", ()))] + [
             (name, self.folder_flags.get(name, ())) for name in self.folders_]
 
-    def move(self, uids: list[int], folder: str) -> None:
+    def move(self, uids: list[int], folder: str) -> dict:
         self.calls.append(("move", tuple(uids), folder))
+        if not uids:
+            return {"expunged": True}  # like ImapSmtpServer: nothing to do, nothing sent
         self._ready()
         target = self._folder(folder)
-        for uid in uids:
-            if uid in self.inbox and target is not self.inbox:
-                target[max(target, default=0) + 1] = self.inbox.pop(uid)
+        expunged = bool({"MOVE", "UIDPLUS"} & self.caps)
+        for uid in sorted(set(uids)):
+            if uid not in self.inbox or target is self.inbox:
+                continue
+            target[max(target, default=0) + 1] = self.inbox[uid]
+            if expunged:
+                del self.inbox[uid]
                 self.flags.pop(uid, None)
+            else:
+                self.flags.setdefault(uid, set()).add("\\Deleted")
+        return {"expunged": expunged}
 
     def create_folder(self, name: str) -> None:
         self.calls.append(("create_folder", name))

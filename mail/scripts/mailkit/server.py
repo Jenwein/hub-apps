@@ -13,7 +13,8 @@ Rules that hold for every method of ImapSmtpServer:
   fetched with BODY.PEEK[], so \\Seen stays as it was. Only `set_seen` and `move` open INBOX
   read-write (SELECT). Nothing is expunged but the very messages a move copied, and only by
   UID EXPUNGE; a plain EXPUNGE, which would also remove mail another client marked deleted, is
-  never sent.
+  never sent. A server with neither MOVE nor UIDPLUS keeps the originals, flagged \\Deleted,
+  and `move` says so (`{"expunged": False}`).
 - For NetEase (`send_id` in the provider table) the IMAP ID command goes out after LOGIN and
   before any folder is opened; NetEase answers "Unsafe Login" without it.
 - Failures are MailErrors. `LoginError` when the server cannot be reached or refuses the login
@@ -100,8 +101,11 @@ class MailServer(Protocol):
     def folders(self) -> list[tuple[str, tuple[str, ...]]]:
         """(name, attributes) of every folder, such as ("Trash", ("\\\\Trash",))."""
 
-    def move(self, uids: list[int], folder: str) -> None:
-        """Move INBOX messages to `folder`, which must exist."""
+    def move(self, uids: list[int], folder: str) -> dict:
+        """Move INBOX messages to `folder`, which must exist. Returns `{"expunged": bool}`:
+        True when the originals are gone from INBOX (MOVE, or COPY and UID EXPUNGE); False
+        when the server can do neither, so they are copied and only flagged \\Deleted in
+        INBOX, where webmail and phone apps still show them."""
 
     def create_folder(self, name: str) -> None:
         """Create a folder; ServerError when it exists."""
@@ -485,25 +489,29 @@ class ImapSmtpServer(MailServer):
         with self._guard("listing the folders"):
             return [(f.name, tuple(f.flags)) for f in self._imap().folder.list()]
 
-    def move(self, uids: list[int], folder: str) -> None:
+    def move(self, uids: list[int], folder: str) -> dict:
         wanted = _wanted(uids)
         if not wanted:
-            return
+            return {"expunged": True}  # nothing left behind
         doing = f"moving mail to {folder}"
         with self._guard(doing):
             caps = self._capabilities()
             client = self._inbox(readonly=False).client
             target = encode_folder(folder)
+            expunged = "MOVE" in caps or "UIDPLUS" in caps
             for chunk in _chunks(wanted):
                 ids = _uid_set(chunk)
                 if "MOVE" in caps:
                     self._ok(client.uid("MOVE", ids, target), doing)
                     continue
-                # no MOVE: copy, mark the originals deleted, and expunge exactly those
+                # no MOVE: copy, mark the originals deleted, and expunge exactly those; a plain
+                # EXPUNGE would also erase mail another client marked deleted, so without
+                # UIDPLUS the originals stay, flagged
                 self._ok(client.uid("COPY", ids, target), doing)
                 self._ok(client.uid("STORE", ids, "+FLAGS.SILENT", r"(\Deleted)"), doing)
                 if "UIDPLUS" in caps:
                     self._ok(client.uid("EXPUNGE", ids), doing)
+        return {"expunged": expunged}
 
     def create_folder(self, name: str) -> None:
         with self._guard(f"creating the folder {name}"):

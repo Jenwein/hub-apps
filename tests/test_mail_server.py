@@ -28,7 +28,7 @@ from uuid import uuid4
 import pytest
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult
-from mailfakes import make_raw
+from mailfakes import FakeServer, make_raw
 from mailkit.config import Mailbox, MailError
 from mailkit.message import parse
 from mailkit.server import LoginError, ServerError, connect
@@ -137,7 +137,8 @@ class Wire:
     def serve(self, rfile, wfile):
         def send(*lines):
             for line in lines:
-                wfile.write(line if isinstance(line, bytes) else line.encode("utf-8"))
+                wfile.write(line if isinstance(line, bytes)
+                            else line.encode("utf-8", "surrogateescape"))
                 if not (isinstance(line, bytes) and line.endswith(b"\r\n")):
                     wfile.write(b"\r\n")
 
@@ -580,7 +581,7 @@ def test_move_with_the_move_command(wire):
     w.folders["Trash"] = Folder(attributes=("\\HasNoChildren", "\\Trash"))
     srv = open_plain(w)
     assert ("Trash", ("\\HasNoChildren", "\\Trash")) in srv.folders()
-    srv.move([a], "Trash")
+    assert srv.move([a], "Trash") == {"expunged": True}
     srv.close()
     assert list(w.inbox.messages) == [b]
     assert len(w.folders["Trash"].messages) == 1
@@ -593,7 +594,7 @@ def test_move_without_move_but_with_uidplus_expunges_only_those_uids(wire):
     b = put(w, "b", flags={"\\Deleted"})  # someone else's deletion stays theirs to expunge
     w.folders["Archive"] = Folder()
     srv = open_plain(w)
-    srv.move([a], "Archive")
+    assert srv.move([a], "Archive") == {"expunged": True}
     srv.close()
     assert list(w.inbox.messages) == [b]
     assert w.folders["Archive"].messages[1].flags == set()
@@ -607,7 +608,7 @@ def test_move_without_move_or_uidplus_only_marks_deleted(wire):
     a = put(w, "a")
     w.folders["Archive"] = Folder()
     srv = open_plain(w)
-    srv.move([a], "Archive")
+    assert srv.move([a], "Archive") == {"expunged": False}
     srv.close()
     assert w.inbox.messages[a].flags == {"\\Deleted"}
     assert len(w.folders["Archive"].messages) == 1
@@ -619,7 +620,7 @@ def test_move_capability_announced_only_after_login(wire):
     a = put(w, "a")
     w.folders["Trash"] = Folder()
     srv = open_plain(w)
-    srv.move([a], "Trash")
+    assert srv.move([a], "Trash") == {"expunged": True}
     srv.close()
     assert "UID MOVE" in w.commands()
 
@@ -656,7 +657,7 @@ def test_nothing_to_do_sends_nothing(wire):
     w = wire()
     srv = open_plain(w)
     srv.set_seen([], True)
-    srv.move([], "Trash")
+    assert srv.move([], "Trash") == {"expunged": True}
     assert srv.fetch([]) == []
     srv.close()
     assert not {"SELECT", "UID STORE", "UID MOVE", "UID FETCH"} & set(w.commands())
@@ -668,6 +669,41 @@ def test_close_twice_and_context_manager(wire):
         srv.inbox_status()
     srv.close()
     assert w.commands()[-1] == "LOGOUT"
+
+
+# -- FakeServer keeps the same move contract -------------------------------------------------
+
+
+@pytest.mark.parametrize("caps", [{"MOVE", "UIDPLUS"}, {"MOVE"}, {"UIDPLUS"}])
+def test_fake_move_with_move_or_uidplus_removes_the_originals(caps):
+    fake = FakeServer(folders={"Trash": {}}, caps=caps)
+    a = fake.deliver(make_raw("a", "x@corp.example", "me@corp.example", "a"))
+    b = fake.deliver(make_raw("b", "x@corp.example", "me@corp.example", "b"),
+                     flags=("\\Flagged",))
+    assert fake.move([a, b], "Trash") == {"expunged": True}
+    assert fake.inbox == {} and fake.flags == {}
+    assert len(fake.folders_["Trash"]) == 2
+    assert fake.uids_after(0) == []
+
+
+def test_fake_move_without_move_or_uidplus_only_flags_deleted():
+    fake = FakeServer(folders={"Archive": {}}, caps=set())
+    a = fake.deliver(make_raw("a", "x@corp.example", "me@corp.example", "a"))
+    assert fake.move([a], "Archive") == {"expunged": False}
+    assert fake.flags[a] == {"\\Deleted"}
+    assert fake.uids_after(0) == [a]  # still in INBOX, as webmail would show it
+    assert list(fake.folders_["Archive"].values()) == [fake.inbox[a]]
+    assert fake.writes() == [("move", (a,), "Archive")]
+
+
+def test_fake_move_of_nothing_and_to_a_missing_folder():
+    fake = FakeServer(fail_login="connect")
+    assert fake.move([], "Trash") == {"expunged": True}  # no login needed for nothing
+    fake = FakeServer()
+    a = fake.deliver(make_raw("a", "x@corp.example", "me@corp.example", "a"))
+    with pytest.raises(ServerError, match="TRYCREATE"):
+        fake.move([a], "Nowhere")
+    assert a in fake.inbox
 
 
 # -- SMTP ------------------------------------------------------------------------------------
@@ -857,7 +893,7 @@ def test_greenmail_read_write_round_trip(gm):
 
         srv.create_folder("Archive")
         assert "Archive" in [name for name, _ in srv.folders()]
-        srv.move([uids[1]], "Archive")
+        assert srv.move([uids[1]], "Archive") == {"expunged": True}
         assert srv.uids_after(0) == [uids[0]]
         assert gm.count("Archive") == 1
 
