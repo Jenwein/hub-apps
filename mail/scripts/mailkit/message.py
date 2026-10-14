@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import email
 import email.errors
+import email.header
 import email.parser
 import email.policy
 import email.utils
-import functools
 import re
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -29,18 +29,22 @@ HTML_LIMIT = 300_000  # characters of one HTML body that are converted to text
 # The stdlib's header parsers are slow on hostile values: quadratic on quotes and semicolons
 # (50 000 quotes in a To: 3 s, 14 s on Python 3.12.10) and about 7 microseconds per character on
 # anything else, for each header that is read. An address list can really be long (hundreds of
-# recipients), so an address header is cut at HEADER_LIMIT characters. The parameters of
-# Content-Type, Content-Disposition and Content-Transfer-Encoding are short: up to PARSE_LIMIT
-# characters (a file name of a hundred Chinese characters, percent-encoded) they go to the
-# header classes, like every other header; a longer value is cut at PARAM_LIMIT, which is room
-# for the longest file name, and read as the plain text it is by the parameter parser of
-# `email.message`, which is fast on any input and understands RFC 2231 (but does not decode an
-# RFC 2047 word in a file name). A part costs two such headers, and the FeedParser reads them of
-# every part it builds.
+# recipients), so an address header is cut at HEADER_LIMIT characters; at most a handful are read.
+# The parameters of Content-Type, Content-Disposition and Content-Transfer-Encoding are short: up
+# to PARSE_LIMIT characters (a file name of forty Chinese characters, percent-encoded) they go to
+# the header classes, like every other header, as long as the message has PARSE_BUDGET characters
+# of them left to spend. A longer value, or any value once the budget is spent, is cut at
+# PARAM_LIMIT and read as the plain text it is by the parameter parser of `email.message`, which
+# is fast on any input and understands RFC 2231; RFC 2047 words in a file name are decoded by
+# `_filename`. The budget is what bounds a message of thousands of parts: the FeedParser reads
+# the Content-Type of every part it builds, in message order, so the first parts get the exact
+# parse. Spent per distinct header and per message, not per read.
 HEADER_LIMIT = 10_000
 PARSE_LIMIT = 500
+PARSE_BUDGET = 60_000  # characters; about half a second of worst-case input
 PARAM_LIMIT = 2_000
 MAX_PARAMS = 64  # a file name in RFC 2231 form needs about 40 parameters; 2 000 semicolons: 1 s
+MAX_MARKS = 2_000  # in an address header of 10 000 characters; 10 000 hostile quotes: 0.6 s
 _LIMITS = {
     **dict.fromkeys((
         "from", "to", "cc", "bcc", "sender", "reply-to",
@@ -50,10 +54,11 @@ _LIMITS = {
         ("content-type", "content-disposition", "content-transfer-encoding"), PARAM_LIMIT),
 }
 # The tree of a message has at most this many parts (the message, multiparts and attached
-# messages included). The rest are ignored: they are neither body nor listed attachments. Each
-# part costs the reading of its own headers, so a message of thousands of parts would take
-# minutes however short each header is. Real mail has a few parts; 200 is a mail with well over
-# a hundred attachments.
+# messages included). The rest are ignored: they are neither body nor listed attachments. The
+# tree is pruned after the FeedParser has built it, so what bounds the time of a message of
+# thousands of parts is PARSE_BUDGET (the FeedParser reads the Content-Type of every part), and
+# what this bounds is the work after that. Real mail has a few parts; 200 is a mail with well
+# over a hundred attachments.
 MAX_PARTS = 200
 # A message has one From, To and Cc header; a copy or two is a mailer's mistake, a thousand is an
 # attack on the parser (each copy of a hostile address header is a parse of up to HEADER_LIMIT).
@@ -124,10 +129,14 @@ def _plain(value: str) -> str:
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
+# the characters an address parser is quadratic in: quotes, backslashes, and commas
+_MARKS = re.compile(r'["\\,]')
+
+
 def _cut(value: str, limit: int) -> str:
     """`value` cut to `limit` characters, and for parameters also before the MAX_PARAMS-th
-    semicolon (the parameter parsers slow down with the number of parameters as well). An
-    address list is cut between two addresses."""
+    semicolon, for addresses before the MAX_MARKS-th quote, backslash or comma (the parsers slow
+    down with their number as well). An address list is cut between two addresses."""
     if limit == PARAM_LIMIT:
         at = -1
         for _ in range(MAX_PARAMS):
@@ -135,36 +144,74 @@ def _cut(value: str, limit: int) -> str:
             if at < 0:
                 return value[:limit]
         return value[:at]
-    if len(value) <= limit:
-        return value
     cut = value[:limit]
+    for number, mark in enumerate(_MARKS.finditer(cut), 1):
+        if number == MAX_MARKS:
+            cut = cut[:mark.start()]
+            break
+    if len(cut) == len(value):
+        return value
     return cut.rpartition(",")[0] or cut
 
 
-@functools.lru_cache(maxsize=4 * MAX_PARTS)
+class _Work:
+    """What the message being read has cost the header classes. A part is asked its type,
+    charset, disposition and file name many times and the stdlib parses the header anew each
+    time, so the header objects of the parameter headers are kept here, once per distinct value
+    (the message needs three per part at most); the budget is charged when one is made. Address
+    headers are read once and are not kept: a hostile one is megabytes of parse tree. Reset when
+    a message is loaded and when `parse` or `attachment_bytes` is done with it."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.left = PARSE_BUDGET
+        self.headers: dict[tuple[str, str], object] = {}
+
+
+_WORK = _Work()
+
+
 def _parse_header(name: str, value: str):
-    """The header object of a header that is cut to a limit, parsed once however many times it is
-    asked for: a part is asked its type, charset, disposition and file name many times, and the
-    stdlib parses the header anew each time. There are at most three such headers per part."""
+    """The header object for `value`, or its text when the stdlib's parser gives up."""
     try:
         return email.policy.EmailPolicy.header_fetch_parse(POLICY, name, value)
     except STDLIB_ERRORS:
         return _plain(value)
 
 
+def _parameter_header(name: str, value: str):
+    """A Content-Type, Content-Disposition or Content-Transfer-Encoding: parsed by the header
+    classes while the budget lasts, else, or when it is long, read as plain text."""
+    long = len(value) > PARSE_LIMIT  # (before the cut: a cut can leave a short hostile value)
+    value = _cut(value, PARAM_LIMIT)
+    if long:
+        return _plain(value)
+    key = (name, value)
+    header = _WORK.headers.get(key)
+    if header is None:
+        if len(value) > _WORK.left:
+            return _plain(value)
+        _WORK.left -= len(value)
+        header = _WORK.headers[key] = _parse_header(name, value)
+    return header
+
+
 class _Policy(email.policy.EmailPolicy):
     """`email.policy.default`, except that a header whose parser gives up (the stdlib's have
     raised IndexError on `Content-Type: text/html; charset`) is read as the plain text it is, the
     way the old compat32 policy read every header, instead of stopping the whole parse; and
-    except that the headers with parsers that are slow on hostile values are cut (`_LIMITS`)."""
+    except that the headers with parsers that are slow on hostile values are cut and budgeted
+    (`_LIMITS`, `_Work`)."""
 
     def header_fetch_parse(self, name, value):
         if hasattr(value, "name"):  # a header object that was set is already parsed
             return value
         limit = _LIMITS.get(name.lower())
+        if limit == PARAM_LIMIT:
+            return _parameter_header(name, value)
         if limit is not None:
-            if limit == PARAM_LIMIT and len(value) > PARSE_LIMIT:
-                return _plain(_cut(value, limit))
             return _parse_header(name, _cut(value, limit))
         try:
             return super().header_fetch_parse(name, value)
@@ -207,6 +254,7 @@ def _repair_headers(part) -> None:
 
 def _load(raw: bytes):
     """The message tree of `raw`, with readable headers, of at most MAX_PARTS parts."""
+    _WORK.reset()
     try:
         msg = email.message_from_bytes(raw, policy=POLICY)
     except STDLIB_ERRORS:  # the headers are kept, the body is not
@@ -387,9 +435,24 @@ def _leaves(root):
             yield part
 
 
+def _decode_words(name: str) -> str:
+    """`name` with its RFC 2047 words decoded (in the charset they name, GBK and the like
+    included). The header classes do that for a short header; a long one is read as plain text
+    and its file name arrives with the words in it, and the base64 in them has slashes."""
+    if "=?" not in name:
+        return name
+    try:
+        pieces = email.header.decode_header(name)
+    except STDLIB_ERRORS:  # bad base64 and the like: the name stays as it is
+        return name
+    return "".join(
+        decode(data, charset) if isinstance(data, bytes) else data for data, charset in pieces)
+
+
 def _filename(part) -> str | None:
     try:
         name = part.get_filename()
+        name = name and _decode_words(name)
     except STDLIB_ERRORS:  # an unreadable name is still a name that exists
         name = "attachment"
     if not name:
@@ -473,6 +536,8 @@ def attachment_bytes(raw: bytes, index: int) -> tuple[str, bytes]:
     except Exception as error:
         # the contract is that only MailError comes out, whatever the stdlib raises on hostile mail
         raise MailError(f"attachment {index} cannot be read ({type(error).__name__})") from error
+    finally:
+        _WORK.reset()  # (nothing of the message is kept)
 
 
 # -- headers ---------------------------------------------------------------------------------
@@ -572,6 +637,8 @@ def parse(raw: bytes) -> Parsed:
     except Exception:  # noqa: BLE001
         # the contract is that nothing comes out, whatever the stdlib raises on hostile mail
         return Parsed()
+    finally:
+        _WORK.reset()  # (nothing of the message is kept)
 
 
 def _bare(address: str) -> str:

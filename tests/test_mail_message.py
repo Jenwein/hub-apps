@@ -719,3 +719,135 @@ def test_a_long_content_type_is_still_read():
     junk = b"Content-Type: text/plain; charset=gbk" + b"; x=y" * 5_000
     raw = message(b"From: a@x", junk, body="本月工资".encode("gbk"))
     assert parse(raw).text == "本月工资"
+
+
+# -- hostile mail, round two: work that adds up over parts, long names, memory ---------------
+
+HOSTILE_UNITS = (b"(a", b"<a@", b"a:", b'"', b"(", b"a(b)")
+
+
+def short_hostile_parts(count: int) -> bytes:
+    """`count` parts whose Content-Type and Content-Disposition are each about 480 characters of
+    a hostile unit (short enough to go to the stdlib's header classes), all different."""
+    parts = []
+    for i in range(count):
+        junk = (HOSTILE_UNITS[i % len(HOSTILE_UNITS)] * 500)[:460]
+        parts.append(b"Content-Type: text/plain; p%d=" % i + junk
+                     + b"\r\nContent-Disposition: inline; f%d=" % i + junk + b"\r\n\r\npart %d" % i)
+    return multipart("mixed", *parts)
+
+
+@pytest.mark.parametrize("count", [200, 3_000])
+def test_thousands_of_parts_with_short_hostile_headers_take_little_time(count):
+    # (the FeedParser reads the Content-Type of every part it builds, before the part limit
+    # applies: 8 ms for each such part, 25 s for 3 000)
+    raw = short_hostile_parts(count)
+    p, took = timed(raw)
+    assert p.text.startswith("part 0") and took < BOUND, took
+
+
+@pytest.mark.parametrize("length", [10, 40])
+def test_a_big_message_of_ordinary_parts_is_read_whole(length):
+    # 198 attachments (every part the tree allows) with a Chinese RFC 2047 name in both headers:
+    # with 10 characters the header classes parse all of them, with 40 the budget of header-class
+    # parses runs out on the way and the last parts are read as plain text; the names are the same
+    base = "合同附件材料补充说明及修订意见汇总清单二零二六年度第三季度财务报告"
+    names = [f"第{i:03d}号" + base[:length] + ".pdf" for i in range(mm.MAX_PARTS - 2)]
+    parts = []
+    spent = 0
+    for name in names:
+        word = base64.b64encode(name.encode()).decode()
+        header = (f'Content-Type: application/pdf; name="=?utf-8?B?{word}?="\r\n'
+                  f'Content-Disposition: attachment; filename="=?utf-8?B?{word}?="')
+        spent += len(header)
+        parts.append((header + "\r\n\r\n%PDF").encode())
+    assert (spent > mm.PARSE_BUDGET) == (length == 40)
+    p = parse(multipart("mixed", b"Content-Type: text/plain\r\n\r\nthe body", *parts))
+    assert p.text == "the body" and [a.filename for a in p.attachments] == names
+
+
+# (亿 仿 使 have a "/" in their base64)
+CHINESE = "关于二零二六年度第三季度财务报告及相关附件材料的补充说明与亿元仿制使用意见汇总清单"
+
+
+def long_name(length: int = 150) -> str:
+    return (CHINESE * 6)[:length]
+
+
+def encoded_words(name: str, charset: str, kind: str) -> bytes:
+    """`name` as RFC 2047 words of at most 75 characters, folded the way mailers fold them."""
+    step = {"B": 15, "Q": 6}[kind]  # characters per word
+    words = []
+    for i in range(0, len(name), step):
+        chunk = name[i:i + step].encode(charset)
+        if kind == "B":
+            text = base64.b64encode(chunk).decode()
+        else:
+            text = "".join(f"={b:02X}" for b in chunk)
+        words.append(f"=?{charset}?{kind}?{text}?=".encode())
+    assert all(len(w) <= 75 for w in words)
+    return b"\r\n ".join(words)
+
+
+# (the length of the name that makes the encoded value longer than PARSE_LIMIT and shorter than
+# PARAM_LIMIT: a Q word takes nine characters for each Chinese one)
+@pytest.mark.parametrize("charset, kind, length", [
+    ("utf-8", "B", 150), ("utf-8", "Q", 150), ("gb18030", "B", 210)])
+@pytest.mark.parametrize("where", ["disposition", "type"])
+def test_a_long_rfc2047_file_name_is_decoded(charset, kind, length, where):
+    name = long_name(length) + ".pdf"
+    value = encoded_words(name, charset, kind)
+    if where == "disposition":
+        header = b'Content-Disposition: attachment; filename="' + value + b'"'
+        raw = with_attachment(b"Content-Type: application/pdf", header)
+    else:
+        raw = with_attachment(b'Content-Type: application/pdf; name="' + value + b'"')
+    # the value is long enough to be read by the plain parser, and short enough not to be cut
+    assert mm.PARSE_LIMIT < len(value) < mm.PARAM_LIMIT - 60
+    assert [a.filename for a in parse(raw).attachments] == [name]
+    assert attachment_bytes(raw, 0)[0] == name
+
+
+def test_a_long_rfc2047_file_name_with_a_slash_in_its_base64():
+    name = long_name()
+    words = encoded_words(name, "utf-8", "B")
+    assert b"/" in words, "pick a name whose base64 has a slash: the fragment bug needs one"
+    raw = with_attachment(b"Content-Type: application/pdf",
+                          b'Content-Disposition: attachment; filename="' + words + b'"')
+    assert [a.filename for a in parse(raw).attachments] == [name]
+
+
+def test_nothing_of_a_message_is_kept_after_parse(monkeypatch):
+    # (a module-level cache kept the parse tree of every address header: 4 MB for a hostile To)
+    cached = []
+    real = mm._Work.reset
+
+    def spy(self):
+        cached.append({key[0].lower() for key in self.headers})
+        real(self)
+
+    monkeypatch.setattr(mm._Work, "reset", spy)
+    hostile = b'"' * 1_500
+    raw = message(b"From: " + hostile, b"To: " + hostile, b"Cc: " + hostile,
+                  b"Resent-To: " + hostile, b"Content-Type: text/plain", b"Subject: s",
+                  body=b"body")
+    assert parse(raw).subject == "s"
+    # the contents when parse ended: only what a part's parameters needed, no address header
+    assert cached[-1] <= {"content-type", "content-disposition", "content-transfer-encoding"}
+    assert not mm._WORK.headers
+    cached.clear()
+    attachment_bytes(with_attachment(b'Content-Type: application/pdf; name="a.pdf"'), 0)
+    assert cached[-1] <= {"content-type", "content-disposition", "content-transfer-encoding"}
+    assert not mm._WORK.headers
+
+
+BLANK = bytes([13, 10, 13, 10]) + b"body"
+
+
+def test_a_long_real_address_list_is_read_whole():
+    # (the cut before the 2 000th quote, backslash or comma is for hostile values only: a list
+    # that fills the 10 000 characters has about a thousand of them)
+    entries = [b'"Name %d" <u%d@x.example>' % (i, i) for i in range(300)]
+    raw = b"To: " + b", ".join(entries) + BLANK
+    assert 7_000 < len(raw) - 10 < mm.HEADER_LIMIT
+    assert parse(raw).to == [f"u{i}@x.example" for i in range(300)]
