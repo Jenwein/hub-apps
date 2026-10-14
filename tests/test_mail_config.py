@@ -17,6 +17,7 @@ from mailkit.config import (
     parse,
     read_text,
     remove_mailbox_text,
+    rename_mailbox_text,
     set_mailbox_value_text,
     write_text,
 )
@@ -402,6 +403,71 @@ def test_crlf_files_stay_crlf(tmp_path):
     write_text(tmp_path, text)
     raw = (tmp_path / "config.toml").read_bytes()
     assert raw.count(b"\n") == raw.count(b"\r\n") and b"QQ" not in raw
+
+
+def test_rename_changes_only_the_header():
+    out = rename_mailbox_text(HAND, "工作", "Work")
+    assert out == HAND.replace('[mailboxes."工作"]', '[mailboxes."Work"]')
+    assert list(parse(out).mailboxes) == ["Work", "QQ"]
+    assert parse(out).mailboxes["Work"].notes == parse(HAND).mailboxes["工作"].notes
+    assert rename_mailbox_text(HAND, "工作", "工作") == HAND
+
+
+@pytest.mark.parametrize("header,renamed", [
+    ("[mailboxes.'工作']", '[mailboxes."QQ 2"]'),
+    ('  [ mailboxes . "工作" ]  # work', '  [mailboxes."QQ 2"]  # work'),
+    ("[mailboxes.work-1]", '[mailboxes."QQ 2"]'),
+])
+def test_rename_keeps_indent_and_comment_of_any_header_spelling(header, renamed):
+    name = "work-1" if "work-1" in header else "工作"
+    text = (
+        f'[settings]\nnotes = []\n\n{header}\r\naddress = "me+x@corp.example"\n'
+        'provider = "feishu"\nimap = "imap.feishu.cn:993"\nsmtp = "smtp.feishu.cn:465"\n'
+        'added = "2026-10-14T10:00:00+08:00"\n'
+    )
+    out = rename_mailbox_text(text, name, "QQ 2")
+    assert out == text.replace(header, renamed)
+    assert list(parse(out).mailboxes) == ["QQ 2"]
+
+
+def test_rename_refusals():
+    with pytest.raises(MailError, match="already a mailbox named"):
+        rename_mailbox_text(HAND, "工作", "QQ")
+    with pytest.raises(MailError, match="no mailbox named"):
+        rename_mailbox_text(HAND, "nope", "x")
+    with pytest.raises(MailError, match="name"):
+        rename_mailbox_text(HAND, "工作", 'a"b')
+    inline = (
+        '[mailboxes]\n"工作" = { address = "a@b.example", provider = "qq", '
+        'imap = "i:1", smtp = "s:2", added = "2026-10-14T10:00:00+08:00" }\n'
+    )
+    with pytest.raises(MailError, match="by hand"):
+        rename_mailbox_text(inline, "工作", "x")
+    fake = '[settings]\nnotes = ["""x\n[mailboxes."工作"]\n# y"""]\n\n'
+    text = fake + HAND[HAND.index('[mailboxes."工作"]') :]
+    with pytest.raises(MailError, match="by hand"):
+        rename_mailbox_text(text, "工作", "x")
+
+
+def test_write_text_replaces_the_file_at_once(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_bytes(b"[settings]\r\nnotes = []\r\n")
+    if os.name != "nt":
+        os.chmod(tmp_path / "config.toml", 0o640)
+
+    def failing(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", failing)
+    with pytest.raises(MailError, match="disk full"):
+        write_text(tmp_path, "[settings]\nnotes = []\n")
+    assert (tmp_path / "config.toml").read_bytes() == b"[settings]\r\nnotes = []\r\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]  # no temp file left
+    monkeypatch.undo()
+    write_text(tmp_path, '[settings]\r\nnotes = ["x"]\r\n')
+    assert (tmp_path / "config.toml").read_bytes() == b'[settings]\r\nnotes = ["x"]\r\n'
+    assert [p.name for p in tmp_path.iterdir()] == ["config.toml"]
+    if os.name != "nt":
+        assert (tmp_path / "config.toml").stat().st_mode & 0o777 == 0o640
 
 
 # ---- the command line ----

@@ -8,7 +8,10 @@ edit whose result would not parse back to exactly the intended data is refused, 
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -238,11 +241,42 @@ def read_text(mail_dir: Path) -> str:
         raise MailError(f"cannot read {path}: {exc}") from None
 
 
+def atomic_write(path: Path, data: bytes, *, mode: int | None = None) -> None:
+    """Replace `path` with `data` in one step: a reader sees the old file or the new one,
+    never part of either. The bytes go to a temporary file next to `path`, then `os.replace`.
+
+    `mode` is the POSIX permission of the new file (default: that of the file it replaces,
+    else 0o644). The temporary file is created with that mode, so a secret is never readable by
+    others, not even for a moment. OSError when it cannot be written; no temporary file is left.
+    """
+    path = Path(path)
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            mode = 0o644
+    temp = path.with_name(f".{path.name}.{os.urandom(6).hex()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(temp, flags, mode)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name != "nt":
+            os.chmod(temp, mode)  # the umask may have taken bits the old file had
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
 def write_text(mail_dir: Path, text: str) -> None:
-    """Store `text` as config.toml exactly as it is, line endings included."""
+    """Store `text` as config.toml exactly as it is, line endings included, in one step."""
     path = config_path(mail_dir)
     try:
-        path.write_bytes(text.encode("utf-8"))
+        atomic_write(path, text.encode("utf-8"))
     except OSError as exc:
         raise MailError(f"cannot write {path}: {exc}") from None
 
@@ -395,15 +429,21 @@ def _check_result(before: dict, new_text: str, name: str, table: dict | None) ->
 
     A `table` of None means the mailbox is gone.
     """
-    try:
-        after = tomllib.loads(new_text.removeprefix("\ufeff"))
-    except tomllib.TOMLDecodeError:
-        raise _refused(name) from None
     expected = dict(_boxes(before))
     if table is None:
         expected.pop(name, None)
     else:
         expected[name] = table
+    _check_boxes(before, new_text, name, expected)
+
+
+def _check_boxes(before: dict, new_text: str, name: str, expected: dict) -> None:
+    """`new_text` must parse to `before` with the mailboxes `expected` and nothing else
+    changed; else the edit of mailbox `name` is refused."""
+    try:
+        after = tomllib.loads(new_text.removeprefix("\ufeff"))
+    except tomllib.TOMLDecodeError:
+        raise _refused(name) from None
 
     def rest(data: dict) -> dict:
         return {k: v for k, v in data.items() if k != "mailboxes"}
@@ -466,6 +506,41 @@ def remove_mailbox_text(text: str, name: str) -> str:
     del lines[first:stop]
     new_text = "".join(lines)
     _check_result(before, new_text, name, None)
+    return new_text
+
+
+def rename_mailbox_text(text: str, name: str, new_name: str) -> str:
+    """`text` with the section of mailbox `name` headed `[mailboxes."<new_name>"]`.
+
+    Only the header line changes; its indentation and a comment after it stay. MailError when
+    there is no such mailbox or the new name is taken or unusable.
+    """
+    _check_name(name)
+    _check_name(new_name)
+    before = _toml(text)
+    boxes = _boxes(before)
+    if name not in boxes:
+        raise MailError(f'config.toml: there is no mailbox named "{name}"')
+    if new_name == name:
+        return text
+    if new_name in boxes:
+        raise MailError(f'config.toml: there is already a mailbox named "{new_name}"')
+    lines = LINE.findall(text)
+    span = _find(lines, name)
+    if span is None:
+        raise _refused(name)
+    start = span[0]
+    line = lines[start]
+    body = line.rstrip("\r\n")
+    match = HEADER.match(body)
+    group = next(g for g in ("q", "l", "b") if match.group(g) is not None)
+    close = body.index("]", match.end(group))
+    indent = body[: len(body) - len(body.lstrip())]
+    lines[start] = f"{indent}[mailboxes.{_quote(new_name)}]{body[close + 1:]}{line[len(body):]}"
+    new_text = "".join(lines)
+    expected = {k: v for k, v in boxes.items() if k != name}
+    expected[new_name] = boxes[name]
+    _check_boxes(before, new_text, name, expected)
     return new_text
 
 
