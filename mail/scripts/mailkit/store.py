@@ -3,8 +3,9 @@
 The index holds what `mk` needs between runs: per mailbox where the last poll stopped, every
 message that was fetched (envelope and plain text, enough to search and to judge it), the
 verdicts and pushes, the times of the polls, the problems of the mailboxes and when `triage` was
-woken to tell them, a UID the server left out of a fetch, and the one batch of pending mail the
-background `triage` task is woken for. A message the user archived or deleted stays in the index
+woken to tell them, a UID the server left out of a fetch, the one batch of pending mail the
+background `triage` task is woken for, and whether those wakes get through (the last wake, the
+last error, how many wakes in a row `triage` did not answer). A message the user archived or deleted stays in the index
 with the folder it was moved to (`moved_to`), so that search can say where it went and the same
 message is never moved twice. Nothing in it is the only copy of a mail: the server has the mail,
 and a new machine rebuilds the index by polling.
@@ -26,6 +27,7 @@ Everything returned is plain dicts, lists, strings, numbers and None, ready for 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -50,6 +52,10 @@ ADDRESSED = ("to", "cc", "none")
 DECISIONS = ("important", "digest")
 POLLS_KEPT = 200  # the status check needs the last few; older rows are dropped
 PROBLEM_WAKE_MINUTES = 10  # at least this long between two wakes of triage for problems
+WAKE_MINUTES = 10  # a woken batch still pending after this long is woken again
+UNACKNOWLEDGED_LIMIT = 6  # wakes in a row that triage did not answer, before it is woken less
+BACKOFF_MINUTES = 60  # between two wakes of a batch from then on, until mail is judged
+WAKE_ERROR_LIMIT = 300  # characters of a failed wake's error that are kept
 PROBLEM_QUIET_HOURS = 24  # a mailbox's problem of one kind is told at most once in this time
 
 _SCHEMA = (
@@ -198,6 +204,23 @@ def _clean(value: str) -> str:
 
 def _json(value) -> str:
     return _clean(json.dumps(value, ensure_ascii=False))
+
+
+# a run of letters and digits with both in it, long enough to be a token or a key
+_TOKEN = re.compile(
+    r"(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[A-Za-z])[A-Za-z0-9_+=-]{24,}")
+
+
+def _short_error(text: str) -> str:
+    """An error as the index keeps it: one line, a token or key in it hidden, at most
+    WAKE_ERROR_LIMIT characters (it is shown to the user)."""
+    line = " ".join(_clean(str(text))[:4 * WAKE_ERROR_LIMIT].split())
+    return _TOKEN.sub("[hidden]", line)[:WAKE_ERROR_LIMIT]
+
+
+def _address_key(address: str) -> str:
+    """An address as two mailboxes are compared: ASCII letters without case."""
+    return "".join(c.lower() if "A" <= c <= "Z" else c for c in address.strip())
 
 
 def _like(text: str) -> str:
@@ -545,17 +568,24 @@ class Store:
             return self._paged(
                 db, _MESSAGE_COLUMNS, "status = 'pending'", [], "id", page, limit, _message)
 
-    def judge(self, decisions: dict[int, str], now: datetime) -> int:
+    def judge(self, decisions: dict[int, str], now: datetime) -> dict:
         """Give verdicts: `{message id: "important" | "digest"}`. `important` marks the message
         pushed and records a push; `digest` leaves it for the next digest. A message that is not
-        pending any more (a retried run) is left alone. Returns how many messages were judged.
-        An unknown id or another verdict is a `MailError` and nothing is changed."""
+        pending any more is left alone: a retried run, or another run that judged it first (the
+        poll can wake triage while the digest or an earlier triage still judges the same mail).
+
+        Returns `{"judged": n, "important": [ids], "digest": [ids], "already_judged": [ids]}`,
+        the ids in the order given: `important` and `digest` are the messages this call
+        changed, so the caller pushes exactly its own `important`; `already_judged` are those
+        that were not pending (another run tells the user about them, or the user moved them).
+        A judge that changed a message also answers the wakes of triage (`wake_state`). An
+        unknown id or another verdict is a `MailError` and nothing is changed."""
         for decision in decisions.values():
             if decision not in DECISIONS:
                 raise MailError(
                     f"a decision is one of {', '.join(DECISIONS)}, not {decision!r}")
         when = _iso(now)
-        judged = 0
+        result: dict = {"judged": 0, "important": [], "digest": [], "already_judged": []}
         with self._transaction(write=True) as db:
             for mid in decisions:
                 if db.execute("SELECT 1 FROM messages WHERE id = ?", (mid,)).fetchone() is None:
@@ -574,9 +604,13 @@ class Store:
                         "WHERE id = ? AND status = 'pending'", (when, mid))
                     if cursor.rowcount:
                         self._enter_digest(db, mid)
-                judged += cursor.rowcount
+                result[decision if cursor.rowcount else "already_judged"].append(mid)
+            result["judged"] = len(result["important"]) + len(result["digest"])
+            if result["judged"]:
+                self._put_meta(db, "last_judged_at", when)
+                self._put_meta(db, "unacknowledged_wakes", None)
             self._sync_batch(db)
-        return judged
+        return result
 
     # -- the batch ---------------------------------------------------------------------------
 
@@ -604,27 +638,92 @@ class Store:
             return self._sync_batch(db, _iso(now))
 
     def mark_woken(self, now: datetime) -> None:
-        """Record that `triage` was woken for the open batch. With nothing pending there is no
-        batch, and nothing is recorded: a wake for a mailbox problem does not hold back the
-        wake for the next mail."""
+        """Record that `triage` was woken (cc-hub took the wake): the time is `last_wake_at`, and
+        the error of an earlier failed wake is gone. The open batch records it too; with nothing
+        pending there is no batch, and the batch records nothing: a wake for a mailbox problem
+        does not hold back the wake for the next mail."""
         when = _iso(now)
         with self._transaction(write=True) as db:
             if self._sync_batch(db, when) is not None:
                 db.execute("UPDATE batch SET woken_at = ?", (when,))
+            self._put_meta(db, "last_wake_at", when)
+            self._put_meta(db, "last_wake_error", None)
+            self._put_meta(db, "wake_error_since", None)
 
-    def batch_needs_wake(self, now: datetime, after_minutes: float = 10) -> bool:
+    def wake_failed(self, now: datetime, error: str) -> None:
+        """Record that waking `triage` failed with `error`: kept short, on one line, until a
+        wake works (`mark_woken`). `wake_error_since` is the first failure since the last wake
+        that worked."""
+        when = _iso(now)
+        with self._transaction(write=True) as db:
+            self._put_meta(db, "last_wake_error", _short_error(error) or "the wake failed")
+            if self._meta(db, "wake_error_since") is None:
+                self._put_meta(db, "wake_error_since", when)
+
+    def count_unacknowledged(self, now: datetime, after_minutes: float = WAKE_MINUTES) -> int:
+        """The poll's wake check: when the batch was woken at least `after_minutes` ago, is
+        still pending and nothing was judged since, that wake went unanswered (the run failed,
+        was turned away, or never started). Each wake counts once; a judge that changed a
+        message sets the count back to 0. Returns the count: the wakes in a row that `triage`
+        did not answer."""
+        moment = _utc(now)
+        with self._transaction(write=True) as db:
+            count = int(self._meta(db, "unacknowledged_wakes") or 0)
+            batch = self._sync_batch(db)
+            woken = batch["woken_at"] if batch else None
+            if woken is None or (moment - _utc(woken)).total_seconds() < after_minutes * 60:
+                return count
+            judged = self._meta(db, "last_judged_at")
+            if (judged is not None and judged >= woken) or (
+                    self._meta(db, "unacknowledged_for") == woken):
+                return count
+            count += 1
+            self._put_meta(db, "unacknowledged_wakes", str(count))
+            self._put_meta(db, "unacknowledged_for", woken)
+            return count
+
+    def batch_needs_wake(self, now: datetime, after_minutes: float = WAKE_MINUTES,
+                         backoff_minutes: float = BACKOFF_MINUTES) -> bool:
         """True when mail is pending and the batch has not been woken, or was woken at least
-        `after_minutes` ago (the run failed or is stuck). False right after `mark_woken` and
-        whenever nothing is pending."""
+        `after_minutes` ago (the run failed or is stuck). After UNACKNOWLEDGED_LIMIT wakes in a
+        row that triage did not answer (`count_unacknowledged`), at least `backoff_minutes`
+        (once an hour), until mail is judged. False right after `mark_woken` and whenever
+        nothing is pending."""
         with self._transaction() as db:
             pending = db.execute(
                 "SELECT COUNT(*) FROM messages WHERE status = 'pending'").fetchone()[0]
             row = db.execute("SELECT woken_at FROM batch").fetchone()
+            unanswered = int(self._meta(db, "unacknowledged_wakes") or 0)
         if pending == 0:
             return False
         if row is None or row["woken_at"] is None:
             return True
-        return (_utc(now) - _utc(row["woken_at"])).total_seconds() >= after_minutes * 60
+        wait = after_minutes
+        if unanswered >= UNACKNOWLEDGED_LIMIT:
+            wait = max(after_minutes, backoff_minutes)
+        return (_utc(now) - _utc(row["woken_at"])).total_seconds() >= wait * 60
+
+    def wake_state(self, now: datetime) -> dict:
+        """Whether the wakes reach `triage`: `{"last_wake_at", "wake_error", "wake_error_since",
+        "unacknowledged_wakes", "oldest_pending_at", "oldest_pending_minutes"}`. `last_wake_at`
+        is the last wake cc-hub took (None: never); `wake_error` why the last wake failed and
+        `wake_error_since` the first failure since a wake worked (both None while the wakes
+        work); `unacknowledged_wakes` the wakes in a row that triage did not answer with a
+        judge; `oldest_pending_at` when the oldest mail waiting for a verdict arrived and
+        `oldest_pending_minutes` how long ago, in whole minutes (None: no mail waits)."""
+        with self._transaction() as db:
+            oldest = db.execute(
+                "SELECT MIN(added_at) FROM messages WHERE status = 'pending'").fetchone()[0]
+            state = {
+                "last_wake_at": self._meta(db, "last_wake_at"),
+                "wake_error": self._meta(db, "last_wake_error"),
+                "wake_error_since": self._meta(db, "wake_error_since"),
+                "unacknowledged_wakes": int(self._meta(db, "unacknowledged_wakes") or 0),
+            }
+        waited = None
+        if oldest is not None:
+            waited = max(int((_utc(now) - _utc(oldest)).total_seconds() // 60), 0)
+        return {**state, "oldest_pending_at": oldest, "oldest_pending_minutes": waited}
 
     # -- polls and problems ------------------------------------------------------------------
 
@@ -670,6 +769,23 @@ class Store:
             return db.execute(
                 "UPDATE problems SET resolved_at = ? WHERE address = ? AND resolved_at IS NULL",
                 (when, address)).rowcount
+
+    def forget_problems(self, keep: list[str]) -> int:
+        """Drop the problems, open or recovered, of every address not in `keep` (ASCII case
+        does not matter), and when triage was woken for them: a mailbox that is no longer in
+        config.toml has nothing left to tell. Returns how many problems were dropped."""
+        kept = {_address_key(address) for address in keep}
+        dropped = 0
+        with self._transaction(write=True) as db:
+            for row in db.execute("SELECT DISTINCT address FROM problems").fetchall():
+                if _address_key(row["address"]) not in kept:
+                    dropped += db.execute(
+                        "DELETE FROM problems WHERE address = ?", (row["address"],)).rowcount
+            wakes = self._problem_wakes(db)
+            left = {key: when for key, when in wakes.items() if _address_key(key[0]) in kept}
+            if left != wakes:
+                self._put_problem_wakes(db, left)
+        return dropped
 
     def problems(self, unreported_only: bool) -> list[dict]:
         """Problems to tell the user about, oldest first: `{"id", "address", "kind", "message",

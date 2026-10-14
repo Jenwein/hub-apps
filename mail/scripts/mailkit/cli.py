@@ -93,7 +93,8 @@ def add_account_commands(sub) -> None:
     actions = p.add_subparsers(dest="action", metavar="<action>", required=True)
 
     a = actions.add_parser(
-        "detect", help="which supported provider an address belongs to, and its guide")
+        "detect", help="which supported provider an address belongs to, and its guide; "
+        "status unknown when nothing places it (ask the user, then add with --provider)")
     a.add_argument("address")
     a.set_defaults(func=run_account_detect)
 
@@ -124,7 +125,7 @@ def add_account_commands(sub) -> None:
 
     a = actions.add_parser(
         "remove", help="stop managing a mailbox: its section, password and index go; "
-        "downloaded attachments stay")
+        "downloaded attachments stay (it waits up to a minute for a running poll)")
     a.add_argument("name")
     a.set_defaults(func=run_account_remove)
 

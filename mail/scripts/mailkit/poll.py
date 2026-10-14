@@ -27,16 +27,22 @@ A mailbox that fails becomes a problem in the index (`login`: the login was refu
 no stored password; `connect`: the server cannot be reached or dropped the connection;
 `error`: anything unexpected) and the poll goes on with the next one; a mailbox that answers
 ends its problems (each a recovery, told once with the next message). A config.toml that cannot
-be read is one problem of address and kind `config`, and no mailbox is polled.
+be read is one problem of address and kind `config`, and no mailbox is polled. When it can be
+read, the problems of an address it no longer names are dropped: that mailbox was removed.
 
 After the mailboxes, a run of the poll task (`background`: `mk poll --wake`, the cc-hub script
 task) is recorded; `bg status` and the digest judge whether the background check still runs by
 these records alone, so a poll by hand or the digest's own `mk bg poll` never makes a stopped
-task look alive. With `wake` the on-demand `mail/triage` task is woken when the batch of pending mail needs it (never woken, or woken 10 minutes ago and still
-pending) or when an open problem needs telling (`Store.problems_need_wake`: not reported, not
-told for that mailbox and kind in the last day, and no wake for problems in the last 10
-minutes). A recovery never wakes triage. Two polls never run at once: the second finds the
-poll lock held and returns `{"skipped": "another poll is running"}` without touching anything.
+task look alive. With `wake` the on-demand `mail/triage` task is woken when the batch of
+pending mail needs it (never woken, or woken 10 minutes ago and still pending; once an hour
+after six wakes in a row that triage did not answer with a verdict, until mail is judged) or
+when an open problem needs telling (`Store.problems_need_wake`: not reported, not told for that
+mailbox and kind in the last day, and no wake for problems in the last 10 minutes). A recovery
+never wakes triage. Whether the wakes get through (the last one, the error of a failed one, the
+unanswered ones) is kept in the index for `bg status`, since what this task prints goes nowhere.
+Two polls never run at once: the second finds the poll lock held and returns
+`{"skipped": "another poll is running"}` without touching anything; `account remove` waits for
+the lock, so that no poll still holding the old config.toml writes for a removed mailbox.
 """
 
 from __future__ import annotations
@@ -60,7 +66,9 @@ FETCH_BATCH = 20  # messages per fetch: what a poll holds in memory at once
 BACKFILL_CHUNK = 200  # old messages indexed per mailbox per poll
 RECENT_DAYS = accounts.RECENT_DAYS
 WAKE_COMMAND = ("cc-hub", "cron", "wake", "mail/triage")
-WAKE_TIMEOUT = 60  # seconds
+# seconds; longer than cc-hub waits for one answer of cc-connect (60), so that when cc-connect
+# hangs, cc-hub's own error is what the poll hears
+WAKE_TIMEOUT = 90
 LOCK_FILE = "poll.lock"  # in mail/.state/
 CONFIG = "config"  # the address and the kind of a problem with config.toml
 UNREADABLE = "(unreadable message)"  # the subject of a message nothing could be read from
@@ -121,13 +129,14 @@ def _busy(error: sqlite3.OperationalError) -> bool:
     return "locked" in text or "busy" in text
 
 
-def _acquire(path: Path) -> sqlite3.Connection | None:
-    """A connection that holds the lock in `path`, or None when another one holds it. A damaged
-    lock file (it holds no data, only the lock) is replaced once."""
+def _acquire(path: Path, wait: float) -> sqlite3.Connection | None:
+    """A connection that holds the lock in `path`, or None when another one holds it for longer
+    than `wait` seconds. A damaged lock file (it holds no data, only the lock) is replaced
+    once."""
     failure: sqlite3.Error | None = None
     for attempt in (1, 2):
         try:
-            db = sqlite3.connect(path, timeout=0, isolation_level=None)
+            db = sqlite3.connect(path, timeout=wait, isolation_level=None)
         except sqlite3.Error as error:
             raise MailError(f"cannot open the poll lock {path}: {error}") from None
         try:
@@ -148,17 +157,18 @@ def _acquire(path: Path) -> sqlite3.Connection | None:
 
 
 @contextlib.contextmanager
-def poll_lock(mail_dir: Path) -> Iterator[bool]:
+def poll_lock(mail_dir: Path, *, wait: float = 0) -> Iterator[bool]:
     """Hold the poll lock for the `with` block: yields True when this process holds it, False
-    when another poll does.
+    when another poll does (and, with `wait`, still did after that many seconds).
 
     The lock is an exclusive transaction on its own small SQLite file, `mail/.state/poll.lock`,
     not on the index: holding the index would stop every other `mk` command for the length of
     a poll. The operating system frees it when its process ends, so a poll that crashed or was
-    killed leaves no stale lock behind."""
+    killed leaves no stale lock behind. A poll does not wait (another one is doing its work);
+    `account remove` waits for the poll to finish."""
     folder = Path(mail_dir) / STATE_DIR
     folder.mkdir(parents=True, exist_ok=True)
-    db = _acquire(folder / LOCK_FILE)
+    db = _acquire(folder / LOCK_FILE, wait)
     if db is None:
         yield False
         return
@@ -318,9 +328,12 @@ def _now(now: datetime | None) -> datetime:
 
 def _wake(store: Store, wake: Callable[[], str | None] | None,
           now: datetime) -> tuple[bool, str | None]:
-    """Wake triage when there is something for it: (woke, error)."""
+    """Wake triage when there is something for it: (woke, error). The outcome is kept in the
+    index for `bg status`: the time of a wake that worked, the error of one that failed, and
+    whether the last wake of the batch went unanswered."""
     if wake is None:
         return False, None
+    store.count_unacknowledged(now)
     if not (store.batch_needs_wake(now) or store.problems_need_wake(now)):
         return False, None
     try:
@@ -328,6 +341,7 @@ def _wake(store: Store, wake: Callable[[], str | None] | None,
     except Exception as err:  # noqa: BLE001 - a failed wake is reported, not raised
         error = f"{type(err).__name__}: {err}"
     if error is not None:
+        store.wake_failed(now, str(error))
         return False, str(error)
     store.mark_woken(now)
     store.mark_problems_woken(now)  # triage lists the unreported problems, whatever woke it
@@ -364,6 +378,9 @@ def poll(hub: Path, mail_dir: Path, *, connect=None,
                 store.problem(CONFIG, CONFIG, config_error, now)
             else:
                 store.resolve(CONFIG, now)
+                # a mailbox that left config.toml has no problem left to tell
+                store.forget_problems(
+                    [CONFIG, *(mb.address for mb in settings.mailboxes.values())])
                 polled: list[str] = []
                 for mb in settings.mailboxes.values():
                     # two sections for one address (a hand edit): one inbox, polled once

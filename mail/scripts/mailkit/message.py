@@ -40,6 +40,11 @@ HTML_LIMIT = 300_000  # characters of one HTML body that are converted to text
 # the Content-Type of every part it builds, in message order, so the first parts get the exact
 # parse. Spent per distinct header and per message, not per read.
 HEADER_LIMIT = 10_000
+# Any other header read through the header classes (the Subject above all) is unstructured
+# text, and the unstructured parser is slow on words: a Subject of 1 MB of short words took 6 s,
+# one of 8-bit Chinese words 35 s. No real subject comes near UNSTRUCTURED_LIMIT characters, so
+# such a header is cut there, at a space when there is one, before it is parsed.
+UNSTRUCTURED_LIMIT = 4_000
 PARSE_LIMIT = 500
 PARSE_BUDGET = 60_000  # characters; about half a second of worst-case input
 PARAM_LIMIT = 2_000
@@ -155,6 +160,16 @@ def _cut(value: str, limit: int) -> str:
     return cut.rpartition(",")[0] or cut
 
 
+def _cut_text(value: str) -> str:
+    """An unstructured header value cut to UNSTRUCTURED_LIMIT characters: at the last space or
+    tab in its second half, so that no encoded word is cut in two, else at the limit."""
+    if len(value) <= UNSTRUCTURED_LIMIT:
+        return value
+    cut = value[:UNSTRUCTURED_LIMIT]
+    space = max(cut.rfind(" "), cut.rfind("\t"))
+    return cut[:space] if space > UNSTRUCTURED_LIMIT // 2 else cut
+
+
 class _Work:
     """What the message being read has cost the header classes. A part is asked its type,
     charset, disposition and file name many times and the stdlib parses the header anew each
@@ -204,7 +219,7 @@ class _Policy(email.policy.EmailPolicy):
     raised IndexError on `Content-Type: text/html; charset`) is read as the plain text it is, the
     way the old compat32 policy read every header, instead of stopping the whole parse; and
     except that the headers with parsers that are slow on hostile values are cut and budgeted
-    (`_LIMITS`, `_Work`)."""
+    (`_LIMITS`, `_Work`), and every other header is cut at UNSTRUCTURED_LIMIT."""
 
     def header_fetch_parse(self, name, value):
         if hasattr(value, "name"):  # a header object that was set is already parsed
@@ -214,6 +229,7 @@ class _Policy(email.policy.EmailPolicy):
             return _parameter_header(name, value)
         if limit is not None:
             return _parse_header(name, _cut(value, limit))
+        value = _cut_text(value)
         try:
             return super().header_fetch_parse(name, value)
         except STDLIB_ERRORS:

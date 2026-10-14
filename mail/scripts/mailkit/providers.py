@@ -6,7 +6,11 @@ a rule in `_MX_RULES` or `_KNOWN_DOMAINS`; nothing else changes.
 
 `detect` names the provider of an address: from the domain when the domain is a well-known one,
 else from the MX records of the domain (a company's own domain on Feishu or Google Workspace).
-An address it cannot place is "not supported yet", never a guess.
+It never guesses. An address of a service that is known and not supported yet (Outlook,
+iCloud, Lark, Tencent or NetEase enterprise mail) is `unsupported`. An address it cannot place
+(MX records no rule knows, such as a company's own mail gateway in front of Feishu, or no MX
+records at all because DNS failed) is `unknown`: the agent asks the user which supported
+provider holds it, and the login check of `account add --provider` confirms the answer.
 """
 
 from __future__ import annotations
@@ -149,44 +153,58 @@ def _service(host: str) -> tuple[str | None, str] | None:
     return None
 
 
-def _result(provider: str | None, reason: str) -> dict:
-    return {"provider": provider, "supported": provider is not None, "reason": reason}
+def _result(provider: str | None, status: str, reason: str) -> dict:
+    return {"provider": provider, "supported": provider is not None, "status": status,
+            "reason": reason}
+
+
+def _unknown(why: str) -> dict:
+    """A domain the app cannot place: the agent asks the user, nothing is guessed."""
+    keys = ", ".join(PROVIDERS)
+    return _result(None, "unknown", (
+        f"{why}; ask the user which of the supported providers holds the mailbox ({keys}) and "
+        "pass it to account add as --provider: the login check confirms it. Only when it is "
+        "none of them, the mailbox cannot be added yet"))
 
 
 def detect(address: str, *, mx=lookup_mx) -> dict:
-    """Which supported provider `address` belongs to:
-    {"provider": key or None, "supported": bool, "reason": text for the agent}.
+    """Which supported provider `address` belongs to: {"provider": key or None, "supported":
+    bool, "status": "supported" | "unsupported" | "unknown", "reason": text for the agent}.
 
-    A well-known domain is placed without any lookup; any other domain by its MX records (`mx`
-    returns them for a domain; the default is `lookup_mx`). Raises MailError when `address` is
-    not an address at all."""
+    `unsupported`: the address belongs to a service that is known and not supported yet.
+    `unknown`: nothing places it (MX records no rule knows, records of two services, or no MX
+    records at all); the reason tells the agent to ask the user which supported provider holds
+    it. A well-known domain is placed without any lookup; any other domain by its MX records
+    (`mx` returns them for a domain, [] when there are none or DNS fails; the default is
+    `lookup_mx`). Raises MailError when `address` is not an address at all."""
     text = address.strip()
     domain = text.rpartition("@")[2].lower().rstrip(".")
     if not ADDRESS.match(text) or not domain:
         raise MailError(f"not an email address: {address!r}")
     if domain in _KNOWN_DOMAINS:
         provider = PROVIDERS[_KNOWN_DOMAINS[domain]]
-        return _result(provider.key, f"{domain} is a {provider.name} domain")
+        return _result(provider.key, "supported", f"{domain} is a {provider.name} domain")
     if domain in _UNSUPPORTED_DOMAINS:
-        return _result(None, f"{_UNSUPPORTED_DOMAINS[domain]} is not supported yet ({domain})")
+        return _result(None, "unsupported",
+                       f"{_UNSUPPORTED_DOMAINS[domain]} is not supported yet ({domain})")
 
     hosts = mx(domain)
     # (a domain may list a backup host of another kind, such as a mail relay: only the hosts a
     # rule knows count)
     services = list(dict.fromkeys(s for s in map(_service, hosts) if s))
-    if len(services) == 1:
+    names = " and ".join(name for _, name in services)
+    if len(services) == 1 and services[0][0]:
         key, name = services[0]
-        if key:
-            return _result(key, f"the MX records of {domain} point at {name}")
-        return _result(None, f"{name} is not supported yet ({domain})")
+        return _result(key, "supported", f"the MX records of {domain} point at {name}")
+    if services and not any(key for key, _ in services):
+        verb = "is" if len(services) == 1 else "are"
+        return _result(None, "unsupported", f"{names} {verb} not supported yet ({domain})")
     if services:
-        names = " and ".join(name for _, name in services)
-        return _result(None, f"cannot tell which service holds {domain}: its MX records name "
-                       f"{names}. Ask the user which one holds the mailbox")
+        return _unknown(f"cannot tell which service holds {domain}: its MX records name {names}")
     if hosts:
         shown = ", ".join(hosts[:3])
-        return _result(None, f"{domain} is not supported yet: its MX records ({shown}) name no "
-                       "supported provider")
-    return _result(None, f"{domain} is not supported yet: it is not a well-known mail domain "
-                   "and no MX records could be looked up for it (no network, or the domain "
-                   "takes no mail)")
+        return _unknown(f"cannot tell which service holds {domain}: its MX records ({shown}) "
+                        "name no provider this app knows, as with a company's own mail gateway")
+    return _unknown(f"cannot tell which service holds {domain}: it is not a well-known mail "
+                    "domain and no MX records could be looked up for it (no network, a DNS "
+                    "failure, or a domain that takes no mail)")

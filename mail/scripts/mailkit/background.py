@@ -22,8 +22,8 @@ there are in `problems_total`.
 - `problems`: mailbox problems not reported yet; `mark_reported` marks them.
 - `digest-items` and `digest-done`: the digest. The listing is a fixed set named by `up_to`;
   every page after the first, and `digest-done`, pass the `up_to` of the first.
-- `status`: when the poll task last ran, whether that is too long ago, and each mailbox's
-  state.
+- `status`: when the poll task last ran, whether that is too long ago, whether its wakes reach
+  triage, and each mailbox's state.
 
 Problems and recoveries are read from the index only, so `problems`, `status` and the listings
 work when config.toml is missing or broken: mailbox names are then the addresses, `rules` is
@@ -277,13 +277,16 @@ def _check_id(mid: int) -> None:
 
 
 def judge(mail_dir: Path, decisions: list[str], *, now: datetime | None = None) -> dict:
-    """Give verdicts (`ID=important` or `ID=digest`). `{"judged": n, "pending_left": m}`:
-    `judged` counts the messages that were pending; one that is not any more is left alone."""
+    """Give verdicts (`ID=important` or `ID=digest`). `{"judged": n, "important": [ids],
+    "digest": [ids], "already_judged": [ids], "pending_left": m}`: `important` and `digest` are
+    the messages this call judged, and the run that made it pushes exactly its `important`;
+    `already_judged` were not pending any more (another run judged them at the same time and
+    tells the user about them, or the user moved them) and are left alone."""
     verdicts = parse_verdicts(decisions)
     with Store.open(mail_dir) as store:
-        judged = store.judge(verdicts, _now(now))
+        result = store.judge(verdicts, _now(now))
         left = store.pending(limit=1)["total"]
-    return {"judged": judged, "pending_left": left}
+    return {**result, "pending_left": left}
 
 
 def read(mail_dir: Path, mid: int) -> dict:
@@ -459,15 +462,18 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
     """The mail waiting for the digest, one page of it grouped by mailbox:
     `{"since", "up_to", "groups": [{"mailbox", "count", "items"}], "total", "next_page",
     "pushed_count", "mailbox_totals": [{"mailbox", "total"}], "problems", "problems_total",
-    "stale", "last_poll", "rules", "config_error"}`.
+    "stale", "last_poll", "last_wake_at", "wake_error", "wake_error_since",
+    "unacknowledged_wakes", "oldest_pending_at", "oldest_pending_minutes", "rules",
+    "config_error"}`.
 
     `since` is when the last digest was sent (None: never); `pushed_count` the pushes since;
     `problems` every open problem, reported before or not, and the recoveries not reported yet.
     The set listed is fixed by `up_to`: the first page returns it, and later pages pass it back
     (and `digest_done` too). `count` is the number of items of that mailbox on this page;
     `mailbox_totals` how many the whole listing holds for each mailbox, on every page, since the
-    pages run by mailbox and one can sit wholly on a late page. `stale` and `last_poll` are as
-    in `status`: they go by the runs of the poll task only, never by this digest's own poll."""
+    pages run by mailbox and one can sit wholly on a late page. `stale`, `last_poll` and whether
+    the wakes reach triage are as in `status`: they go by the runs of the poll task only, never
+    by this digest's own poll."""
     _check_page(page)
     if up_to is not None:
         _check_number(up_to, "up_to", minimum=0)
@@ -480,6 +486,7 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
         pushed = store.push_count(since)
         raw = store.problems(unreported_only=False)
         last_poll, stale, _ = _staleness(store, now)
+        wakes = store.wake_state(now)
     groups: dict[str, list[dict]] = {}
     for message in listing["items"]:
         groups.setdefault(message["address"], []).append(
@@ -493,7 +500,7 @@ def digest_items(mail_dir: Path, *, page: int = 1, up_to: int | None = None,
         "mailbox_totals": [{"mailbox": _name(settings, address), "total": n}
                            for address, n in counts.items()],
         "problems": shown, "problems_total": total, "stale": stale, "last_poll": last_poll,
-        "rules": _rules(settings), "config_error": config_error,
+        **wakes, "rules": _rules(settings), "config_error": config_error,
     }
 
 
@@ -532,15 +539,21 @@ def _staleness(store: Store, now: datetime) -> tuple[str | None, bool, int]:
 
 
 def status(mail_dir: Path, *, now: datetime | None = None) -> dict:
-    """`{"last_poll", "stale", "threshold_minutes", "mailboxes": [{"name", "address",
-    "last_ok", "problem"}], "config_error"}`. `last_poll` and `stale` are about the poll task,
-    the background check (see `_staleness`). `problem` is the mailbox's open problem
-    (`{"kind", "message", "first_seen"}`) or None; `last_ok` when the mailbox last answered a
-    poll. Without a readable config.toml `mailboxes` is empty and `config_error` says why."""
+    """`{"last_poll", "stale", "threshold_minutes", "last_wake_at", "wake_error",
+    "wake_error_since", "unacknowledged_wakes", "oldest_pending_at", "oldest_pending_minutes",
+    "mailboxes": [{"name", "address", "last_ok", "problem"}], "config_error"}`.
+
+    `last_poll` and `stale` are about the poll task, the background check (see `_staleness`).
+    The wake fields say whether its wakes reach triage (`Store.wake_state`): a check that runs
+    while its wakes fail or go unanswered pushes nothing. `problem` is the mailbox's open
+    problem (`{"kind", "message", "first_seen"}`) or None; `last_ok` when the mailbox last
+    answered a poll. Without a readable config.toml `mailboxes` is empty and `config_error` says
+    why."""
     now = _now(now)
     settings, config_error = _settings(mail_dir)
     with Store.open(mail_dir) as store:
         last_poll, stale, threshold = _staleness(store, now)
+        wakes = store.wake_state(now)
         open_ones: dict[str, dict] = {}
         for p in store.problems(unreported_only=False):
             if p["state"] == "open":
@@ -557,5 +570,5 @@ def status(mail_dir: Path, *, now: datetime | None = None) -> dict:
                 "problem": None if p is None else {
                     "kind": p["kind"], "message": p["message"], "first_seen": p["first_seen"]},
             })
-    return {"last_poll": last_poll, "stale": stale, "threshold_minutes": threshold,
+    return {"last_poll": last_poll, "stale": stale, "threshold_minutes": threshold, **wakes,
             "mailboxes": boxes, "config_error": config_error}

@@ -599,6 +599,41 @@ def test_one_8bit_byte_does_not_bypass_the_header_cap(name, value):
     assert p.subject == "s" and took < BOUND, took
 
 
+HUGE_SUBJECTS = {
+    "unfolded-1MB": b"Subject: " + b"word " * 200_000,
+    "folded-600KB": b"Subject: " + b"\r\n ".join([b"ab cd ef gh " * 6] * 8_500),
+    "8bit-1MB": b"Subject: " + "主题 ".encode("gbk") * 200_000,
+    "encoded-words-600KB": b"Subject: " + b" ".join([encoded_word("主题内容", "utf-8")] * 20_000),
+}
+
+
+@pytest.mark.parametrize("subject", HUGE_SUBJECTS.values(), ids=list(HUGE_SUBJECTS))
+def test_a_huge_subject_is_cut_before_it_is_parsed(subject):
+    # (the unstructured header parser is slow on words: 6 s for the 1 MB one, 35 s for the 8-bit
+    # one on Python 3.12.10)
+    p, took = timed(message(b"From: a@x", subject, b"To: me@x", body=b"body"))
+    assert took < 2.0, took
+    assert p.text == "body" and p.to == ["me@x"]
+    assert 0 < len(p.subject) <= mm.UNSTRUCTURED_LIMIT
+
+
+def test_a_long_real_subject_is_kept_whole():
+    words = " ".join(f"word{i}" for i in range(300))  # about 2 300 characters
+    p = parse(message(b"Subject: " + "\r\n ".join(words.split(" ")).encode(), body=b"x"))
+    assert p.subject == words and len(words) < mm.UNSTRUCTURED_LIMIT
+
+
+def test_other_unstructured_headers_are_cut_too():
+    # (a header nothing in the app reads costs nothing; one read through the header classes is
+    # cut like the subject)
+    raw = message(b"X-Long: " + b"word " * 200_000, body=b"x")
+    start = time.perf_counter()
+    msg = mm._load(raw)
+    value = str(msg["x-long"])
+    assert time.perf_counter() - start < 2.0
+    assert len(value) <= mm.UNSTRUCTURED_LIMIT
+
+
 def hostile_parts(count: int, header: bytes = b"Content-Type", extra: bytes = b"") -> bytes:
     """A multipart/mixed of `count` text parts; each has a different 9 900-quote `header`."""
     return multipart("mixed", *[

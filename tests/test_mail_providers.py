@@ -29,9 +29,10 @@ def test_known_domains_ignore_case_spaces_tags_and_a_trailing_dot():
     assert detect("x@163.com.", mx=no_lookup)["provider"] == "163"
 
 
-def test_supported_result_has_exactly_three_keys():
+def test_supported_result_has_exactly_four_keys():
     r = detect("a@qq.com", mx=no_lookup)
-    assert set(r) == {"provider", "supported", "reason"} and r["supported"] is True
+    assert set(r) == {"provider", "supported", "status", "reason"}
+    assert (r["supported"], r["status"]) == (True, "supported")
     assert "qq.com" in r["reason"]
 
 
@@ -48,10 +49,12 @@ def test_the_domain_is_what_the_lookup_gets():
 
 def test_unsupported():
     r = detect("me@outlook.com", mx=lambda d: [])
-    assert r == {"provider": None, "supported": False, "reason": r["reason"]}
+    assert r == {"provider": None, "supported": False, "status": "unsupported",
+                 "reason": r["reason"]}
     assert "not supported" in r["reason"]
     # Tencent enterprise mail
-    assert detect("me@corp.example", mx=lambda d: ["mxbiz1.qq.com."])["supported"] is False
+    r = detect("me@corp.example", mx=lambda d: ["mxbiz1.qq.com."])
+    assert (r["supported"], r["status"]) == (False, "unsupported")
 
 
 @pytest.mark.parametrize("hosts, service", [
@@ -63,7 +66,7 @@ def test_unsupported():
 ])
 def test_services_that_are_named_but_not_supported_yet(hosts, service):
     r = detect("me@corp.example", mx=lambda d: hosts)
-    assert r["provider"] is None and r["supported"] is False
+    assert (r["provider"], r["supported"], r["status"]) == (None, False, "unsupported")
     assert service in r["reason"] and "not supported yet" in r["reason"]
 
 
@@ -71,18 +74,31 @@ def test_services_that_are_named_but_not_supported_yet(hosts, service):
     "address", ["me@outlook.com", "me@hotmail.com", "me@live.com", "me@icloud.com"])
 def test_big_unsupported_domains_need_no_lookup(address):
     r = detect(address, mx=no_lookup)
-    assert r["provider"] is None and r["supported"] is False and "not supported yet" in r["reason"]
+    assert (r["provider"], r["supported"], r["status"]) == (None, False, "unsupported")
+    assert "not supported yet" in r["reason"]
 
 
-def test_unknown_domain_without_mx_says_why():
+def ask_the_user(r):
+    """An `unknown` result: no guess, and the reason tells the agent to ask the user which of
+    the supported providers holds the mailbox and to pass it as --provider."""
+    assert (r["provider"], r["supported"], r["status"]) == (None, False, "unknown")
+    assert "not supported" not in r["reason"]
+    assert "ask the user" in r["reason"] and "--provider" in r["reason"]
+    assert all(key in r["reason"] for key in PROVIDERS)
+
+
+def test_a_domain_without_mx_records_is_unknown_not_unsupported():
+    # no network, a resolver that failed, or a domain whose mail a gateway takes
     r = detect("me@corp.example", mx=lambda d: [])
-    assert r["provider"] is None and r["supported"] is False
-    assert "not supported" in r["reason"] and "corp.example" in r["reason"] and "MX" in r["reason"]
+    ask_the_user(r)
+    assert "corp.example" in r["reason"] and "MX" in r["reason"]
 
 
-def test_unknown_mx_hosts_are_shown_to_the_agent():
-    r = detect("me@corp.example", mx=lambda d: ["mail.corp.example."])
-    assert r["supported"] is False and "mail.corp.example" in r["reason"]
+def test_mx_hosts_no_rule_knows_are_unknown_and_shown_to_the_agent():
+    # a company's own mail gateway in front of Feishu or Google Workspace
+    r = detect("me@corp.example", mx=lambda d: ["mail.corp.example.", "mx2.corp.example."])
+    ask_the_user(r)
+    assert "mail.corp.example" in r["reason"]
 
 
 @pytest.mark.parametrize("host", [
@@ -98,7 +114,7 @@ def test_mx_host_matches_on_the_suffix(host):
 ])
 def test_mx_host_must_match_at_a_label_boundary(host):
     r = detect("me@corp.example", mx=lambda d: [host])
-    assert r["provider"] is None and r["supported"] is False
+    assert (r["provider"], r["supported"], r["status"]) == (None, False, "unknown")
 
 
 @pytest.mark.parametrize("hosts", [
@@ -118,10 +134,15 @@ def test_a_backup_mx_of_another_service_does_not_hide_the_provider():
 
 def test_mx_hosts_of_two_services_are_not_guessed_at():
     r = detect("me@corp.example", mx=lambda d: ["mx1.feishu.cn.", "aspmx.l.google.com."])
-    assert r["provider"] is None and r["supported"] is False
+    ask_the_user(r)
     assert "Feishu" in r["reason"] and "Google" in r["reason"]
     r = detect("me@corp.example", mx=lambda d: ["mx1.feishu.cn.", "mxbiz1.qq.com."])
-    assert r["provider"] is None and r["supported"] is False
+    ask_the_user(r)  # it may be the Feishu mailbox
+    assert "Tencent enterprise mail" in r["reason"]
+    # two services, neither supported: nothing to ask
+    r = detect("me@corp.example", mx=lambda d: ["mxbiz1.qq.com.", "x.mail.protection.outlook.com."])
+    assert (r["status"], r["supported"]) == ("unsupported", False)
+    assert "not supported yet" in r["reason"]
 
 
 @pytest.mark.parametrize(

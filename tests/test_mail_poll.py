@@ -176,6 +176,55 @@ def test_a_wake_that_raises_is_a_wake_error(hub_dir):
     assert r["woke"] is False and "boom" in r["wake_error"]
 
 
+def wake_state(hub, minutes):
+    with Store.open(hub / "mail") as store:
+        return store.wake_state(t(minutes))
+
+
+def test_a_failed_wake_is_remembered_until_a_wake_works(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example"))
+    waker = Waker(error="hub:mail/triage is not registered in cc-connect")
+    run(hub_dir, fake, wake=waker)
+    run(hub_dir, fake, minutes=5, wake=waker)
+    state = wake_state(hub_dir, 6)
+    assert state["wake_error"] == "hub:mail/triage is not registered in cc-connect"
+    assert (state["wake_error_since"], state["last_wake_at"]) == (
+        "2026-10-14T04:00:00+00:00", None)
+    waker.error = None
+    assert run(hub_dir, fake, minutes=10, wake=waker)["woke"] is True
+    state = wake_state(hub_dir, 11)
+    assert (state["wake_error"], state["wake_error_since"], state["last_wake_at"]) == (
+        None, None, "2026-10-14T04:10:00+00:00")
+
+
+def test_triage_that_never_answers_is_woken_once_an_hour_after_six_wakes(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example", "first"))
+    fake.deliver(mail_from("boss@corp.example", "second"))
+    waker = Waker()
+    woke = [m for m in range(0, 180, 5) if run(hub_dir, fake, minutes=m, wake=waker)["woke"]]
+    assert woke == [0, 10, 20, 30, 40, 50, 110, 170]
+    assert wake_state(hub_dir, 175)["unacknowledged_wakes"] == 7
+    # a run judges one of the two: the wakes were answered, ten minutes apart again
+    with Store.open(hub_dir / "mail") as store:
+        store.judge({store.pending()["items"][0]["id"]: "digest"}, t(176))
+    assert wake_state(hub_dir, 176)["unacknowledged_wakes"] == 0
+    assert run(hub_dir, fake, minutes=180, wake=waker)["woke"] is True
+
+
+def test_the_wakes_are_counted_by_the_poll_task_only(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example"))
+    run(hub_dir, fake, wake=Waker())
+    for minutes in (10, 20, 30):  # the digest's own polls: no wake, no count
+        run(hub_dir, fake, minutes=minutes, background=False)
+    assert wake_state(hub_dir, 31)["unacknowledged_wakes"] == 0
+
+
 def test_without_wake_nothing_is_woken_and_the_poll_is_recorded(hub_dir):
     fake = FakeServer()
     add(hub_dir, fake)
@@ -702,6 +751,40 @@ def test_a_broken_config_is_one_problem_and_wakes_once(hub_dir):
     assert waker.calls == 1  # the recovery waits for the next message
 
 
+def test_the_problems_of_a_mailbox_no_longer_in_the_config_are_forgotten(hub_dir):
+    """A mailbox that left config.toml (by hand, or `account remove` while an older poll still
+    held its section) has nothing left to report: no problem of it stays open for ever."""
+    work, qq = FakeServer(), FakeServer()
+    add(hub_dir, work)
+    add(hub_dir, qq, "QQ", QQ, "qq")
+    servers = {"工作": work, "QQ": qq}
+    qq.fail_login = "imap-login"
+    work.fail_login = "imap-login"
+    run(hub_dir, servers)
+    work.fail_login = None
+    run(hub_dir, servers, minutes=5)  # 工作 recovered, QQ still open
+    assert sorted((p["address"], p["state"]) for p in problems(hub_dir)) == [
+        (WORK, "recovered"), (QQ, "open")]
+    mail = hub_dir / "mail"
+    write_text(mail, accounts.config.remove_mailbox_text(read_text(mail), "QQ"))
+    with Store.open(mail) as store:
+        store.problem("Me@QQ.com", "connect", "timed out", t(6))  # the same mailbox
+    run(hub_dir, servers, minutes=10)
+    assert [(p["address"], p["state"]) for p in problems(hub_dir)] == [(WORK, "recovered")]
+    with Store.open(mail) as store:
+        assert store.problems_need_wake(t(60)) is False
+
+
+def test_a_broken_config_forgets_no_problem(hub_dir):
+    qq = FakeServer()
+    add(hub_dir, qq, "QQ", QQ, "qq")
+    qq.fail_login = "imap-login"
+    run(hub_dir, qq)
+    (hub_dir / "mail" / "config.toml").write_text("[broken", encoding="utf-8")
+    run(hub_dir, qq, minutes=5)
+    assert sorted(p["address"] for p in problems(hub_dir)) == ["config", QQ]
+
+
 def test_two_sections_with_one_address_are_polled_once(hub_dir):
     fake = FakeServer()
     add(hub_dir, fake)
@@ -882,9 +965,10 @@ def test_wake_triage_timeout(monkeypatch):
         raise subprocess.TimeoutExpired(args, options["timeout"])
 
     monkeypatch.setattr(poll.subprocess, "run", slow)
-    assert "60" in poll.wake_triage()
+    assert "90" in poll.wake_triage()
     assert seen["args"] == ["/usr/bin/cc-hub", "cron", "wake", "mail/triage"]
-    assert seen["timeout"] == 60
+    # longer than cc-hub's own wait for cc-connect, so that cc-hub's answer is the one heard
+    assert seen["timeout"] == poll.WAKE_TIMEOUT == 90
 
 
 # -- the command line ------------------------------------------------------------------------

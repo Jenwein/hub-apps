@@ -281,7 +281,8 @@ def test_pending_lists_only_pending_oldest_first_with_paging(store):
 
 def test_judge_sets_statuses_and_records_pushes(store):
     a, b, c = put(store, 1), put(store, 2), put(store, 3)
-    assert store.judge({a: "important", b: "digest"}, t(1)) == 2
+    assert store.judge({a: "important", b: "digest"}, t(1)) == {
+        "judged": 2, "important": [a], "digest": [b], "already_judged": []}
     assert store.message(a)["status"] == "important"
     assert store.message(a)["judged_at"] == iso(t(1)) and store.message(a)["pushed_at"] == iso(t(1))
     assert store.message(b)["status"] == "digest"
@@ -306,12 +307,26 @@ def test_judge_is_all_or_nothing_for_bad_input(store):
 def test_judge_leaves_messages_that_are_not_pending_alone(store):
     a = put(store, 1)
     old = put(store, 2, status="old")
-    assert store.judge({a: "important"}, t(1)) == 1
+    assert store.judge({a: "important"}, t(1))["judged"] == 1
     # a retry of the same run, and a verdict on an old message: no second push, no change
-    assert store.judge({a: "important", old: "important"}, t(2)) == 0
+    assert store.judge({a: "important", old: "important"}, t(2)) == {
+        "judged": 0, "important": [], "digest": [], "already_judged": [a, old]}
     assert store.message(old)["status"] == "old"
     assert len(store.pushes(limit=10)) == 1 and store.message(a)["pushed_at"] == iso(t(1))
-    assert store.judge({}, t(3)) == 0
+    assert store.judge({}, t(3)) == {
+        "judged": 0, "important": [], "digest": [], "already_judged": []}
+
+
+def test_two_runs_judging_at_once_each_get_only_their_own_verdicts(store):
+    """Triage and the digest (or two triage runs) can read the same pending mail: each run
+    pushes only the ids its own judge changed, so no mail is pushed twice."""
+    a, b, c = put(store, 1), put(store, 2), put(store, 3)
+    first = store.judge({a: "important", b: "digest"}, t(1))
+    second = store.judge({a: "important", b: "important", c: "important"}, t(2))
+    assert first == {"judged": 2, "important": [a], "digest": [b], "already_judged": []}
+    assert second == {"judged": 1, "important": [c], "digest": [], "already_judged": [a, b]}
+    assert sorted(p["id"] for p in store.pushes(limit=10)) == [a, c]
+    assert store.message(b)["status"] == "digest"
 
 
 # -- the batch -------------------------------------------------------------------------------
@@ -383,6 +398,98 @@ def test_open_batch(store):
     assert store.open_batch(t(4)) == {"opened_at": iso(NOW), "woken_at": iso(t(3)), "pending": 2}
     store.judge({m["id"]: "digest" for m in store.pending(10, 1)["items"]}, t(5))
     assert store.open_batch(t(6)) is None
+
+
+# -- whether the wakes reach triage ----------------------------------------------------------
+
+NO_WAKES = {"last_wake_at": None, "wake_error": None, "wake_error_since": None,
+            "unacknowledged_wakes": 0, "oldest_pending_at": None, "oldest_pending_minutes": None}
+
+
+def test_wake_state_before_any_wake(store):
+    assert store.wake_state(NOW) == NO_WAKES
+
+
+def test_a_failed_wake_is_kept_short_on_one_line_until_a_wake_works(store):
+    token = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4"
+    store.wake_failed(NOW, f"cc-connect: error\n\tsession token {token} rejected\n" + "x" * 900)
+    state = store.wake_state(t(1))
+    error = state["wake_error"]
+    assert error.startswith("cc-connect: error session token ") and "rejected" in error
+    assert "\n" not in error and "\t" not in error and len(error) <= 300
+    assert token not in error
+    assert (state["wake_error_since"], state["last_wake_at"]) == (iso(NOW), None)
+    store.wake_failed(t(5), "cc-hub not found")
+    state = store.wake_state(t(6))
+    # the error is the latest one; since when the wakes fail stays the first failure
+    assert (state["wake_error"], state["wake_error_since"]) == ("cc-hub not found", iso(NOW))
+    store.mark_woken(t(10))  # (nothing pending: the wake still worked)
+    state = store.wake_state(t(11))
+    assert (state["wake_error"], state["wake_error_since"], state["last_wake_at"]) == (
+        None, None, iso(t(10)))
+
+
+def test_oldest_pending_mail(store):
+    a = put(store, 1, now=NOW)
+    put(store, 2, now=t(30))
+    put(store, 3, now=t(-60), status="digest")  # waits for the digest, not for a verdict
+    state = store.wake_state(t(90.5))
+    assert (state["oldest_pending_at"], state["oldest_pending_minutes"]) == (iso(NOW), 90)
+    store.judge({a: "digest"}, t(91))
+    state = store.wake_state(t(91))
+    assert (state["oldest_pending_at"], state["oldest_pending_minutes"]) == (iso(t(30)), 61)
+
+
+def wake_and_check(store, minutes):
+    """The poll's wake check at `minutes`, then a wake when the batch needs one."""
+    store.count_unacknowledged(t(minutes))
+    if store.batch_needs_wake(t(minutes)):
+        store.mark_woken(t(minutes))
+        return True
+    return False
+
+
+def test_wakes_triage_never_answers_are_counted_then_slowed_down(store):
+    put(store, 1)
+    put(store, 2)
+    woken = [m for m in range(0, 200, 5) if wake_and_check(store, m)]
+    # six wakes ten minutes apart; then the sixth ran out unanswered too: once an hour
+    assert woken == [0, 10, 20, 30, 40, 50, 110, 170]
+    assert store.wake_state(t(200))["unacknowledged_wakes"] == 8  # every one of them
+
+
+def test_a_wake_is_counted_once_and_only_after_triage_had_its_time(store):
+    put(store, 1)
+    store.mark_woken(NOW)
+    assert store.count_unacknowledged(t(5)) == 0  # triage may still be at work
+    assert store.count_unacknowledged(t(10)) == 1
+    assert store.count_unacknowledged(t(15)) == 1  # the same wake
+    store.wake_failed(t(15), "cc-connect is not running")  # a re-wake that failed
+    assert store.count_unacknowledged(t(20)) == 1
+    store.mark_woken(t(20))
+    assert store.count_unacknowledged(t(30)) == 2
+
+
+def test_a_judge_answers_the_wakes_and_ends_the_slow_down(store):
+    a = put(store, 1)
+    put(store, 2)
+    for m in range(0, 65, 5):
+        wake_and_check(store, m)
+    assert store.wake_state(t(65))["unacknowledged_wakes"] == 6
+    assert not store.batch_needs_wake(t(65))
+    store.judge({a: "digest"}, t(66))  # a run worked (one mail is still pending)
+    assert store.wake_state(t(66))["unacknowledged_wakes"] == 0
+    assert store.count_unacknowledged(t(70)) == 0  # the last wake was answered
+    assert store.batch_needs_wake(t(70))  # ten minutes again
+
+
+def test_nothing_is_counted_without_a_batch(store):
+    store.mark_woken(NOW)  # woken for a mailbox problem only
+    assert store.count_unacknowledged(t(30)) == 0
+    a = put(store, 1)
+    store.mark_woken(t(30))
+    store.judge({a: "digest"}, t(31))  # the batch is done
+    assert store.count_unacknowledged(t(60)) == 0
 
 
 # -- polls -----------------------------------------------------------------------------------
@@ -908,7 +1015,8 @@ def test_a_moved_pending_message_is_no_longer_waiting_for_a_verdict(store):
     assert [m["id"] for m in store.pending(10, 1)["items"]] == [other]
     assert store.open_batch(t(2))["pending"] == 1
     # a triage that read the batch before the move cannot push the deleted mail
-    assert store.judge({moved: "important", other: "digest"}, t(3)) == 1
+    assert store.judge({moved: "important", other: "digest"}, t(3)) == {
+        "judged": 1, "important": [], "digest": [other], "already_judged": [moved]}
     assert store.message(moved)["status"] == "old" and store.pushes() == []
     assert store.push_count() == 0
 

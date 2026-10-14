@@ -36,6 +36,7 @@ GUIDES = "skills/mail/providers"  # where the provider guides are, in the app
 RECENT_DAYS = 90  # mail of the last 90 days is backfilled (as old mail) after a mailbox is added
 NAME_LIMIT = 200  # characters of a file name made from an address
 PER_PAGE = 10
+REMOVE_WAIT_SECONDS = 60  # how long `remove` waits for a running poll to finish
 
 _UNSAFE = re.compile(r"[^a-z0-9._+\-@]")
 _DEVICES = frozenset(
@@ -211,8 +212,9 @@ def _now(now: datetime | None) -> datetime:
 
 def detect(address: str, *, mx=None) -> dict:
     """Which supported provider `address` belongs to, with the guide to show the user:
-    `{"address", "provider", "supported", "reason"}`, plus `"name"` and `"guide"` when it is
-    supported."""
+    `{"address", "provider", "supported", "status", "reason"}`, plus `"name"` and `"guide"` when
+    it is supported. `status` is `supported`, `unsupported` (a known service not supported yet)
+    or `unknown` (nothing places it: ask the user, see `providers.detect`)."""
     result = providers.detect(address, mx=mx or providers.lookup_mx)
     out = {"address": address.strip(), **result}
     if result["supported"]:
@@ -384,8 +386,26 @@ def edit(hub: Path, mail_dir: Path, name: str, *, new_name: str | None = None,
 def remove(hub: Path, mail_dir: Path, name: str) -> dict:
     """Stop managing mailbox `name`: its config section (and so its own rules) goes, its stored
     password is deleted, and the index forgets it. Downloaded attachments stay.
-    `{"ok": true, "mailbox", "address", "password_deleted": bool}`."""
+    `{"ok": true, "mailbox", "address", "password_deleted": bool}`.
+
+    It holds the poll lock while it works, waiting up to REMOVE_WAIT_SECONDS for a running poll
+    to finish: a poll that read config.toml before the removal would otherwise store the
+    mailbox's mail and problems again after the index forgot them. A poll still running then
+    is a MailError, and nothing is removed."""
+    from . import poll  # (here, not at the top: the poll imports this module)
+
     hub, mail_dir = Path(hub), Path(mail_dir)
+    _mailbox(mail_dir, name)  # an unknown name is said at once, without waiting
+    wait = REMOVE_WAIT_SECONDS
+    with poll.poll_lock(mail_dir, wait=wait) as held:
+        if not held:
+            raise MailError(
+                f"a check for new mail is running and did not finish within {wait:g} seconds; "
+                "nothing was removed: try again in a minute")
+        return _remove(hub, mail_dir, name)
+
+
+def _remove(hub: Path, mail_dir: Path, name: str) -> dict:
     settings, mb = _mailbox(mail_dir, name)
     new_text = config.remove_mailbox_text(config.read_text(mail_dir), name)
     # a second section for the same address (a hand edit) still needs the password and index

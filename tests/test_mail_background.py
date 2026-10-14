@@ -24,6 +24,9 @@ WORK = "me@corp.example"
 QQ = "me@qq.com"
 OLD = NOW - timedelta(days=200)  # before the 90 days that are backfilled
 PASSWORD = "s3cretpass"
+# whether the wakes reach triage, in `bg status` and `bg digest-items`
+WAKE_KEYS = ("last_wake_at", "wake_error", "wake_error_since", "unacknowledged_wakes",
+             "oldest_pending_at", "oldest_pending_minutes")
 
 
 def t(minutes: float = 0) -> datetime:
@@ -200,15 +203,35 @@ def test_judge_records_verdicts_and_counts(hub_dir):
     run(hub_dir, fake)
     a, b, c = pending_ids(hub_dir)
 
-    assert judged(hub_dir, {a: "important", b: "digest"}) == {"judged": 2, "pending_left": 1}
+    assert judged(hub_dir, {a: "important", b: "digest"}) == {
+        "judged": 2, "important": [a], "digest": [b], "already_judged": [], "pending_left": 1}
     with Store.open(mail(hub_dir)) as store:
         assert store.message(a)["status"] == "important"
         assert store.message(b)["status"] == "digest"
         assert store.message(c)["status"] == "pending"
         assert [p["id"] for p in store.pushes()] == [a]
-    # a retried run: judged mail is left alone
-    assert judged(hub_dir, {a: "digest"}) == {"judged": 0, "pending_left": 1}
-    assert judged(hub_dir, {c: "digest"}) == {"judged": 1, "pending_left": 0}
+    # a retried run, or another run that judged it first: judged mail is left alone
+    assert judged(hub_dir, {a: "digest"}) == {
+        "judged": 0, "important": [], "digest": [], "already_judged": [a], "pending_left": 1}
+    assert judged(hub_dir, {c: "digest"}) == {
+        "judged": 1, "important": [], "digest": [c], "already_judged": [], "pending_left": 0}
+
+
+def test_judge_of_a_run_that_overlaps_another_names_only_its_own_pushes(hub_dir):
+    """The digest judges while a triage woken by the same poll does: each pushes only the ids
+    in its own `important`."""
+    fake = FakeServer()
+    add(hub_dir, fake)
+    for i in range(3):
+        fake.deliver(mail_from("boss@corp.example", f"m{i}"))
+    run(hub_dir, fake)
+    a, b, c = pending_ids(hub_dir)
+    triage = judged(hub_dir, {a: "important", b: "important"}, minutes=1)
+    digest = judged(hub_dir, {a: "important", b: "digest", c: "important"}, minutes=2)
+    assert (triage["important"], triage["already_judged"]) == ([a, b], [])
+    assert (digest["important"], digest["digest"], digest["already_judged"]) == ([c], [], [a, b])
+    with Store.open(mail(hub_dir)) as store:
+        assert sorted(p["id"] for p in store.pushes()) == [a, b, c]  # one push each
 
 
 def test_judge_refuses_unknown_ids_and_decisions_and_changes_nothing(hub_dir):
@@ -248,9 +271,9 @@ def test_judge_takes_one_id_given_twice_with_the_same_decision(hub_dir):
     fake.deliver(mail_from("boss@corp.example"))
     run(hub_dir, fake)
     (a,) = pending_ids(hub_dir)
-    assert judged(hub_dir, {a: "digest"}) == {"judged": 1, "pending_left": 0}
-    assert background.judge(mail(hub_dir), [f"{a}=digest", f"{a}=digest"], now=t(2))[
-        "judged"] == 0
+    assert judged(hub_dir, {a: "digest"})["judged"] == 1
+    again = background.judge(mail(hub_dir), [f"{a}=digest", f"{a}=digest"], now=t(2))
+    assert (again["judged"], again["already_judged"]) == (0, [a])
 
 
 # -- read ------------------------------------------------------------------------------------
@@ -753,7 +776,7 @@ def test_digest_items_groups_by_mailbox(hub_dir):
     out = background.digest_items(mail(hub_dir), now=t(3))
     assert set(out) == {"since", "up_to", "groups", "total", "next_page", "pushed_count",
                         "mailbox_totals", "problems", "problems_total", "stale", "last_poll",
-                        "rules", "config_error"}
+                        "rules", "config_error", *WAKE_KEYS}
     assert out["since"] is None and out["pushed_count"] == 1
     assert (out["total"], out["next_page"], out["problems"], out["config_error"]) == (
         4, None, [], None)
@@ -994,7 +1017,8 @@ def test_status_mailboxes(hub_dir):
     qq.fail_login = "imap-login"
     run(hub_dir, servers, minutes=5)
     out = background.status(mail(hub_dir), now=t(6))
-    assert set(out) == {"last_poll", "stale", "threshold_minutes", "mailboxes", "config_error"}
+    assert set(out) == {"last_poll", "stale", "threshold_minutes", "mailboxes", "config_error",
+                        *WAKE_KEYS}
     assert out["config_error"] is None and out["stale"] is False
     ok, bad = out["mailboxes"]
     assert (ok["name"], ok["address"], ok["last_ok"], ok["problem"]) == (
@@ -1007,6 +1031,37 @@ def test_status_mailboxes(hub_dir):
     qq.fail_login = None
     run(hub_dir, servers, minutes=10)
     assert background.status(mail(hub_dir), now=t(11))["mailboxes"][1]["problem"] is None
+
+
+def test_status_and_the_digest_say_whether_the_wakes_reach_triage(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example", "waits"))
+    for minutes in range(0, 70, 5):  # the check runs, every wake fails
+        run(hub_dir, fake, minutes=minutes, wake=lambda: "cc-connect: connection refused")
+    expected = {
+        "last_wake_at": None, "wake_error": "cc-connect: connection refused",
+        "wake_error_since": "2026-10-14T04:00:00+00:00", "unacknowledged_wakes": 0,
+        "oldest_pending_at": "2026-10-14T04:00:00+00:00", "oldest_pending_minutes": 66}
+    out = background.status(mail(hub_dir), now=t(66))
+    assert out["stale"] is False and {k: out[k] for k in WAKE_KEYS} == expected
+    digest = background.digest_items(mail(hub_dir), now=t(66))
+    assert {k: digest[k] for k in WAKE_KEYS} == expected
+
+
+def test_status_counts_the_wakes_triage_did_not_answer(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example", "waits"))
+    for minutes in range(0, 35, 5):
+        run(hub_dir, fake, minutes=minutes, wake=lambda: None)
+    out = background.status(mail(hub_dir), now=t(31))
+    assert (out["wake_error"], out["last_wake_at"], out["unacknowledged_wakes"]) == (
+        None, "2026-10-14T04:30:00+00:00", 3)
+    (mid,) = pending_ids(hub_dir)
+    judged(hub_dir, {mid: "important"}, minutes=32)
+    out = background.status(mail(hub_dir), now=t(33))
+    assert (out["unacknowledged_wakes"], out["oldest_pending_minutes"]) == (0, None)
 
 
 def test_status_with_a_broken_config(hub_dir):
@@ -1059,7 +1114,8 @@ def test_cli_bg_commands_print_json(hub_dir, mk):
     assert (status, out["subject"], out["text"].strip()) == (0, "needs you", "please reply")
 
     status, out, _ = mk("bg", "judge", f"{first}=important", f"{second}=digest")
-    assert (status, out) == (0, {"judged": 2, "pending_left": 0})
+    assert (status, out) == (0, {"judged": 2, "important": [first], "digest": [second],
+                                 "already_judged": [], "pending_left": 0})
     status, out, _ = mk("bg", "recent-pushed")
     assert (status, subjects(out)) == (0, ["needs you"])
     status, out, _ = mk("bg", "recent-pushed", "--limit", "1")

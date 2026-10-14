@@ -1,4 +1,8 @@
+import fnmatch
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -30,6 +34,44 @@ def test_requires_uv_the_way_ledger_does():
 def test_seed_gitignore_keeps_state_and_downloads_out_of_git():
     lines = (APP / "seed/mail/.gitignore").read_text("utf-8").splitlines()
     assert {".state/", "attachments/"} <= {line.strip() for line in lines}
+
+
+def test_seed_gitignore_keeps_crash_leftovers_of_atomic_writes_out_of_git(tmp_path, monkeypatch):
+    """config.toml is replaced through a temporary file next to it; a crash between the two
+    leaves that file in mail/, and `git add -- mail` must not commit it. The seed is copied
+    once, at install, so the pattern has to be in it from the first version."""
+    from mailkit import config
+
+    temps = []
+    replace = os.replace
+
+    def spy(source, target):
+        temps.append(Path(source).name)
+        replace(source, target)
+
+    monkeypatch.setattr(config.os, "replace", spy)
+    config.atomic_write(tmp_path / "config.toml", b"x = 1\n")
+    (temp,) = temps
+    seed = APP / "seed/mail/.gitignore"
+    patterns = [line.strip() for line in seed.read_text("utf-8").splitlines()
+                if line.strip() and not line.startswith("#")]
+    assert any(fnmatch.fnmatchcase(temp, p) for p in patterns), (temp, patterns)
+    git = shutil.which("git")
+    if git is None:
+        return
+    repo = tmp_path / "hub" / "mail"
+    repo.mkdir(parents=True)
+    subprocess.run([git, "init", "-q", str(repo.parent)], check=True)
+    shutil.copyfile(seed, repo / ".gitignore")
+
+    def ignored(path: str) -> bool:
+        done = subprocess.run([git, "check-ignore", "-q", "--no-index", f"mail/{path}"],
+                              cwd=repo.parent, check=False)
+        assert done.returncode in (0, 1), done
+        return done.returncode == 0
+
+    assert ignored(temp) and ignored(".state/mail.db") and ignored("attachments/a.pdf")
+    assert not ignored("config.toml") and not ignored(".gitignore")
 
 
 def test_mk_script_declares_what_it_needs():

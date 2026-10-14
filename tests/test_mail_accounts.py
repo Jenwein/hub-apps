@@ -3,13 +3,15 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import ANY
 
 import pytest
 from mailfakes import FakeServer, fake_connect, make_raw
-from mailkit import accounts, cli, server
+from mailkit import accounts, cli, poll, server
 from mailkit.accounts import read_password, secret_path
 from mailkit.config import MailError, load, read_text, write_text
 from mailkit.server import LoginError
@@ -171,9 +173,14 @@ def test_add_detects_the_provider(hub_dir):
                      connect=fake_connect(FakeServer()), now=NOW,
                      mx=lambda domain: ["mx1.feishu.cn."])
     assert r["provider"] == "feishu"
-    with pytest.raises(MailError, match="not supported"):
+    # a domain the app cannot place: no guess, the error says to ask and pass --provider
+    with pytest.raises(MailError, match="ask the user.*--provider"):
         accounts.add(hub_dir, hub_dir / "mail", "x", "me@nowhere.example", "pw",
                      connect=fake_connect(FakeServer()), now=NOW, mx=lambda domain: [])
+    r = accounts.add(hub_dir, hub_dir / "mail", "x", "me@nowhere.example", "pw",
+                     provider="feishu", connect=fake_connect(FakeServer()), now=NOW,
+                     mx=lambda domain: pytest.fail("the user named the provider"))
+    assert (r["ok"], r["provider"]) == (True, "feishu")
 
 
 def test_add_unknown_provider_key(hub_dir):
@@ -453,6 +460,45 @@ def test_remove_fails_whole_when_the_index_is_busy(hub_dir, monkeypatch):
     assert read_password(hub_dir, WORK) == "pw"
 
 
+def test_remove_waits_for_a_running_poll(hub_dir):
+    """A poll that read config.toml before the removal would write the removed mailbox's mail
+    and problems back into the index: `remove` waits until the poll is done."""
+    add(hub_dir)
+    mail = hub_dir / "mail"
+    locked, done = threading.Event(), []
+
+    def a_poll():
+        with poll.poll_lock(mail) as held:
+            locked.set()
+            time.sleep(0.6)
+            done.append(held)
+
+    holder = threading.Thread(target=a_poll)
+    holder.start()
+    try:
+        assert locked.wait(10)
+        r = accounts.remove(hub_dir, mail, "工作")
+        assert done == [True]  # the poll had finished before anything was removed
+    finally:
+        holder.join(10)
+    assert r["ok"] and list(load(mail).mailboxes) == []
+
+
+def test_remove_gives_up_when_the_poll_takes_too_long(hub_dir, monkeypatch):
+    add(hub_dir)
+    mail = hub_dir / "mail"
+    monkeypatch.setattr(accounts, "REMOVE_WAIT_SECONDS", 0.3)
+    with poll.poll_lock(mail) as held:
+        assert held
+        with pytest.raises(MailError, match="check for new mail is running.*nothing was removed"):
+            accounts.remove(hub_dir, mail, "工作")
+    assert list(load(mail).mailboxes) == ["工作"]
+    assert read_password(hub_dir, WORK) == "pw"
+    assert state(hub_dir) is not None
+    with pytest.raises(MailError, match="no mailbox named"):  # asked before any wait
+        accounts.remove(hub_dir, mail, "QQ")
+
+
 def test_remove_keeps_what_a_second_section_of_the_address_needs(hub_dir):
     add(hub_dir)
     mail = hub_dir / "mail"
@@ -568,10 +614,14 @@ def test_cli_detect(mk, monkeypatch):
     status, out, _ = mk("account", "detect", "me@163.com")
     assert status == 0
     assert out == {"address": "me@163.com", "provider": "163", "supported": True,
-                   "reason": "163.com is a NetEase 163 Mail domain",
+                   "status": "supported", "reason": "163.com is a NetEase 163 Mail domain",
                    "name": "NetEase 163 Mail", "guide": "skills/mail/providers/netease.md"}
     status, out, _ = mk("account", "detect", "me@outlook.com")
-    assert out["supported"] is False and "guide" not in out
+    assert (out["supported"], out["status"]) == (False, "unsupported") and "guide" not in out
+    monkeypatch.setattr(accounts.providers, "lookup_mx", lambda domain: [])
+    status, out, _ = mk("account", "detect", "me@gateway.example")
+    assert (status, out["supported"], out["status"]) == (0, False, "unknown")
+    assert "guide" not in out
     status, _, err = mk("account", "detect", "nonsense")
     assert status == 1 and err.startswith("mk: ")
 

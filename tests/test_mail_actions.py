@@ -311,7 +311,9 @@ def test_mail_the_user_deleted_or_archived_is_not_pushed_or_digested(world):
     pending = background.pending(world.mail)
     assert [item["id"] for item in pending["items"]] == [ids["kept"]] and pending["total"] == 1
     stale = [f"{ids['to delete']}=important", f"{ids['to archive']}=digest"]
-    assert background.judge(world.mail, stale, now=NOW) == {"judged": 0, "pending_left": 1}
+    assert background.judge(world.mail, stale, now=NOW) == {
+        "judged": 0, "important": [], "digest": [],
+        "already_judged": [ids["to delete"], ids["to archive"]], "pending_left": 1}
     assert background.recent_pushed(world.mail)["items"] == []
     assert background.digest_items(world.mail, now=NOW)["total"] == 0
 
