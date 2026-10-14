@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import accounts, config
+from . import accounts, config, poll
 from .config import MailError
 from .providers import PROVIDERS
 
@@ -129,6 +129,29 @@ def add_account_commands(sub) -> None:
     a.set_defaults(func=run_account_list)
 
 
+def run_bg_poll(args: argparse.Namespace) -> None:
+    wake = (lambda: poll.wake_triage(args.hub)) if args.wake else None
+    print_json(poll.poll(args.hub, args.mail_dir, wake=wake))
+
+
+def add_bg_commands(sub) -> None:
+    """`mk bg ...`: the background commands. They never change anything on a mail server
+    (no send, flag, move or delete), and the restricted triage and digest tasks may run only
+    these."""
+    p = sub.add_parser(
+        "bg", help="background commands: they only read mail and the local index; the "
+        "restricted triage and digest tasks may run only these")
+    actions = p.add_subparsers(dest="action", metavar="<action>", required=True)
+
+    a = actions.add_parser(
+        "poll", help="take new mail from every mailbox's INBOX into the index without "
+        "changing anything on the server, route it, and note mailbox problems")
+    a.add_argument("--wake", action="store_true",
+                   help="wake the mail/triage task (cc-hub cron wake) when there is mail to "
+                   "judge or a mailbox problem to report")
+    a.set_defaults(func=run_bg_poll)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog="mk", description="Tools for the mail app.")
     parser.add_argument(
@@ -149,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="read config.toml and print the mailboxes in it; an error names the bad key")
     check.set_defaults(func=run_config_check)
     add_account_commands(sub)
+    add_bg_commands(sub)
     return parser
 
 
