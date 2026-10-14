@@ -9,26 +9,30 @@ in config.toml, in config order, it reads INBOX without changing anything on the
   for the sender's domain; case does not matter), a paused mailbox, or delivery `digest` sends
   it straight to the digest (`digest`); anything else waits for the agent's verdict
   (`pending`). `last_uid` moves after each stored batch, and storing is idempotent, so a poll
-  that dies half way neither loses nor duplicates mail.
+  that dies half way neither loses nor duplicates mail. A UID the server lists but leaves out
+  of its FETCH reply stops the new mail just below it for this poll; left out again at the
+  next poll, it is stored as an unreadable message rather than skipped in silence.
 - **No baseline yet** (a poll that raced `account add`, an index rebuilt on another machine)
   or **a new UIDVALIDITY** (the server renumbered INBOX): the baseline is set as `account add`
   sets it, and nothing in INBOX counts as new.
 - **Backfill**: mail of the last 90 days that was in INBOX before the baseline is indexed as
   `old` (searchable, never pushed or digested), downward from `backfill_before`, at most
   `backfill_chunk` messages per poll, so a mailbox with thousands of messages fills in over
-  a few polls.
+  a few polls. An old message the server leaves out is not retried: it is only missing from
+  the local search.
 
 A mailbox that fails becomes a problem in the index (`login`: the login was refused or there is
 no stored password; `connect`: the server cannot be reached or dropped the connection;
 `error`: anything unexpected) and the poll goes on with the next one; a mailbox that answers
-ends its problems (a recovery, reported once). A config.toml that cannot be read is one problem
-of address and kind `config`, and no mailbox is polled.
+ends its problems (each a recovery, told once with the next message). A config.toml that cannot
+be read is one problem of address and kind `config`, and no mailbox is polled.
 
 After the mailboxes the poll is recorded, and with `wake` the on-demand `mail/triage` task is
 woken when the batch of pending mail needs it (never woken, or woken 10 minutes ago and still
-pending) or a problem or recovery has not been reported yet. Two polls never run at once: the
-second finds the poll lock held and returns `{"skipped": "another poll is running"}` without
-touching anything.
+pending) or when an open problem needs telling (`Store.problems_need_wake`: not reported, not
+told for that mailbox and kind in the last day, and no wake for problems in the last 10
+minutes). A recovery never wakes triage. Two polls never run at once: the second finds the
+poll lock held and returns `{"skipped": "another poll is running"}` without touching anything.
 """
 
 from __future__ import annotations
@@ -180,12 +184,45 @@ def _baseline(store: Store, srv: MailServer, address: str, uidvalidity: int, uid
     recent = any(uid <= last_uid for uid in srv.uids_since(since))
     before = last_uid + 1 if recent else None
     store.set_baseline(address, uidvalidity, last_uid, before)
+    if store.missed(address) is not None:  # a UID of the old numbering means nothing now
+        store.set_missed(address, None)
     return last_uid, before
 
 
 def _batches(uids: list[int]) -> Iterator[list[int]]:
     for start in range(0, len(uids), FETCH_BATCH):
         yield uids[start:start + FETCH_BATCH]
+
+
+def _take_new(store: Store, srv: MailServer, address: str, uidvalidity: int, last_uid: int,
+              before: int | None, rules: dict, now: datetime, entry: dict) -> int:
+    """Store the mail above `last_uid`, routed; returns the new `last_uid`.
+
+    A UID the server lists but leaves out of its FETCH reply (a reply the adapter could not
+    read, or mail deleted between the search and the fetch) stops the new mail here:
+    `last_uid` stays below it, and it is remembered. At the next poll, mail deleted meanwhile
+    is no longer listed; a UID that is listed and left out again is stored as an unreadable
+    message, so that it is never skipped in silence, and the poll goes on past it."""
+    missed = store.missed(address)
+    gap = None
+    for batch in _batches(sorted(u for u in srv.uids_after(last_uid) if u > last_uid)):
+        got = dict(srv.fetch(batch))
+        for uid in batch:
+            raw = got.get(uid)
+            if raw is None and uid != missed:
+                gap = uid
+                break
+            parsed = _readable(raw) if raw is not None else Parsed(subject=UNREADABLE)
+            store.add(address, uid, uidvalidity, parsed, route(parsed, rules),
+                      addressed(parsed, address), now=now)
+            entry["new"] += 1
+        last_uid = batch[-1] if gap is None else gap - 1
+        store.set_baseline(address, uidvalidity, last_uid, before)
+        if gap is not None:
+            break
+    if gap != missed:
+        store.set_missed(address, gap)
+    return last_uid
 
 
 def _sync(store: Store, srv: MailServer, mb: Mailbox, rules: dict, now: datetime,
@@ -199,15 +236,9 @@ def _sync(store: Store, srv: MailServer, mb: Mailbox, rules: dict, now: datetime
     if state is None or state["uidvalidity"] != uidvalidity:
         last_uid, before = _baseline(store, srv, address, uidvalidity, uidnext, since)
     else:
-        last_uid, before = state["last_uid"], state["backfill_before"]
-        for batch in _batches(sorted(u for u in srv.uids_after(last_uid) if u > last_uid)):
-            for uid, raw in srv.fetch(batch):
-                parsed = _readable(raw)
-                store.add(address, uid, uidvalidity, parsed, route(parsed, rules),
-                          addressed(parsed, address), now=now)
-                entry["new"] += 1
-            last_uid = batch[-1]
-            store.set_baseline(address, uidvalidity, last_uid, before)
+        before = state["backfill_before"]
+        last_uid = _take_new(store, srv, address, uidvalidity, state["last_uid"], before,
+                             rules, now, entry)
     if before is None or backfill_chunk <= 0:
         return
     older = sorted((u for u in srv.uids_since(since) if u < before), reverse=True)
@@ -286,7 +317,7 @@ def _wake(store: Store, wake: Callable[[], str | None] | None,
     """Wake triage when there is something for it: (woke, error)."""
     if wake is None:
         return False, None
-    if not (store.batch_needs_wake(now) or store.problems(unreported_only=True)):
+    if not (store.batch_needs_wake(now) or store.problems_need_wake(now)):
         return False, None
     try:
         error = wake()
@@ -295,6 +326,7 @@ def _wake(store: Store, wake: Callable[[], str | None] | None,
     if error is not None:
         return False, str(error)
     store.mark_woken(now)
+    store.mark_problems_woken(now)  # triage lists the unreported problems, whatever woke it
     return True, None
 
 

@@ -2,9 +2,10 @@
 
 The index holds what `mk` needs between runs: per mailbox where the last poll stopped, every
 message that was fetched (envelope and plain text, enough to search and to judge it), the
-verdicts and pushes, the times of the polls, the problems of the mailboxes, and the one batch of
-pending mail the background `triage` task is woken for. Nothing in it is the only copy of a
-mail: the server has the mail, and a new machine rebuilds the index by polling.
+verdicts and pushes, the times of the polls, the problems of the mailboxes and when `triage` was
+woken to tell them, a UID the server left out of a fetch, and the one batch of pending mail the
+background `triage` task is woken for. Nothing in it is the only copy of a mail: the server has
+the mail, and a new machine rebuilds the index by polling.
 
 Searching is SQL `LIKE` on the envelope and the text, no full-text index. Chinese has no word
 breaks and a personal mailbox is small, so a scan answers in well under a second.
@@ -45,6 +46,8 @@ STATUSES = ("old", "pending", "important", "digest", "digested")
 ADDRESSED = ("to", "cc", "none")
 DECISIONS = ("important", "digest")
 POLLS_KEPT = 200  # the status check needs the last few; older rows are dropped
+PROBLEM_WAKE_MINUTES = 10  # at least this long between two wakes of triage for problems
+PROBLEM_QUIET_HOURS = 24  # a mailbox's problem of one kind is told at most once in this time
 
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS mailboxes (
@@ -344,12 +347,30 @@ class Store:
         return None if row is None else dict(row)
 
     def forget(self, address: str) -> None:
-        """Drop everything the index holds about `address`: state, messages, pushes, problems."""
+        """Drop everything the index holds about `address`: state, messages, pushes, problems
+        and when triage was woken for them, a missed UID."""
         with self._transaction(write=True) as db:
             db.execute("DELETE FROM messages WHERE address = ?", (address,))  # pushes cascade
             db.execute("DELETE FROM problems WHERE address = ?", (address,))
             db.execute("DELETE FROM mailboxes WHERE address = ?", (address,))
+            self._put_meta(db, _missed_key(address), None)
+            wakes = self._problem_wakes(db)
+            kept = {key: when for key, when in wakes.items() if key[0] != address}
+            if kept != wakes:
+                self._put_problem_wakes(db, kept)
             self._sync_batch(db)
+
+    def missed(self, address: str) -> int | None:
+        """The UID of INBOX mail of `address` that the server listed but left out of its FETCH
+        reply at the last poll, or None."""
+        with self._transaction() as db:
+            value = self._meta(db, _missed_key(address))
+        return None if value is None else int(value)
+
+    def set_missed(self, address: str, uid: int | None) -> None:
+        """Remember the UID the last FETCH of `address` left out (None: there is none)."""
+        with self._transaction(write=True) as db:
+            self._put_meta(db, _missed_key(address), None if uid is None else str(int(uid)))
 
     def last_ok(self, address: str) -> str | None:
         """When `address` last answered a poll (the time of the last `resolve`), or None."""
@@ -581,6 +602,88 @@ class Store:
                 "AND recovered_reported_at IS NULL) ORDER BY id").fetchall()
         return [_problem(row) for row in rows]
 
+    # -- waking triage for problems ---------------------------------------------------------
+
+    @staticmethod
+    def _meta(db: sqlite3.Connection, key: str) -> str | None:
+        row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else row["value"]
+
+    @staticmethod
+    def _put_meta(db: sqlite3.Connection, key: str, value: str | None) -> None:
+        if value is None:
+            db.execute("DELETE FROM meta WHERE key = ?", (key,))
+        else:
+            db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+
+    @classmethod
+    def _problem_wakes(cls, db: sqlite3.Connection) -> dict[tuple[str, str], str]:
+        """When triage was last woken for each (address, kind)."""
+        return {
+            (address, kind): when
+            for address, kind, when in json.loads(cls._meta(db, "problem_wakes") or "[]")}
+
+    @classmethod
+    def _put_problem_wakes(cls, db: sqlite3.Connection, wakes: dict) -> None:
+        cls._put_meta(db, "problem_wakes", json.dumps(
+            [[address, kind, when] for (address, kind), when in sorted(wakes.items())],
+            ensure_ascii=False))
+
+    @staticmethod
+    def _open_unreported(db: sqlite3.Connection) -> list[sqlite3.Row]:
+        return db.execute(
+            "SELECT address, kind FROM problems WHERE resolved_at IS NULL "
+            "AND reported_at IS NULL ORDER BY id").fetchall()
+
+    def problems_need_wake(
+        self, now: datetime, after_minutes: float = PROBLEM_WAKE_MINUTES,
+        quiet_hours: float = PROBLEM_QUIET_HOURS,
+    ) -> bool:
+        """Whether `triage` should be woken to tell the user about a mailbox problem.
+
+        True when an open problem has not been reported, and its mailbox's problem of that kind
+        was neither woken for nor reported in the last `quiet_hours` (so a problem is pushed
+        once, a mailbox whose connection comes and goes is pushed once a day, and a problem
+        that triage was woken for but did not mark is not pushed at every poll; the digest
+        lists the open ones every day), and the last wake for problems was at least
+        `after_minutes` ago. A recovery never wakes triage: it is told with the next message."""
+        moment = _utc(now)
+        with self._transaction() as db:
+            rows = self._open_unreported(db)
+            if not rows:
+                return False
+            last = self._meta(db, "problems_woken_at")
+            told = self._problem_wakes(db)
+            for row in db.execute(
+                    "SELECT address, kind, MAX(reported_at) AS at FROM problems "
+                    "WHERE reported_at IS NOT NULL GROUP BY address, kind"):
+                key = (row["address"], row["kind"])
+                told[key] = max(told.get(key, row["at"]), row["at"])
+        if last is not None and (moment - _utc(last)).total_seconds() < after_minutes * 60:
+            return False
+        return any(
+            (key := (row["address"], row["kind"])) not in told
+            or (moment - _utc(told[key])).total_seconds() >= quiet_hours * 3600
+            for row in rows)
+
+    def mark_problems_woken(self, now: datetime) -> int:
+        """`triage` was woken: the open problems not yet reported go with it (it lists them).
+        Records the time for each one's mailbox and kind, and as the last wake for problems.
+        Returns how many problems that is; with none, nothing is recorded."""
+        when = _iso(now)
+        with self._transaction(write=True) as db:
+            rows = self._open_unreported(db)
+            if not rows:
+                return 0
+            wakes = self._problem_wakes(db)
+            for row in rows:
+                wakes[(row["address"], row["kind"])] = when
+            self._put_problem_wakes(db, wakes)
+            self._put_meta(db, "problems_woken_at", when)
+        return len(rows)
+
     def mark_reported(self, ids: list[int], now: datetime) -> int:
         """The user was told about these entries of `problems`. An open problem will not be
         listed as new again; a recovered one will not be listed again at all. Unknown ids are
@@ -692,6 +795,10 @@ class Store:
 
 
 _BUSY = "the mail index is busy (another mk command is writing to it); try again in a moment"
+
+
+def _missed_key(address: str) -> str:
+    return f"missed:{address}"
 
 
 def _is_busy(error: sqlite3.OperationalError) -> bool:

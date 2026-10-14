@@ -473,6 +473,109 @@ def test_last_ok_is_the_last_time_the_mailbox_answered(store):
     assert store.last_ok(B) is None
 
 
+# -- waking triage for problems --------------------------------------------------------------
+
+
+def test_a_new_open_problem_needs_a_wake_once(store):
+    assert store.problems_need_wake(t(0)) is False
+    store.problem(A, "login", "wrong password", t(0))
+    assert store.problems_need_wake(t(0)) is True
+    assert store.mark_problems_woken(t(0)) == 1
+    # woken but never marked reported (triage failed): no wake at the next polls
+    for minutes in (5, 10, 60, 23 * 60):
+        store.problem(A, "login", "wrong password", t(minutes))
+        assert store.problems_need_wake(t(minutes)) is False
+    assert store.problems(unreported_only=True)[0]["state"] == "open"  # still for the digest
+    # a day later it may wake once more
+    assert store.problems_need_wake(t(24 * 60)) is True
+
+
+def test_recoveries_never_need_a_wake(store):
+    store.problem(A, "connect", "timed out", t(0))
+    store.mark_problems_woken(t(0))
+    store.resolve(A, t(5))
+    assert [p["state"] for p in store.problems(unreported_only=True)] == ["recovered"]
+    assert store.problems_need_wake(t(30)) is False
+    store.problem(B, "connect", "timed out", t(40))
+    store.resolve(B, t(45))  # recovered before anyone was told
+    assert store.problems_need_wake(t(50)) is False
+
+
+def test_a_flapping_problem_wakes_once_a_day(store):
+    store.problem(A, "connect", "timed out", t(0))
+    assert store.problems_need_wake(t(0))
+    store.mark_problems_woken(t(0))
+    for start in range(10, 23 * 60, 10):  # back, gone, back... every 10 minutes for a day
+        store.resolve(A, t(start - 5))
+        store.problem(A, "connect", "timed out", t(start))
+        assert store.problems_need_wake(t(start)) is False
+    store.resolve(A, t(24 * 60 - 5))
+    store.problem(A, "connect", "timed out", t(24 * 60))
+    assert store.problems_need_wake(t(24 * 60)) is True
+
+
+def test_a_problem_reported_without_a_wake_does_not_wake_when_it_comes_back(store):
+    pid = store.problem(A, "login", "wrong password", t(0))
+    store.mark_reported([pid], t(1))  # told in the digest; triage was never woken for it
+    store.resolve(A, t(5))
+    store.mark_reported([pid], t(6))
+    store.problem(A, "login", "wrong password", t(10))
+    assert store.problems_need_wake(t(10)) is False
+    assert store.problems_need_wake(t(25 * 60)) is True
+
+
+def test_problem_wakes_are_ten_minutes_apart(store):
+    store.problem(A, "login", "wrong password", t(0))
+    store.mark_problems_woken(t(0))
+    store.problem(B, "login", "wrong password", t(5))  # a new, different problem
+    assert store.problems_need_wake(t(5)) is False
+    assert store.problems_need_wake(t(9.9)) is False
+    assert store.problems_need_wake(t(10)) is True
+    assert store.mark_problems_woken(t(10)) == 2  # both are unreported: both go with it
+    assert store.problems_need_wake(t(30)) is False
+
+
+def test_other_kinds_and_mailboxes_are_problems_of_their_own(store):
+    store.problem(A, "login", "wrong password", t(0))
+    store.mark_problems_woken(t(0))
+    store.problem(A, "connect", "timed out", t(20))
+    assert store.problems_need_wake(t(20)) is True
+
+
+def test_mark_problems_woken_with_nothing_open_records_nothing(store):
+    assert store.mark_problems_woken(t(0)) == 0
+    store.problem(A, "login", "wrong password", t(5))
+    assert store.problems_need_wake(t(5)) is True  # no 10-minute wait from the empty mark
+
+
+def test_forget_drops_the_problem_wakes_of_a_mailbox(store):
+    store.problem(A, "login", "wrong password", t(0))
+    store.problem(B, "login", "wrong password", t(0))
+    store.mark_problems_woken(t(0))
+    store.forget(A)
+    store.problem(A, "login", "wrong password", t(20))  # added again, still failing
+    assert store.problems_need_wake(t(20)) is True
+    store.mark_problems_woken(t(20))
+    store.problem(B, "login", "wrong password", t(40))
+    assert store.problems_need_wake(t(40)) is False  # B's wake was kept
+
+
+# -- a message the server did not hand over -----------------------------------------------
+
+
+def test_missed_uid_is_kept_per_mailbox_and_forgotten_with_it(store):
+    assert store.missed(A) is None
+    store.set_missed(A, 17)
+    store.set_missed(B, 3)
+    assert (store.missed(A), store.missed(B)) == (17, 3)
+    store.set_missed(A, 18)
+    assert store.missed(A) == 18
+    store.set_missed(A, None)
+    assert store.missed(A) is None
+    store.forget(B)
+    assert store.missed(B) is None
+
+
 # -- search ----------------------------------------------------------------------------------
 
 

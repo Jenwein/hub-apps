@@ -392,12 +392,86 @@ def test_failing_mailbox_does_not_stop_others_and_reports_once(hub_dir):
     assert r["mailboxes"][0] == {"name": "QQ", "new": 0, "error": None}
     recovered = problems(hub_dir, unreported_only=True)
     assert [(p["address"], p["state"]) for p in recovered] == [(QQ, "recovered")]
-    assert waker.calls == 2  # the recovery is told once
-    report_problems(hub_dir, 9)
+    assert waker.calls == 1  # a recovery does not wake: it goes with the next message
+    with Store.open(hub_dir / "mail") as store:  # triage judged the first batch
+        store.judge({m["id"]: "digest" for m in store.pending()["items"]}, t(8.5))
+    good.deliver(mail_from("boss@corp.example", "next"))
+    r = run(hub_dir, servers, minutes=9, wake=waker)
+    assert (r["woke"], waker.calls) == (True, 2)  # the next mail; triage lists the recovery
+    report_problems(hub_dir, 9.2)
     run(hub_dir, servers, minutes=9.5, wake=waker)
     assert problems(hub_dir, unreported_only=True) == [] and waker.calls == 2
     with Store.open(hub_dir / "mail") as store:
         assert store.last_ok(QQ) == "2026-10-14T04:09:30+00:00"  # the last poll reached it
+
+
+def test_a_flapping_mailbox_wakes_once(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    waker = Waker()
+    for step in range(24):  # down, up, down, up... for two hours, a poll every 5 minutes
+        fake.fail_login = "connect" if step % 2 == 0 else None
+        r = run(hub_dir, fake, minutes=5 * step, wake=waker)
+        assert r["woke"] is (step == 0)
+        if step == 0:
+            report_problems(hub_dir, 1)  # triage told the user
+    assert waker.calls == 1
+    assert {p["state"] for p in problems(hub_dir)} == {"recovered"}  # for the next message
+
+
+def test_a_problem_woken_but_never_reported_does_not_wake_every_poll(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.fail_login = "imap-login"
+    waker = Waker()
+    assert run(hub_dir, fake, wake=waker)["woke"] is True
+    for minutes in range(5, 24 * 60, 30):  # triage failed to mark it, all day long
+        assert run(hub_dir, fake, minutes=minutes, wake=waker)["woke"] is False
+    assert waker.calls == 1
+    assert problems(hub_dir, unreported_only=True)[0]["state"] == "open"
+    assert run(hub_dir, fake, minutes=24 * 60, wake=waker)["woke"] is True  # once a day
+
+
+def test_a_second_mailbox_problem_waits_ten_minutes(hub_dir):
+    work, qq = FakeServer(), FakeServer()
+    add(hub_dir, work)
+    add(hub_dir, qq, "QQ", QQ, "qq")
+    servers = {"工作": work, "QQ": qq}
+    waker = Waker()
+    work.fail_login = "imap-login"
+    assert run(hub_dir, servers, wake=waker)["woke"] is True
+    qq.fail_login = "connect"
+    assert run(hub_dir, servers, minutes=5, wake=waker)["woke"] is False
+    assert run(hub_dir, servers, minutes=10, wake=waker)["woke"] is True
+    assert waker.calls == 2
+    assert run(hub_dir, servers, minutes=20, wake=waker)["woke"] is False
+
+
+def test_a_failed_problem_wake_is_retried(hub_dir):
+    fake = FakeServer()
+    add(hub_dir, fake)
+    fake.fail_login = "imap-login"
+    waker = Waker(error="cc-connect is not running")
+    r = run(hub_dir, fake, wake=waker)
+    assert (r["woke"], r["wake_error"]) == (False, "cc-connect is not running")
+    waker.error = None
+    assert run(hub_dir, fake, minutes=5, wake=waker)["woke"] is True
+    assert run(hub_dir, fake, minutes=20, wake=waker)["woke"] is False
+    assert waker.calls == 2
+
+
+def test_a_mail_wake_carries_the_problems(hub_dir):
+    work, qq = FakeServer(), FakeServer()
+    add(hub_dir, work)
+    add(hub_dir, qq, "QQ", QQ, "qq")
+    qq.fail_login = "imap-login"
+    work.deliver(mail_from("boss@corp.example"))
+    waker = Waker()
+    assert run(hub_dir, {"工作": work, "QQ": qq}, wake=waker)["woke"] is True
+    with Store.open(hub_dir / "mail") as store:  # triage judged the mail, but did not mark
+        store.judge({m["id"]: "digest" for m in store.pending()["items"]}, t(1))
+    assert run(hub_dir, {"工作": work, "QQ": qq}, minutes=15, wake=waker)["woke"] is False
+    assert waker.calls == 1
 
 
 @pytest.mark.parametrize("setup,kind,words", [
@@ -507,6 +581,98 @@ def test_a_crash_after_storing_but_before_advancing_does_not_duplicate(hub_dir, 
     assert state(hub_dir)["last_uid"] == 3
 
 
+class Gappy(FakeServer):
+    """A server whose FETCH reply leaves out the UIDs in `drop`: `times` times each (None:
+    every time)."""
+
+    def __init__(self, *args, drop=(), times=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drop = set(drop)
+        self.times = times
+        self.dropped: dict[int, int] = {}
+
+    def fetch(self, uids):
+        out = []
+        for uid, raw in super().fetch(uids):
+            if uid in self.drop and (self.times is None or self.dropped.get(uid, 0) < self.times):
+                self.dropped[uid] = self.dropped.get(uid, 0) + 1
+                continue
+            out.append((uid, raw))
+        return out
+
+
+def test_a_uid_left_out_of_a_fetch_once_is_taken_at_the_next_poll(hub_dir):
+    fake = Gappy(drop={3}, times=1)
+    add(hub_dir, fake)
+    for i in range(5):
+        fake.deliver(mail_from("boss@corp.example", f"mail {i + 1}"))
+    r = run(hub_dir, fake)
+    assert r["mailboxes"][0] == {"name": "工作", "new": 2, "error": None}
+    assert [row[1] for row in rows(hub_dir)] == [1, 2]  # stopped before the gap
+    assert state(hub_dir)["last_uid"] == 2
+    r = run(hub_dir, fake, minutes=5)
+    assert r["mailboxes"][0]["new"] == 3
+    assert [(row[1], row[5]) for row in rows(hub_dir)] == [
+        (i, f"mail {i}") for i in range(1, 6)]  # 3 is the real mail: nothing unreadable
+    assert state(hub_dir)["last_uid"] == 5
+    with Store.open(hub_dir / "mail") as store:
+        assert store.missed(WORK) is None
+
+
+def test_a_uid_left_out_of_every_fetch_becomes_an_unreadable_message(hub_dir):
+    fake = Gappy(drop={22})
+    add(hub_dir, fake)
+    for i in range(25):
+        fake.deliver(mail_from("boss@corp.example", f"mail {i + 1}"))
+    r = run(hub_dir, fake)
+    assert r["mailboxes"][0]["new"] == 21  # a whole batch of 20, then 21 before the gap
+    assert state(hub_dir)["last_uid"] == 21
+    r = run(hub_dir, fake, minutes=5)
+    assert r["mailboxes"][0] == {"name": "工作", "new": 4, "error": None}
+    subjects = {row[1]: (row[3], row[5]) for row in rows(hub_dir)}
+    assert subjects[22] == ("pending", poll.UNREADABLE)  # never silent
+    assert subjects[23] == ("pending", "mail 23") and len(subjects) == 25
+    assert state(hub_dir)["last_uid"] == 25
+    assert run(hub_dir, fake, minutes=10)["mailboxes"][0]["new"] == 0
+    assert len(rows(hub_dir)) == 25
+    with Store.open(hub_dir / "mail") as store:
+        assert store.missed(WORK) is None
+
+
+def test_a_uid_expunged_between_search_and_fetch_is_simply_gone(hub_dir):
+    class Expunging(FakeServer):
+        def uids_after(self, uid):
+            found = super().uids_after(uid)
+            self.inbox.pop(2, None)  # another client deletes it right after the search
+            return found
+
+    fake = Expunging()
+    add(hub_dir, fake)
+    for i in range(3):
+        fake.deliver(mail_from("boss@corp.example", f"mail {i + 1}"))
+    run(hub_dir, fake)
+    assert [row[1] for row in rows(hub_dir)] == [1] and state(hub_dir)["last_uid"] == 1
+    run(hub_dir, fake, minutes=5)  # no longer listed: the poll moves on
+    assert [(row[1], row[5]) for row in rows(hub_dir)] == [(1, "mail 1"), (3, "mail 3")]
+    assert state(hub_dir)["last_uid"] == 3
+    with Store.open(hub_dir / "mail") as store:
+        assert store.missed(WORK) is None
+
+
+def test_a_new_uidvalidity_forgets_a_missed_uid(hub_dir):
+    fake = Gappy(drop={2})
+    add(hub_dir, fake)
+    fake.deliver(mail_from("boss@corp.example", "one"))
+    fake.deliver(mail_from("boss@corp.example", "two"))
+    run(hub_dir, fake)
+    with Store.open(hub_dir / "mail") as store:
+        assert store.missed(WORK) == 2
+    fake.uidvalidity = 9
+    run(hub_dir, fake, minutes=5)
+    with Store.open(hub_dir / "mail") as store:
+        assert store.missed(WORK) is None
+
+
 def test_a_broken_config_is_one_problem_and_wakes_once(hub_dir):
     fake = FakeServer()
     add(hub_dir, fake)
@@ -531,6 +697,7 @@ def test_a_broken_config_is_one_problem_and_wakes_once(hub_dir):
     assert r["config_error"] is None and r["mailboxes"][0]["error"] is None
     assert [(p["address"], p["state"]) for p in problems(hub_dir, unreported_only=True)] == [
         ("config", "recovered")]
+    assert waker.calls == 1  # the recovery waits for the next message
 
 
 def test_two_sections_with_one_address_are_polled_once(hub_dir):
