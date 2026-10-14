@@ -41,9 +41,10 @@ STATE_DIR = ".state"
 DB_FILE = "mail.db"
 BUSY_TIMEOUT_MS = 5000
 
-# what a message can be: `old` (indexed history, never pushed or digested), `pending` (waiting
-# for a verdict), `important` (judged: pushed), `digest` (judged or routed: waits for the next
-# daily digest), `digested` (listed in a digest)
+# what a message can be: `old` (indexed history, or mail the user moved out of INBOX before it
+# was judged or listed: never pushed or digested), `pending` (waiting for a verdict),
+# `important` (judged: pushed), `digest` (judged or routed: waits for the next daily digest),
+# `digested` (listed in a digest)
 STATUSES = ("old", "pending", "important", "digest", "digested")
 ADDRESSED = ("to", "cc", "none")
 DECISIONS = ("important", "digest")
@@ -483,16 +484,27 @@ class Store:
         `expunged` is False when the server could only copy them and flag the originals
         deleted, so they are still in INBOX until a mail client expunges them. A message that
         is already recorded as moved keeps its first record (it is not in INBOX to move
-        again), and an unknown id is ignored. Returns how many messages were recorded."""
+        again), and an unknown id is ignored. Returns how many messages were recorded.
+
+        A message that was waiting (`pending`, or `digest`) becomes `old` in the same
+        transaction: mail the user archived or deleted is history, so it is not judged and
+        pushed ("important: <mail you just deleted>") and not listed in the next digest. A
+        judge that was already reading the batch leaves it alone (`judge` only judges pending
+        mail), and the batch ends if no mail is pending any more. `important` and `digested`
+        stay as they are: the push and the digest happened."""
         when = _iso(now)
         folder = _clean(folder)
         with self._transaction(write=True) as db:
-            return sum(
+            moved = sum(
                 db.execute(
-                    "UPDATE messages SET moved_to = ?, moved_at = ?, moved_expunged = ? "
-                    "WHERE id = ? AND moved_to IS NULL", (folder, when, int(expunged), mid)
+                    "UPDATE messages SET moved_to = ?, moved_at = ?, moved_expunged = ?, "
+                    "status = CASE WHEN status IN ('pending', 'digest') THEN 'old' "
+                    "ELSE status END WHERE id = ? AND moved_to IS NULL",
+                    (folder, when, int(expunged), mid)
                 ).rowcount
                 for mid in dict.fromkeys(ids))
+            self._sync_batch(db)
+            return moved
 
     def _paged(
         self, db: sqlite3.Connection, columns: str, where: str, params: list, order: str,

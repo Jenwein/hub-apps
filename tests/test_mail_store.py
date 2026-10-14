@@ -866,12 +866,63 @@ def test_mark_moved_records_where_a_message_went_and_only_once(store):
     assert store.locate([c])[c]["moved_to"] == "Trash"
 
 
+def test_a_moved_pending_message_is_no_longer_waiting_for_a_verdict(store):
+    moved, other = put(store, 1), put(store, 2)
+    store.open_batch(NOW)
+    assert store.mark_moved([moved], "Trash", True, t(1)) == 1
+    assert store.message(moved)["status"] == "old"  # history now: never judged or pushed
+    assert [m["id"] for m in store.pending(10, 1)["items"]] == [other]
+    assert store.open_batch(t(2))["pending"] == 1
+    # a triage that read the batch before the move cannot push the deleted mail
+    assert store.judge({moved: "important", other: "digest"}, t(3)) == 1
+    assert store.message(moved)["status"] == "old" and store.pushes() == []
+    assert store.push_count() == 0
+
+
+def test_moving_the_only_pending_message_closes_the_batch(store):
+    only = put(store, 1)
+    store.open_batch(NOW)
+    store.mark_moved([only], "Archive", True, t(1))
+    assert store.pending(10, 1)["total"] == 0
+    assert store.open_batch(t(2)) is None
+    assert store.batch_needs_wake(t(30)) is False
+
+
+def test_a_moved_digest_message_is_not_in_the_digest(store):
+    kept, moved = put(store, 1, status="digest"), put(store, 2, status="digest")
+    judged = put(store, 3)
+    store.judge({judged: "digest"}, t(1))
+    store.mark_moved([moved, judged], "Trash", True, t(2))
+    assert store.message(moved)["status"] == "old" and store.message(judged)["status"] == "old"
+    listing = store.digest_items(1, 10)
+    assert [m["id"] for m in listing["items"]] == [kept] and listing["total"] == 1
+    assert store.mark_digested(t(3), up_to=listing["up_to"]) == 1
+    assert store.message(kept)["status"] == "digested"
+    assert store.message(moved)["status"] == "old"  # not digested: it was never listed
+    # a digest of only deleted mail is an empty one
+    gone = put(store, 4, status="digest")
+    store.mark_moved([gone], "Trash", True, t(4))
+    assert store.digest_items(1, 10)["total"] == 0
+
+
+def test_moving_important_digested_and_old_messages_keeps_their_status(store):
+    important, digested, old = put(store, 1), put(store, 2, status="digest"), put(
+        store, 3, status="old")
+    store.judge({important: "important"}, t(1))
+    store.mark_digested(t(2))
+    store.mark_moved([important, digested, old], "Archive", True, t(3))
+    assert [store.message(m)["status"] for m in (important, digested, old)] == [
+        "important", "digested", "old"]
+    assert [p["id"] for p in store.pushes()] == [important]  # the push is still on record
+    assert store.push_count() == 1
+
+
 def test_search_says_where_a_moved_message_went(store):
     a, b = put(store, 1, subject="offer"), put(store, 2, subject="offer too")
-    store.mark_moved([a], "Archive", True, t(1))
+    store.judge({a: "important"}, t(1))
+    store.mark_moved([a], "Archive", True, t(2))
     where = {m["id"]: m["moved_to"] for m in store.search("offer")["items"]}
     assert where == {a: "Archive", b: None}
-    store.judge({a: "important"}, t(2))
     assert store.pushes()[0]["moved_to"] == "Archive"
 
 

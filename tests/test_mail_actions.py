@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from mailfakes import FakeServer, fake_connect, make_raw
-from mailkit import accounts, actions, cli, poll, server
+from mailkit import accounts, actions, background, cli, poll, server
 from mailkit.config import MailError, read_text, remove_mailbox_text, write_text
 from mailkit.server import ServerError
 from mailkit.store import Store
@@ -296,6 +296,24 @@ def test_archive_tells_search_where_the_message_went(world):
     with Store.open(world.mail) as store:
         (item,) = store.search("offer")["items"]
     assert item["moved_to"] == "Archive"
+
+
+def test_mail_the_user_deleted_or_archived_is_not_pushed_or_digested(world):
+    world.deliver("to delete")
+    world.deliver("to archive")
+    world.deliver("kept")
+    world.poll()
+    ids = world.ids()
+    assert background.pending(world.mail)["total"] == 3
+    world.delete(world.delete_list([ids["to delete"]])["list_id"])
+    world.archive([ids["to archive"]])
+    # triage runs after the user acted: only the mail still in INBOX is waiting for a verdict
+    pending = background.pending(world.mail)
+    assert [item["id"] for item in pending["items"]] == [ids["kept"]] and pending["total"] == 1
+    stale = [f"{ids['to delete']}=important", f"{ids['to archive']}=digest"]
+    assert background.judge(world.mail, stale, now=NOW) == {"judged": 0, "pending_left": 1}
+    assert background.recent_pushed(world.mail)["items"] == []
+    assert background.digest_items(world.mail, now=NOW)["total"] == 0
 
 
 def test_archiving_the_same_message_twice_is_refused_and_copies_nothing_again(world):
