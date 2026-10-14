@@ -36,7 +36,7 @@ from typing import Self
 from .config import MailError
 from .message import Parsed
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_DIR = ".state"
 DB_FILE = "mail.db"
 BUSY_TIMEOUT_MS = 5000
@@ -89,6 +89,7 @@ _SCHEMA = (
         moved_to TEXT,
         moved_at TEXT,
         moved_expunged INTEGER CHECK (moved_expunged IN (0, 1)),
+        reply_to TEXT NOT NULL DEFAULT '[]',
         UNIQUE (address, uidvalidity, uid)
     )""",
     "CREATE INDEX IF NOT EXISTS messages_status ON messages (status, address, id)",
@@ -120,11 +121,18 @@ _SCHEMA = (
     )""",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 )
+# What turns an index of version N into one of version N + 1, by N. An index made from nothing
+# runs _SCHEMA instead.
+_MIGRATIONS = {
+    # the Reply-To addresses of each message, where a reply goes (mail indexed before has none)
+    1: ("ALTER TABLE messages ADD COLUMN reply_to TEXT NOT NULL DEFAULT '[]'",),
+}
 
 _MESSAGE_COLUMNS = (
     "id, address, uid, uidvalidity, message_id, in_reply_to, refs, date, date_original, "
     "from_addr, from_name, to_addrs, cc_addrs, subject, text, attachments, bulk, addressed, "
-    "status, added_at, judged_at, pushed_at, digested_at, moved_to, moved_at, moved_expunged"
+    "status, added_at, judged_at, pushed_at, digested_at, moved_to, moved_at, moved_expunged, "
+    "reply_to"
 )
 _SUMMARY_COLUMNS = (
     "id, address, date, from_addr, from_name, subject, status, attachments, moved_to")
@@ -206,6 +214,7 @@ def _message(row: sqlite3.Row) -> dict:
         "date": row["date"], "date_original": row["date_original"],
         "from_addr": row["from_addr"], "from_name": row["from_name"],
         "to": json.loads(row["to_addrs"]), "cc": json.loads(row["cc_addrs"]),
+        "reply_to": json.loads(row["reply_to"]),
         "subject": row["subject"], "text": row["text"],
         "attachments": json.loads(row["attachments"]), "bulk": bool(row["bulk"]),
         "addressed": row["addressed"], "status": row["status"], "added_at": row["added_at"],
@@ -307,8 +316,13 @@ class Store:
             return
         db.execute("BEGIN IMMEDIATE")
         try:
-            if not check(version()):  # another command may have created it while we waited
-                for statement in _SCHEMA:
+            found = version()
+            if not check(found):  # another command may have created it while we waited
+                if found == 0:
+                    statements = _SCHEMA
+                else:
+                    statements = [s for n in range(found, SCHEMA_VERSION) for s in _MIGRATIONS[n]]
+                for statement in statements:
                     db.execute(statement)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             db.execute("COMMIT")
@@ -426,14 +440,15 @@ class Store:
             parsed.subject, parsed.text,
             _json([asdict(attachment) for attachment in parsed.attachments]),
             int(parsed.bulk), addressed, status, _iso(now or datetime.now(UTC)),
+            _json(parsed.reply_to),
         )
         values = tuple(_clean(v) if isinstance(v, str) else v for v in values)
         with self._transaction(write=True) as db:
             cursor = db.execute(
                 "INSERT INTO messages (address, uid, uidvalidity, message_id, in_reply_to, refs, "
                 "date, date_original, from_addr, from_name, to_addrs, cc_addrs, subject, text, "
-                "attachments, bulk, addressed, status, added_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "attachments, bulk, addressed, status, added_at, reply_to) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (address, uidvalidity, uid) DO NOTHING", values)
             if cursor.rowcount == 1:
                 if status == "digest":

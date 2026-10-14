@@ -21,9 +21,9 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import format_datetime, make_msgid
 
-from mailkit.config import Mailbox
+from mailkit.config import Mailbox, MailError
 from mailkit.message import parse
-from mailkit.server import LOGIN_STEPS, LoginError, MailServer, ServerError
+from mailkit.server import LOGIN_STEPS, LoginError, MailServer, SendRefused, ServerError
 
 # a message handed to send(): the bytes, the envelope sender and the envelope recipients
 SentMail = namedtuple("SentMail", "raw sender recipients")
@@ -54,7 +54,12 @@ class FakeServer(MailServer):
     - `caps`: the IMAP capabilities that matter to `move` (default {"MOVE", "UIDPLUS"}). With
       neither, `move` copies, leaves the originals in INBOX flagged `\\Deleted` and returns
       `{"expunged": False}`, as ImapSmtpServer does on such a server.
-    - `sent`: a SentMail for each send; `calls`: (method, arguments...) for each call.
+    - `raise_on`: an exception by method name ("send", "append", "folders"): only that method
+      raises it, after login.
+    - `refuse`: recipients `send` refuses, by address, with the server's reply; `send` returns
+      them, or raises SendRefused when it refuses every recipient (as smtplib does).
+    - `sent`: a SentMail for each send (its recipients are the ones taken); `calls`: (method,
+      arguments...) for each call.
     """
 
     def __init__(
@@ -70,6 +75,8 @@ class FakeServer(MailServer):
         password: str | None = None,
         error: Exception | None = None,
         caps: set[str] | frozenset[str] = frozenset({"MOVE", "UIDPLUS"}),
+        raise_on: dict[str, Exception] | None = None,
+        refuse: dict[str, str] | None = None,
     ):
         if fail_login is not None and fail_login not in LOGIN_STEPS:
             raise ValueError(f"fail_login must be one of {LOGIN_STEPS}, got {fail_login!r}")
@@ -85,6 +92,8 @@ class FakeServer(MailServer):
         self.password = password
         self.error = error
         self.caps = set(caps)
+        self.raise_on: dict[str, Exception] = dict(raise_on or {})
+        self.refuse: dict[str, str] = dict(refuse or {})
         self.sent: list[SentMail] = []
         self.calls: list[tuple] = []
         self.logins: list[tuple[str, str]] = []  # (address, password) of each connect
@@ -133,10 +142,12 @@ class FakeServer(MailServer):
                 "the SMTP server smtp.fake.example:465 refused the login: "
                 "535 Error: authentication failed")
 
-    def _ready(self, *, imap: bool = True, smtp: bool = False) -> None:
+    def _ready(self, *, imap: bool = True, smtp: bool = False, op: str | None = None) -> None:
         self._login(imap=imap, smtp=smtp)
         if self.error is not None:
             raise self.error
+        if op in self.raise_on:
+            raise self.raise_on[op]
 
     def _received(self, uid: int) -> date:
         value = self.received.get(uid)
@@ -207,7 +218,7 @@ class FakeServer(MailServer):
 
     def folders(self) -> list[tuple[str, tuple[str, ...]]]:
         self.calls.append(("folders",))
-        self._ready()
+        self._ready(op="folders")
         return [("INBOX", self.folder_flags.get("INBOX", ()))] + [
             (name, self.folder_flags.get(name, ())) for name in self.folders_]
 
@@ -238,7 +249,7 @@ class FakeServer(MailServer):
 
     def append(self, folder: str, raw: bytes) -> None:
         self.calls.append(("append", folder, raw))
-        self._ready()
+        self._ready(op="append")
         if folder == "INBOX":
             self.deliver(raw, flags=("\\Seen",))
         else:
@@ -247,9 +258,14 @@ class FakeServer(MailServer):
 
     def send(self, raw: bytes, sender: str, recipients: list[str]) -> dict[str, str]:
         self.calls.append(("send", raw, sender, tuple(recipients)))
-        self._ready(imap=False, smtp=True)
-        self.sent.append(SentMail(raw, sender, list(recipients)))
-        return {}
+        if not recipients:  # as ImapSmtpServer: before any connection
+            raise MailError("nothing to send: the message has no recipient")
+        self._ready(imap=False, smtp=True, op="send")
+        refused = {a: self.refuse[a] for a in recipients if a in self.refuse}
+        if len(refused) == len(recipients):
+            raise SendRefused(f"the SMTP server refused every recipient: {refused}")
+        self.sent.append(SentMail(raw, sender, [a for a in recipients if a not in refused]))
+        return refused
 
     def close(self) -> None:
         self.calls.append(("close",))

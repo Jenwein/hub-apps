@@ -100,6 +100,7 @@ class Parsed:
     bulk: bool = False  # list or bulk mail: a hint for triage, not a rule
     in_reply_to: str | None = None
     references: list[str] = field(default_factory=list)
+    reply_to: list[str] = field(default_factory=list)  # Reply-To addresses: where a reply goes
 
 
 # -- decoding --------------------------------------------------------------------------------
@@ -626,6 +627,7 @@ def _parse(raw: bytes) -> Parsed:
         bulk=_is_bulk(msg),
         in_reply_to=_first_id(_raw(msg, "in-reply-to")),
         references=_ID.findall(_raw(msg, "references")),
+        reply_to=[addr for _, addr in _addresses(msg, "reply-to")],
     )
 
 

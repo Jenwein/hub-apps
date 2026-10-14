@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 import pytest
 from mailkit.config import MailError
 from mailkit.message import Attachment, Parsed
-from mailkit.store import Store
+from mailkit.store import SCHEMA_VERSION, Store
 
 NOW = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
 A = "me@corp.example"
@@ -56,7 +56,7 @@ def test_open_creates_the_state_directory_and_schema(tmp_path):
     db = mail / ".state" / "mail.db"
     assert db.is_file()
     con = sqlite3.connect(db)
-    assert con.execute("PRAGMA user_version").fetchone() == (1,)
+    assert con.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,) == (2,)
     con.close()
 
 
@@ -80,10 +80,28 @@ def test_open_again_keeps_the_data(tmp_path):
 def test_open_refuses_an_index_made_by_a_newer_version(tmp_path):
     (tmp_path / ".state").mkdir()
     con = sqlite3.connect(tmp_path / ".state" / "mail.db")
-    con.execute("PRAGMA user_version = 2")
+    con.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
     con.close()
     with pytest.raises(MailError, match="newer"):
         Store.open(tmp_path)
+
+
+def test_an_index_of_version_1_gains_the_reply_to_column_and_keeps_its_mail(tmp_path):
+    with Store.open(tmp_path) as s:
+        mid = put(s, 1, subject="old mail")
+    con = sqlite3.connect(tmp_path / ".state" / "mail.db")
+    con.execute("ALTER TABLE messages DROP COLUMN reply_to")  # the messages table of version 1
+    con.execute("PRAGMA user_version = 1")
+    con.commit()
+    con.close()
+    with Store.open(tmp_path) as s:
+        old = s.message(mid)
+        assert (old["subject"], old["reply_to"]) == ("old mail", [])
+        new = put(s, 2, reply_to=["hr@corp.example"])
+        assert s.message(new)["reply_to"] == ["hr@corp.example"]
+    con = sqlite3.connect(tmp_path / ".state" / "mail.db")
+    assert con.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+    con.close()
 
 
 def test_open_reports_a_file_that_is_not_a_database(tmp_path):
@@ -199,15 +217,16 @@ def test_message_round_trips_every_field(store):
             references=["<r0@h>", "<prev@host>"],
             date="2026-10-14T09:30:00+08:00", from_addr="hr@corp.example", from_name="人事部",
             to=[A, "x@y.example"], cc=["c@y.example"], subject="面试邀请",
-            text="周三下午两点", attachments=attachments, bulk=True),
+            text="周三下午两点", attachments=attachments, bulk=True,
+            reply_to=["hr@corp.example"]),
         "important", "cc", now=NOW)
     assert store.message(mid) == {
         "id": mid, "address": A, "uid": 9, "uidvalidity": 5, "message_id": "<abc@host>",
         "in_reply_to": "<prev@host>", "references": ["<r0@h>", "<prev@host>"],
         "date": "2026-10-14T01:30:00+00:00", "date_original": "2026-10-14T09:30:00+08:00",
         "from_addr": "hr@corp.example", "from_name": "人事部",
-        "to": [A, "x@y.example"], "cc": ["c@y.example"], "subject": "面试邀请",
-        "text": "周三下午两点",
+        "to": [A, "x@y.example"], "cc": ["c@y.example"], "reply_to": ["hr@corp.example"],
+        "subject": "面试邀请", "text": "周三下午两点",
         "attachments": [{"index": 0, "filename": "简历-张三.pdf",
                          "content_type": "application/pdf", "size": 20_480}],
         "bulk": True, "addressed": "cc", "status": "important",

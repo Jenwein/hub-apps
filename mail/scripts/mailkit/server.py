@@ -19,8 +19,10 @@ Rules that hold for every method of ImapSmtpServer:
   before any folder is opened; NetEase answers "Unsafe Login" without it.
 - Failures are MailErrors. `LoginError` when the server cannot be reached or refuses the login
   (its `step` says which: "connect", "imap-login", "smtp-login"); `ServerError` for anything
-  that fails after login (a dropped connection, a timeout, a NO or BAD reply). Messages carry
-  the server's reply and never the password.
+  that fails after login (a dropped connection, a timeout, a NO or BAD reply). A send the SMTP
+  server refused is `SendRefused`, a ServerError that says nothing went out; after any other
+  failure of a send the message may have gone out. Messages carry the server's reply and never
+  the password.
 - Production is always SSL (IMAP 993, SMTP 465); `ssl=False` exists only for local test servers.
 """
 
@@ -71,6 +73,12 @@ class ServerError(MailError):
     the server answered NO or BAD. The message carries the server's reply."""
 
 
+class SendRefused(ServerError):
+    """The SMTP server answered a send with a refusal (of every recipient, of the sender, of
+    the message, or of the session): nothing was sent. Any other ServerError from `send` (a
+    dropped connection, a timeout) leaves it unknown whether the message went out."""
+
+
 class MailServer(Protocol):
     """The servers of one mailbox. Every UID is a UID in INBOX (the index holds INBOX mail);
     lists of UIDs come back in ascending order."""
@@ -116,7 +124,9 @@ class MailServer(Protocol):
     def send(self, raw: bytes, sender: str, recipients: list[str]) -> dict[str, str]:
         """Send `raw` as it is to `recipients` (the envelope; Bcc included) from `sender`.
         Returns the recipients the server refused, with its reply; {} when it took them all.
-        ServerError when it took none."""
+        SendRefused when the server refused the send (it took no recipient, or refused the
+        sender or the message): nothing went out. Another ServerError (the connection dropped
+        or timed out) means the message may have gone out."""
 
     def close(self) -> None:
         """Log out. Safe to call more than once."""
@@ -296,6 +306,9 @@ class ImapSmtpServer(MailServer):
 
     def _server_error(self, text: str) -> ServerError:
         return ServerError(self._scrub(text))
+
+    def _refused(self, text: str) -> SendRefused:
+        return SendRefused(self._scrub(text))
 
     # -- IMAP connection --
 
@@ -574,18 +587,22 @@ class ImapSmtpServer(MailServer):
         try:
             refused = client.sendmail(sender, recipients, raw, mail_options=options)
         except smtplib.SMTPRecipientsRefused as err:
-            raise self._server_error(
+            raise self._refused(
                 f"the SMTP server {self._smtp_at} refused every recipient: {_describe(err)}"
             ) from None
         except smtplib.SMTPSenderRefused as err:
-            raise self._server_error(
+            raise self._refused(
                 f"the SMTP server {self._smtp_at} refused the sender {sender}: {_describe(err)}"
             ) from None
-        except smtplib.SMTPDataError as err:
-            raise self._server_error(
+        except smtplib.SMTPDataError as err:  # a reply to DATA, or to the end of the message
+            raise self._refused(
                 f"the SMTP server {self._smtp_at} refused the message: {_describe(err)}"
             ) from None
-        except OSError as err:  # smtplib's own errors included
+        except (smtplib.SMTPHeloError, smtplib.SMTPNotSupportedError) as err:  # before MAIL
+            raise self._refused(
+                f"the SMTP server {self._smtp_at} refused to send: {_describe(err)}"
+            ) from None
+        except OSError as err:  # smtplib's own errors included: the outcome is unknown
             raise self._server_error(
                 f"sending through {self._smtp_at} failed: {_describe(err)}") from None
         finally:

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import accounts, background, config, poll
+from . import accounts, background, config, drafts, poll
 from . import actions as mail_actions
 from .config import MailError
 from .providers import PROVIDERS
@@ -399,6 +399,141 @@ def add_mail_commands(sub) -> None:
     a.set_defaults(func=run_attachment_get)
 
 
+def read_body(path: Path) -> str:
+    """The text of a mail from the file the agent wrote: UTF-8 (a byte order mark is dropped
+    by drafts)."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as err:
+        raise MailError(f"cannot read the body file {path}: {err.strerror or err}") from None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise MailError(f"the body file {path} is not UTF-8 text; write it as UTF-8") from None
+
+
+def run_draft_new(args: argparse.Namespace) -> None:
+    print_json(drafts.create(
+        args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
+        subject=args.subject, body=read_body(args.body_file), attach=args.attach))
+
+
+def run_draft_reply(args: argparse.Namespace) -> None:
+    print_json(drafts.create(
+        args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
+        subject=args.subject, body=read_body(args.body_file), attach=args.attach,
+        reply_to=args.id, reply_all=args.all))
+
+
+def run_draft_forward(args: argparse.Namespace) -> None:
+    print_json(drafts.create(
+        args.hub, args.mail_dir, mailbox=args.mailbox, to=args.to, cc=args.cc,
+        subject=args.subject, body=read_body(args.body_file), attach=args.attach,
+        forward_of=args.id))
+
+
+def run_draft_edit(args: argparse.Namespace) -> None:
+    print_json(drafts.edit(
+        args.mail_dir, args.draft_id, mailbox=args.mailbox, to=args.to,
+        cc=[] if args.no_cc else args.cc, subject=args.subject,
+        body=None if args.body_file is None else read_body(args.body_file),
+        attach=args.attach, drop=args.drop))
+
+
+def run_draft_show(args: argparse.Namespace) -> None:
+    print(drafts.show(args.mail_dir, args.draft_id))
+
+
+def run_send(args: argparse.Namespace) -> int:
+    return print_result(drafts.send(args.hub, args.mail_dir, args.draft_id))
+
+
+def add_draft_options(parser, *, to_required: bool = False, extra: bool = False) -> None:
+    """--from, --to, --cc, --subject, --body-file and --attach of draft new, reply and forward.
+    `extra`: --to and --cc add to the recipients a reply already has."""
+    parser.add_argument("--from", dest="mailbox", metavar="NAME",
+                        help="the mailbox to send from, by its short name")
+    added = " (added to the reply's own)" if extra else ""
+    parser.add_argument("--to", action="append", required=to_required,
+                        default=None if to_required else [], metavar="ADDR",
+                        help=f"a recipient, one address each time; repeat for more{added}")
+    parser.add_argument("--cc", action="append", default=[], metavar="ADDR",
+                        help=f"a Cc recipient; repeat for more{added}")
+    parser.add_argument("--body-file", type=Path, required=True, metavar="FILE",
+                        help="a UTF-8 file with the text of the mail, written by the agent")
+    parser.add_argument("--attach", action="append", type=Path, default=[], metavar="PATH",
+                        help="a file to attach; repeat for more")
+
+
+def add_draft_commands(sub) -> None:
+    """`mk draft ...` writes a draft and shows it; `mk send` sends one. Outside `bg` on
+    purpose: the restricted tasks can neither write nor send mail."""
+    p = sub.add_parser(
+        "draft", help="write mail as a draft: a new mail, a reply or a forward; show it to "
+        "the user in full (draft show), and send it with `send` only after they say so")
+    actions = p.add_subparsers(dest="action", metavar="<action>", required=True)
+
+    a = actions.add_parser(
+        "new", help="a new mail. Example: mk draft new --from 工作 --to boss@corp.example "
+        "--subject 周报 --body-file mail/.state/body.txt --attach report.pdf")
+    add_draft_options(a, to_required=True)
+    a.add_argument("--subject", required=True, help="the subject, one line")
+    a.set_defaults(func=run_draft_new)
+
+    a = actions.add_parser(
+        "reply", help="a reply to a message, from the mailbox that received it, to its sender "
+        "(or Reply-To); with --all also to its To and Cc; never to the user's own addresses. "
+        "Example: mk draft reply 12 --body-file mail/.state/body.txt")
+    a.add_argument("id", type=non_negative_int, help="the id of the message to answer")
+    add_draft_options(a, extra=True)
+    a.add_argument("--all", action="store_true", help="reply to all: the To and Cc as well")
+    a.add_argument("--subject", help='instead of "Re: <its subject>"')
+    a.set_defaults(func=run_draft_reply)
+
+    a = actions.add_parser(
+        "forward", help="a forward of a message with its attachments, its text quoted below "
+        "yours. Example: mk draft forward 12 --to hr@corp.example --body-file "
+        "mail/.state/body.txt")
+    a.add_argument("id", type=non_negative_int, help="the id of the message to forward")
+    add_draft_options(a, to_required=True)
+    a.add_argument("--subject", help='instead of "Fwd: <its subject>"')
+    a.set_defaults(func=run_draft_forward)
+
+    a = actions.add_parser(
+        "edit", help="change a draft; show it again before sending. Example: mk draft edit "
+        "k3j9x2ab --subject 改期 --drop 2")
+    a.add_argument("draft_id", metavar="DRAFT_ID")
+    a.add_argument("--from", dest="mailbox", metavar="NAME", help="send from this mailbox")
+    a.add_argument("--to", action="append", metavar="ADDR",
+                   help="the new To list, one address each time (replaces the old one)")
+    cc = a.add_mutually_exclusive_group()
+    cc.add_argument("--cc", action="append", metavar="ADDR",
+                    help="the new Cc list, one address each time (replaces the old one)")
+    cc.add_argument("--no-cc", action="store_true", help="no Cc at all")
+    a.add_argument("--subject", help="the new subject")
+    a.add_argument("--body-file", type=Path, metavar="FILE", help="the new text, a UTF-8 file")
+    a.add_argument("--attach", action="append", type=Path, metavar="PATH",
+                   help="a file to add; repeat for more")
+    a.add_argument("--drop", action="append", type=positive_int, metavar="N",
+                   help="remove attachment N, as draft show numbers them; repeat for more")
+    a.set_defaults(func=run_draft_edit)
+
+    a = actions.add_parser(
+        "show", help="print the whole draft as text (not JSON) to show the user: mailbox, "
+        "recipients, subject, attachments with sizes, a warning when it is too large, the "
+        "text. Only a draft shown and not changed since can be sent. Example: "
+        "mk draft show k3j9x2ab")
+    a.add_argument("draft_id", metavar="DRAFT_ID")
+    a.set_defaults(func=run_draft_show)
+
+    p = sub.add_parser(
+        "send", help="send a draft, only after the user saw all of it (draft show) and said "
+        "to send; a draft changed since it was shown is refused. A copy goes to Sent and the "
+        "draft is deleted. Example: mk send k3j9x2ab")
+    p.add_argument("draft_id", metavar="DRAFT_ID")
+    p.set_defaults(func=run_send)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog="mk", description="Tools for the mail app.")
     parser.add_argument(
@@ -421,6 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_account_commands(sub)
     add_poll_command(sub)
     add_mail_commands(sub)
+    add_draft_commands(sub)
     add_bg_commands(sub)
     return parser
 

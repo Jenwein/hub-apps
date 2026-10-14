@@ -272,6 +272,13 @@ def test_threading_ids_are_taken_from_the_brackets():
     assert p.message_id == "<m@x>"
 
 
+def test_reply_to_holds_every_address_of_the_header():
+    p = parse(message(b"From: a@x", b"Reply-To: =?utf-8?B?5Lq65LqL?= <hr@x>, list@y",
+                      body=b"hi"))
+    assert p.reply_to == ["hr@x", "list@y"]
+    assert parse(message(b"From: a@x", body=b"hi")).reply_to == []
+
+
 def test_date_is_iso_with_offset():
     assert parse(fixture("gbk-plain.eml")).date == "2026-10-14T09:30:00+08:00"
     assert parse(fixture("list-mail.eml")).date == "2026-10-14T14:00:00+00:00"

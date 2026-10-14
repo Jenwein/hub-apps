@@ -31,7 +31,7 @@ from aiosmtpd.smtp import AuthResult
 from mailfakes import FakeServer, make_raw
 from mailkit.config import Mailbox, MailError
 from mailkit.message import parse
-from mailkit.server import LoginError, ServerError, connect
+from mailkit.server import LoginError, SendRefused, ServerError, connect
 
 TODAY = date(2026, 10, 14)
 
@@ -710,7 +710,8 @@ def test_fake_move_of_nothing_and_to_a_missing_folder():
 
 
 class Catcher:
-    """Takes every message; refuses recipients at refused.example."""
+    """Takes every message; refuses recipients at refused.example, and the message itself
+    when one of its recipients is at spam.example."""
 
     def __init__(self):
         self.envelopes = []
@@ -722,6 +723,8 @@ class Catcher:
         return "250 OK"
 
     async def handle_DATA(self, server, session, envelope):
+        if any(address.endswith("@spam.example") for address in envelope.rcpt_tos):
+            return "554 5.7.1 message refused as spam"
         self.envelopes.append(envelope)
         return "250 OK queued"
 
@@ -810,6 +813,38 @@ def test_send_failures(wire, smtpd):
         srv.send(raw, "me@163.com", ["a@refused.example", "b@refused.example"])
     refused = srv.send(raw, "me@163.com", ["a@refused.example", "ok@corp.example"])
     assert refused == {"a@refused.example": "550 5.1.1 no such user"}
+    srv.close()
+
+
+def test_a_send_the_server_refused_is_known_not_to_have_gone_out(wire, smtpd):
+    """SendRefused: the server said no (to every recipient, the sender or the message), so
+    nothing was sent and sending again is safe."""
+    w = wire()
+    controller, catcher = smtpd()
+    srv = connect(full_mailbox(w, controller.port), "pw", ssl=False)
+    raw = b"Subject: x\r\n\r\nx\r\n"
+    with pytest.raises(SendRefused, match="refused every recipient"):
+        srv.send(raw, "me@163.com", ["a@refused.example"])
+    with pytest.raises(SendRefused, match="refused the message.*554"):
+        srv.send(raw, "me@163.com", ["boss@spam.example"])
+    assert catcher.envelopes == []
+    srv.close()
+
+
+def test_a_connection_lost_while_sending_may_have_sent_the_mail(wire, smtpd, monkeypatch):
+    """A dropped connection is a ServerError but not SendRefused: the message may have reached
+    the server before the line went down."""
+    w = wire()
+    controller, _ = smtpd()
+
+    def dropped(*args, **kwargs):
+        raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(smtplib.SMTP, "sendmail", dropped)
+    srv = connect(full_mailbox(w, controller.port), "pw", ssl=False)
+    with pytest.raises(ServerError, match="unexpectedly closed") as caught:
+        srv.send(b"Subject: x\r\n\r\nx\r\n", "me@163.com", ["boss@corp.example"])
+    assert not isinstance(caught.value, SendRefused)
     srv.close()
 
 
