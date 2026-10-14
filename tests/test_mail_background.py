@@ -278,6 +278,7 @@ def test_read_returns_the_whole_message(hub_dir):
         {"index": 0, "filename": "报告.pdf", "content_type": "application/pdf", "size": 12}]
     for key in ("date", "addressed", "bulk", "references", "added_at"):
         assert key in out
+    assert (out["moved_to"], out["moved_at"], out["moved_expunged"]) == (None, None, None)
     json.dumps(out, ensure_ascii=False)
 
 
@@ -329,8 +330,9 @@ def test_search_local_shape_and_filters(hub_dir):
     assert subjects(out) == ["Receipt", "Your invoice"]  # newest first
     item = out["items"][0]
     assert set(item) == {"id", "mailbox", "from", "from_name", "subject", "date", "status",
-                         "attachments"}
+                         "attachments", "moved_to"}
     assert (item["mailbox"], item["from"], item["status"]) == ("QQ", "shop@store.example", "old")
+    assert item["moved_to"] is None  # still in INBOX
 
     def found(text="", **options):
         return subjects(background.search(hub_dir, mail(hub_dir), text, **options))
@@ -595,7 +597,7 @@ def test_recent_pushed_newest_first_default_five(hub_dir):
     assert (out["total"], out["limit"]) == (8, 5)
     item = out["items"][0]
     assert set(item) == {"id", "mailbox", "from", "from_name", "subject", "date", "status",
-                         "attachments", "pushed_at"}
+                         "attachments", "moved_to", "pushed_at"}
     assert (item["mailbox"], item["status"], item["pushed_at"]) == (
         "工作", "important", "2026-10-14T04:07:00+00:00")
     assert len(background.recent_pushed(mail(hub_dir), limit=2)["items"]) == 2
@@ -1082,8 +1084,8 @@ def test_cli_bg_group_is_exactly_the_read_only_commands(hub_dir):
     bg = top.choices["bg"]
     actions = next(a for a in bg._actions if a.dest == "action")
     assert sorted(actions.choices) == [
-        "digest-done", "digest-items", "judge", "pending", "poll", "problems", "read",
-        "recent-pushed", "search", "status"]
+        "attachment", "digest-done", "digest-items", "judge", "pending", "poll", "problems",
+        "read", "recent-pushed", "search", "status"]
     for name, sub in actions.choices.items():
         options = {o for a in sub._actions for o in a.option_strings}
         assert "--wake" not in options, name

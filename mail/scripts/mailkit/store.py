@@ -4,8 +4,10 @@ The index holds what `mk` needs between runs: per mailbox where the last poll st
 message that was fetched (envelope and plain text, enough to search and to judge it), the
 verdicts and pushes, the times of the polls, the problems of the mailboxes and when `triage` was
 woken to tell them, a UID the server left out of a fetch, and the one batch of pending mail the
-background `triage` task is woken for. Nothing in it is the only copy of a mail: the server has
-the mail, and a new machine rebuilds the index by polling.
+background `triage` task is woken for. A message the user archived or deleted stays in the index
+with the folder it was moved to (`moved_to`), so that search can say where it went and the same
+message is never moved twice. Nothing in it is the only copy of a mail: the server has the mail,
+and a new machine rebuilds the index by polling.
 
 Searching is SQL `LIKE` on the envelope and the text, no full-text index. Chinese has no word
 breaks and a personal mailbox is small, so a scan answers in well under a second.
@@ -83,6 +85,9 @@ _SCHEMA = (
         pushed_at TEXT,
         digested_at TEXT,
         digest_seq INTEGER,
+        moved_to TEXT,
+        moved_at TEXT,
+        moved_expunged INTEGER CHECK (moved_expunged IN (0, 1)),
         UNIQUE (address, uidvalidity, uid)
     )""",
     "CREATE INDEX IF NOT EXISTS messages_status ON messages (status, address, id)",
@@ -118,9 +123,14 @@ _SCHEMA = (
 _MESSAGE_COLUMNS = (
     "id, address, uid, uidvalidity, message_id, in_reply_to, refs, date, date_original, "
     "from_addr, from_name, to_addrs, cc_addrs, subject, text, attachments, bulk, addressed, "
-    "status, added_at, judged_at, pushed_at, digested_at"
+    "status, added_at, judged_at, pushed_at, digested_at, moved_to, moved_at, moved_expunged"
 )
-_SUMMARY_COLUMNS = "id, address, date, from_addr, from_name, subject, status, attachments"
+_SUMMARY_COLUMNS = (
+    "id, address, date, from_addr, from_name, subject, status, attachments, moved_to")
+# what an action on a message needs: where it is on the server, what it is, where it went
+_LOCATE_COLUMNS = (
+    "id, address, uid, uidvalidity, date, added_at, from_addr, from_name, subject, status, "
+    "attachments, moved_to, moved_at, moved_expunged")
 _PROBLEM_COLUMNS = (
     "id, address, kind, message, first_seen, last_seen, reported_at, resolved_at"
 )
@@ -199,7 +209,23 @@ def _message(row: sqlite3.Row) -> dict:
         "attachments": json.loads(row["attachments"]), "bulk": bool(row["bulk"]),
         "addressed": row["addressed"], "status": row["status"], "added_at": row["added_at"],
         "judged_at": row["judged_at"], "pushed_at": row["pushed_at"],
-        "digested_at": row["digested_at"],
+        "digested_at": row["digested_at"], "moved_to": row["moved_to"],
+        "moved_at": row["moved_at"], "moved_expunged": _flag(row["moved_expunged"]),
+    }
+
+
+def _flag(value: int | None) -> bool | None:
+    return None if value is None else bool(value)
+
+
+def _located(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"], "address": row["address"], "uid": row["uid"],
+        "uidvalidity": row["uidvalidity"], "date": row["date"], "added_at": row["added_at"],
+        "from_addr": row["from_addr"], "from_name": row["from_name"],
+        "subject": row["subject"], "status": row["status"],
+        "attachments": json.loads(row["attachments"]), "moved_to": row["moved_to"],
+        "moved_at": row["moved_at"], "moved_expunged": _flag(row["moved_expunged"]),
     }
 
 
@@ -208,7 +234,7 @@ def _summary(row: sqlite3.Row) -> dict:
         "id": row["id"], "address": row["address"], "date": row["date"],
         "from_addr": row["from_addr"], "from_name": row["from_name"],
         "subject": row["subject"], "status": row["status"],
-        "attachments": json.loads(row["attachments"]),
+        "attachments": json.loads(row["attachments"]), "moved_to": row["moved_to"],
     }
 
 
@@ -436,6 +462,37 @@ class Store:
         if row is None:
             raise MailError(f"no message with id {id}")
         return _message(row)
+
+    def locate(self, ids: list[int]) -> dict[int, dict]:
+        """What an action needs to know about the messages `ids`, by id: `{"id", "address",
+        "uid", "uidvalidity", "date", "added_at", "from_addr", "from_name", "subject",
+        "status", "attachments", "moved_to", "moved_at", "moved_expunged"}`. An unknown id is
+        left out. `uid` and `uidvalidity` say where the message was in INBOX when it was
+        indexed; `moved_to` is None while it is still there."""
+        found: dict[int, dict] = {}
+        with self._transaction() as db:
+            for mid in dict.fromkeys(ids):
+                row = db.execute(
+                    f"SELECT {_LOCATE_COLUMNS} FROM messages WHERE id = ?", (mid,)).fetchone()
+                if row is not None:
+                    found[mid] = _located(row)
+        return found
+
+    def mark_moved(self, ids: list[int], folder: str, expunged: bool, now: datetime) -> int:
+        """The messages `ids` were moved out of INBOX into `folder` (archive, or Trash).
+        `expunged` is False when the server could only copy them and flag the originals
+        deleted, so they are still in INBOX until a mail client expunges them. A message that
+        is already recorded as moved keeps its first record (it is not in INBOX to move
+        again), and an unknown id is ignored. Returns how many messages were recorded."""
+        when = _iso(now)
+        folder = _clean(folder)
+        with self._transaction(write=True) as db:
+            return sum(
+                db.execute(
+                    "UPDATE messages SET moved_to = ?, moved_at = ?, moved_expunged = ? "
+                    "WHERE id = ? AND moved_to IS NULL", (folder, when, int(expunged), mid)
+                ).rowcount
+                for mid in dict.fromkeys(ids))
 
     def _paged(
         self, db: sqlite3.Connection, columns: str, where: str, params: list, order: str,
@@ -739,8 +796,9 @@ class Store:
         with self._transaction() as db:
             rows = db.execute(
                 "SELECT m.id, m.address, m.date, m.from_addr, m.from_name, m.subject, m.status, "
-                "m.attachments, p.pushed_at FROM pushes p JOIN messages m ON m.id = p.message "
-                "ORDER BY p.id DESC LIMIT ?", (limit,)).fetchall()
+                "m.attachments, m.moved_to, p.pushed_at FROM pushes p "
+                "JOIN messages m ON m.id = p.message ORDER BY p.id DESC LIMIT ?",
+                (limit,)).fetchall()
         return [{**_summary(row), "pushed_at": row["pushed_at"]} for row in rows]
 
     def push_count(self, since: datetime | str | None = None) -> int:

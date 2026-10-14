@@ -160,11 +160,13 @@ def _item(message: dict, settings: Settings | None, excerpt: int) -> dict:
 
 
 def _summary(row: dict, settings: Settings | None) -> dict:
-    """A message as `search` and `recent-pushed` list it."""
+    """A message as `search` and `recent-pushed` list it. `moved_to` is the folder an archived
+    or deleted message was moved to (None: it is in INBOX)."""
     return {
         "id": row["id"], "mailbox": _name(settings, row["address"]), "from": row["from_addr"],
         "from_name": row["from_name"], "subject": row["subject"], "date": row["date"],
         "status": row["status"], "attachments": _attachments(row["attachments"]),
+        "moved_to": row["moved_to"],
     }
 
 
@@ -181,6 +183,8 @@ def _full(message: dict, settings: Settings | None) -> dict:
         "uid": message["uid"], "uidvalidity": message["uidvalidity"],
         "added_at": message["added_at"], "judged_at": message["judged_at"],
         "pushed_at": message["pushed_at"], "digested_at": message["digested_at"],
+        "moved_to": message["moved_to"], "moved_at": message["moved_at"],
+        "moved_expunged": message["moved_expunged"],
     }
 
 

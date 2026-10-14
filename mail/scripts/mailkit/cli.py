@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import accounts, background, config, poll
+from . import actions as mail_actions
 from .config import MailError
 from .providers import PROVIDERS
 
@@ -50,7 +51,8 @@ def password_from_stdin() -> str:
 
 
 def print_result(result: dict) -> int:
-    """Print a result with an `ok` key; a failed one exits with 1."""
+    """Print a result with an `ok` key; a failed one exits with 1. (A command that changes mail
+    is `ok` only when every id was done; the JSON says which were not, and why.)"""
     print_json(result)
     return 0 if result.get("ok", True) else 1
 
@@ -213,11 +215,19 @@ def run_bg_status(args: argparse.Namespace) -> None:
     print_json(background.status(args.mail_dir))
 
 
+def run_attachment_get(args: argparse.Namespace) -> None:
+    """`attachment get` and `bg attachment`: the same function, so what the restricted tasks may
+    run is exactly what the agent runs."""
+    path = mail_actions.download_attachment(args.hub, args.mail_dir, args.id, args.index)
+    print_json({"path": path.as_posix()})
+
+
 def add_bg_commands(sub) -> None:
     """`mk bg ...`: the background commands. They never change anything on a mail server
-    (no send, flag, move or delete), never print a password, and take only ids, page numbers,
-    `ID=DECISION` pairs and short words: the restricted triage and digest tasks may run only
-    these, and the command line of a restricted task cannot hold shell syntax."""
+    (no send, flag, move or delete; `attachment` only reads, with BODY.PEEK, and writes a file
+    on this machine), never print a password, and take only ids, page numbers, `ID=DECISION`
+    pairs and short words: the restricted triage and digest tasks may run only these, and the
+    command line of a restricted task cannot hold shell syntax."""
     p = sub.add_parser(
         "bg", help="background commands: they only read mail and the local index; the "
         "restricted triage and digest tasks may run only these")
@@ -297,6 +307,97 @@ def add_bg_commands(sub) -> None:
         "of each mailbox")
     a.set_defaults(func=run_bg_status)
 
+    a = actions.add_parser(
+        "attachment", help="save one attachment of a message on this machine and print its "
+        "path; the message stays unread. Same as `attachment get`")
+    add_attachment_arguments(a)
+    a.set_defaults(func=run_attachment_get)
+
+
+def add_attachment_arguments(parser) -> None:
+    parser.add_argument("id", type=non_negative_int, help="the id of the message")
+    parser.add_argument("index", type=non_negative_int,
+                        help="which attachment, counting from 0 (the `index` in the message's "
+                        "attachment list)")
+
+
+def run_flag(args: argparse.Namespace) -> int:
+    return print_result(mail_actions.flag(args.hub, args.mail_dir, args.ids, args.seen))
+
+
+def run_archive(args: argparse.Namespace) -> int:
+    return print_result(
+        mail_actions.archive(args.hub, args.mail_dir, args.ids, create=args.create))
+
+
+def run_delete_list(args: argparse.Namespace) -> None:
+    if args.show is not None:
+        if args.ids:
+            raise MailError("give either message ids or --show LIST_ID, not both")
+        print_json(mail_actions.show_delete_list(args.mail_dir, args.show, page=args.page or 1))
+        return
+    if args.page is not None:
+        raise MailError("--page goes with --show LIST_ID")
+    if not args.ids:
+        raise MailError("give message ids to list, or --show LIST_ID to see a list again")
+    print_json(mail_actions.delete_list(args.mail_dir, args.ids))
+
+
+def run_delete(args: argparse.Namespace) -> int:
+    return print_result(mail_actions.delete(args.hub, args.mail_dir, args.list_id))
+
+
+def add_mail_commands(sub) -> None:
+    """The commands that change mail on a server, or save an attachment, when the user asks.
+    They are outside `bg` on purpose: the restricted tasks cannot run them."""
+    p = sub.add_parser(
+        "flag", help="mark messages read (--seen) or unread (--unseen) on the server; no "
+        "confirmation needed. Example: mk flag 12 13 --seen")
+    p.add_argument("ids", nargs="+", type=non_negative_int, metavar="ID",
+                   help="message ids, as `bg search` lists them")
+    mark = p.add_mutually_exclusive_group(required=True)
+    mark.add_argument("--seen", dest="seen", action="store_const", const=True,
+                      help="mark them read")
+    mark.add_argument("--unseen", dest="seen", action="store_const", const=False,
+                      help="mark them unread")
+    p.set_defaults(func=run_flag)
+
+    p = sub.add_parser(
+        "archive", help="move messages out of INBOX to the archive folder (Gmail: All Mail); "
+        "no confirmation needed. Example: mk archive 12 13")
+    p.add_argument("ids", nargs="+", type=non_negative_int, metavar="ID",
+                   help="message ids, as `bg search` lists them")
+    p.add_argument("--create", action="store_true",
+                   help="when a mailbox has no archive folder: create one named Archive (or use "
+                   "a folder of that name) after the user agreed")
+    p.set_defaults(func=run_archive)
+
+    p = sub.add_parser(
+        "delete-list", help="step 1 of deleting: save the exact set of messages to delete, "
+        "print the first 10 and the total, and show them to the user; nothing is deleted. "
+        "Example: mk delete-list 12 13 14. To page through a list again: "
+        "mk delete-list --show LIST_ID --page 2")
+    p.add_argument("ids", nargs="*", type=non_negative_int, metavar="ID",
+                   help="message ids, as `bg search` lists them")
+    p.add_argument("--show", metavar="LIST_ID", help="show a saved list instead of making one")
+    p.add_argument("--page", type=positive_int, default=None, help="with --show: which page")
+    p.set_defaults(func=run_delete_list)
+
+    p = sub.add_parser(
+        "delete", help="step 2 of deleting, only after the user said to delete what "
+        "delete-list showed: move exactly those messages to Trash (nothing is erased) and "
+        "forget the list. Example: mk delete k3j9x2ab")
+    p.add_argument("list_id", metavar="LIST_ID", help="the list_id that delete-list printed")
+    p.set_defaults(func=run_delete)
+
+    p = sub.add_parser("attachment", help="save an attachment of a message on this machine")
+    attachment_actions = p.add_subparsers(dest="action", metavar="<action>", required=True)
+    a = attachment_actions.add_parser(
+        "get", help="save one attachment and print its path (mail/attachments/<address>/"
+        "<YYYY-MM>/<id>-<name>); the message stays unread. Example: mk attachment get 12 0")
+    add_attachment_arguments(a)
+    a.set_defaults(func=run_attachment_get)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog="mk", description="Tools for the mail app.")
@@ -319,6 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(func=run_config_check)
     add_account_commands(sub)
     add_poll_command(sub)
+    add_mail_commands(sub)
     add_bg_commands(sub)
     return parser
 

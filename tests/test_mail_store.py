@@ -212,6 +212,7 @@ def test_message_round_trips_every_field(store):
                          "content_type": "application/pdf", "size": 20_480}],
         "bulk": True, "addressed": "cc", "status": "important",
         "added_at": iso(NOW), "judged_at": None, "pushed_at": None, "digested_at": None,
+        "moved_to": None, "moved_at": None, "moved_expunged": None,
     }
 
 
@@ -682,7 +683,7 @@ def test_search_items_are_summaries_without_the_body(store):
     assert item == {
         "id": mid, "address": A, "date": "2026-10-14T01:30:00+00:00",
         "from_addr": "boss@corp.example", "from_name": "Boss", "subject": "offer",
-        "status": "pending",
+        "status": "pending", "moved_to": None,
         "attachments": [{"index": 0, "filename": "offer.pdf", "content_type": "application/pdf",
                          "size": 9}],
     }
@@ -824,6 +825,54 @@ def test_digest_cutoff_survives_forget_and_earlier_digests(store):
     assert listing["total"] == 3
     again = store.digest_items(1, 10)
     assert again["up_to"] > listing["up_to"] and [m["id"] for m in again["items"]] == [new]
+
+
+# -- moves -----------------------------------------------------------------------------------
+
+
+def test_locate_gives_what_an_action_needs_and_leaves_out_unknown_ids(store):
+    a = put(store, 4, uidvalidity=9, subject="offer",
+            attachments=[Attachment(0, "offer.pdf", "application/pdf", 9)])
+    b = put(store, 5, address=B)
+    found = store.locate([b, a, 999, a])
+    assert sorted(found) == sorted([a, b])
+    assert found[a] == {
+        "id": a, "address": A, "uid": 4, "uidvalidity": 9, "date": "2026-10-14T01:30:00+00:00",
+        "added_at": iso(NOW), "from_addr": "boss@corp.example", "from_name": "Boss",
+        "subject": "offer", "status": "pending",
+        "attachments": [{"index": 0, "filename": "offer.pdf", "content_type": "application/pdf",
+                         "size": 9}],
+        "moved_to": None, "moved_at": None, "moved_expunged": None,
+    }
+    assert found[b]["address"] == B and store.locate([]) == {}
+    json.dumps(found, ensure_ascii=False)
+
+
+def test_mark_moved_records_where_a_message_went_and_only_once(store):
+    a, b, c = put(store, 1), put(store, 2), put(store, 3)
+    assert store.mark_moved([a, b, 999], "归档", True, t(1)) == 2
+    for mid in (a, b):
+        moved = store.message(mid)
+        assert (moved["moved_to"], moved["moved_at"], moved["moved_expunged"]) == (
+            "归档", iso(t(1)), True)
+    assert store.message(c)["moved_to"] is None
+    # a message that is gone from INBOX is not recorded as moved again, to the same folder or
+    # to another one
+    assert store.mark_moved([a], "Trash", False, t(2)) == 0
+    assert store.message(a)["moved_to"] == "归档"
+    assert store.mark_moved([c], "Trash", False, t(3)) == 1
+    again = store.message(c)
+    assert (again["moved_to"], again["moved_expunged"]) == ("Trash", False)
+    assert store.locate([c])[c]["moved_to"] == "Trash"
+
+
+def test_search_says_where_a_moved_message_went(store):
+    a, b = put(store, 1, subject="offer"), put(store, 2, subject="offer too")
+    store.mark_moved([a], "Archive", True, t(1))
+    where = {m["id"]: m["moved_to"] for m in store.search("offer")["items"]}
+    assert where == {a: "Archive", b: None}
+    store.judge({a: "important"}, t(2))
+    assert store.pushes()[0]["moved_to"] == "Archive"
 
 
 # -- shape -----------------------------------------------------------------------------------
