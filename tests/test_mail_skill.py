@@ -167,6 +167,41 @@ def test_triage_body_covers_the_whole_run():
     assert body.index("bg pending") < body.index("bg judge") < body.index("--mark-reported")
 
 
+def test_restricted_runs_push_only_what_their_own_judge_changed():
+    """Triage and the digest can judge the same mail at once (the 08:00 poll wakes triage while
+    the digest judges): each names as important only the ids its own `bg judge` changed."""
+    for name, body in restricted_bodies().items():
+        text = " ".join(body.split())
+        for needed in ("`important` list of your own `bg judge`", "already_judged",
+                       "another run"):
+            assert needed in text, (name, needed)
+
+
+def test_restricted_runs_use_the_bash_tool_and_retry_a_denied_step_once():
+    for name, body in restricted_bodies().items():
+        text = " ".join(body.split())
+        for needed in ("with the Bash tool", "PowerShell", "once more, exactly as written"):
+            assert needed in text, (name, needed)
+
+
+def section(text: str, heading: str) -> str:
+    """The flattened text of the section that starts with `heading`, up to the next one."""
+    after = text.split(heading, 1)[1]
+    return " ".join(re.split(r"\n#+ ", after, maxsplit=1)[0].split())
+
+
+PUSHES_FAIL = ("wake_error", "unacknowledged_wakes", "oldest_pending_minutes",
+               "pushes are not working since")
+
+
+def test_the_status_checks_say_when_pushes_do_not_work():
+    skill = section(read(SKILL / "SKILL.md"), "## At the start of every mail conversation")
+    digest = section(restricted_bodies()["digest"], "## 1. Is the background check running?")
+    for where, text in (("SKILL.md", skill), ("digest", digest)):
+        for needed in (*PUSHES_FAIL, "3 or more", "above 60", "`stale` is false"):
+            assert needed in text, (where, needed)
+
+
 def test_digest_reads_the_status_before_it_polls():
     body = restricted_bodies()["digest"]
     order = ["bg status", "bg poll", "bg pending", "bg judge", "bg digest-items", "bg digest-done"]
@@ -350,6 +385,44 @@ def test_topics_name_their_flows():
         "Note:", ".cc-connect/attachments/", "1.5.1", "may have been sent", "--all"))
 
 
+def test_mailboxes_asks_the_user_when_the_provider_is_unknown():
+    text = section(read(SKILL / "mailboxes.md"), "## Add a mailbox")
+    for needed in ("`status`", "`unsupported`", "`unknown`", "ask the user", "--provider",
+                   "login check"):
+        assert needed in text, needed
+    # only an unsupported service stops the adding
+    unsupported = text.split("`unsupported`", 1)[1].split("`unknown`", 1)[0]
+    assert "stop" in unsupported
+    unknown = text.split("`unknown`", 1)[1].split("2. **", 1)[0]
+    assert "stop" not in unknown.split("none of them", 1)[0]
+
+
+def test_mailboxes_says_remove_waits_for_a_running_check():
+    text = section(read(SKILL / "mailboxes.md"), "## Remove a mailbox")
+    assert "a minute" in text and "try again" in text
+
+
+def test_reading_says_done_is_a_count_and_the_ids_are_in_ids():
+    text = flat(SKILL / "reading.md")
+    assert "`done` (how many were done)" in text and "`ids` (the ids done)" in text
+
+
+def test_writing_gives_send_a_long_timeout_and_treats_a_timeout_as_maybe_sent():
+    text = section(read(SKILL / "writing.md"), "## 6. Send")
+    for needed in ("timeout", "10 minutes", "600000", "may have been sent", "Sent"):
+        assert needed in text, needed
+
+
+def test_a_reset_digest_is_converted_again_for_the_user():
+    rules = flat(SKILL / "rules.md")
+    assert "cc-hub cron reset mail/digest" in rules
+    reset = rules.split("cc-hub cron reset mail/poll`", 1)[1].split("|", 3)[1]
+    assert "server" in reset and "convert" in reset, reset
+    readme = read(ROOT / "README.md").split("\n## mail\n", 1)[1].split("\n## ", 1)[0]
+    row = next(line for line in readme.splitlines() if line.startswith("| `cc-hub cron reset"))
+    assert "server" in row and "time zone" in row, row
+
+
 # -- setup, removal, readme ----------------------------------------------------------------
 
 
@@ -360,6 +433,10 @@ def test_setup_names_the_steps():
                    "cc-connect cron list", "Script tasks and PATH", "mailboxes.md",
                    "date +%Z", "daylight", "setup-state mail waiting"):
         assert needed in text, needed
+    # a long foreground sleep is refused or wastes the run: look at the status again instead
+    assert re.search(r"\bsleep\b", text) is None
+    first_check = section(read(APP / "SETUP.md"), "## 5. The first check")
+    assert "a few times" in first_check
 
 
 def test_remove_names_every_place_the_app_keeps_data():

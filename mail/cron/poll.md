@@ -26,4 +26,6 @@ It runs every 5 minutes unless the user picks another time
 run, so this frequency is also the most often the agent can be woken for
 mail. It needs `uv`, `cc-hub` and `cc-connect` on the PATH of the cc-connect
 daemon. What it prints goes nowhere; `uv run apps/mail/scripts/mk.py bg status`
-shows when it last ran.
+shows when it last ran and whether its wakes reach `mail/triage`. When triage
+is woken six times in a row without judging the mail, it is woken once an hour
+instead, until mail is judged again.

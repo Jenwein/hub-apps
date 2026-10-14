@@ -10,13 +10,20 @@ more), with each one's `last_ok` (its last good check) and `paused`.
 
 1. **Which provider.** The user gives the address. Run
    `uv run apps/mail/scripts/mk.py account detect me@example.com`. It looks at
-   the domain, and for a company's own domain at its MX records:
-   - `supported: true`: `provider` (the key), `name` and `guide` (the provider
+   the domain, and for a company's own domain at its MX records. Its `status`:
+   - `supported`: `provider` (the key), `name` and `guide` (the provider
      guide, under `apps/mail/`).
-   - `supported: false`: `reason` says why. A provider that is not supported
-     yet: tell the user so, and stop. When `reason` says it cannot tell which
-     service holds the domain, ask the user and pass their answer as
-     `--provider` below (`163`, `126`, `yeah`, `qq`, `gmail`, `feishu`).
+   - `unsupported`: the address belongs to a service the app does not support
+     yet; `reason` names it (Outlook, iCloud, Lark, Tencent or NetEase
+     enterprise mail, ...). Tell the user so, and stop.
+   - `unknown`: nothing places the domain; `reason` says why (MX records of
+     the company's own mail gateway, records of two services, or no answer
+     from DNS). Go on: ask the user which of the supported providers holds
+     the mailbox (NetEase 163, 126 or yeah.net, QQ, Gmail or Google Workspace,
+     Feishu) and pass its key as `--provider` in step 4 (`163`, `126`,
+     `yeah`, `qq`, `gmail`, `feishu`); the login check of `account add`
+     confirms the answer. Only when it is none of them, tell the user that
+     the mailbox is not supported yet.
 2. **Where to get the password.** Read the guide (`providers/<name>.md` next to
    this file) and walk the user through "Turn on IMAP/SMTP" and "Password" in
    their language, step by step. Mail clients log in with an app password or
@@ -51,8 +58,8 @@ more), with each one's `last_ok` (its last good check) and `paused`.
 
    The `hint` names the guide; go through the steps with the user again, and
    run the command again with the new password. Any other error (`mk: ...`):
-   a name or address already in use, an address the app cannot place. Say
-   what it says.
+   a name or address already in use, an address the app cannot place without
+   `--provider` (ask the user, as in step 1). Say what it says.
 6. **Afterwards.** Never show the password again. Suggest the user recall (or
    delete) the chat message that held it. Tell them that mail already in the
    inbox is not pushed and not in the digest: only mail that arrives from now
@@ -104,7 +111,10 @@ old one.
      `mail/attachments/`, the rules for every mailbox (`[settings]`), and of
      course all its mail on the server.
 2. After the user confirms: `uv run apps/mail/scripts/mk.py account remove 工作`.
-   It prints `{"ok": true, "mailbox", "address", "password_deleted"}`.
+   It prints `{"ok": true, "mailbox", "address", "password_deleted"}`. While
+   a check for new mail is running it waits for it, up to a minute; when it
+   says a check is still running, nothing was removed: try again a minute
+   later.
 3. Commit `mail/` (`mail: remove mailbox 工作`). Suggest the user also revoke the
    app password in the provider's settings (the guide says where), so it can
    no longer be used anywhere.

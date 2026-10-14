@@ -74,7 +74,9 @@ website or another service.
 Before you answer the first mail request of a conversation, run
 `uv run apps/mail/scripts/mk.py bg status` (not while `apps/mail/SETUP.md` is
 running: it checks the poll itself). It prints `last_poll`, `stale`,
-`threshold_minutes`, each mailbox's `last_ok` and open `problem`, and
+`threshold_minutes`, what it knows of the wakes of `mail/triage` (`wake_error`,
+`wake_error_since`, `last_wake_at`, `unacknowledged_wakes`, `oldest_pending_at`,
+`oldest_pending_minutes`), each mailbox's `last_ok` and open `problem`, and
 `config_error`.
 
 - `stale: true`: the background check (the poll task) has not run for longer
@@ -93,6 +95,18 @@ running: it checks the poll itself). It prints `last_poll`, `stale`,
   - the check was retimed recently: `stale` judges by the median spacing of
     the recent polls, so for a few polls after a change of frequency it can be
     wrong. If `last_poll` is as recent as the new `schedule` allows, it runs.
+- `stale` is false, but `wake_error` is set, `unacknowledged_wakes` is 3 or
+  more, or `oldest_pending_minutes` is above 60: the check runs, but
+  important mail does not reach the user. Say first that pushes are not
+  working since the earlier of `wake_error_since` and `oldest_pending_at`
+  (leave the time out when both are null), quoting `wake_error` when it is
+  set. `wake_error` means the check could not wake `mail/triage`;
+  `unacknowledged_wakes` that it was woken again and again and never judged
+  the mail (its runs fail or are turned away). Then offer to look into it:
+  `cc-hub cron list --json` (the row `mail/triage`: is it `enabled`),
+  `cc-connect cron list` (is `hub:mail/triage` registered), and whether the
+  cc-connect daemon runs. When `wake_error` says `mail/triage` is turned off,
+  the user turned the pushes off: mention it once, not as an alarm.
 - `config_error`: `mail/config.toml` cannot be read, so no mailbox is checked.
   Say so and fix it ([rules.md](rules.md)).
 - A mailbox with a `problem` the user's request touches: say it in one line.

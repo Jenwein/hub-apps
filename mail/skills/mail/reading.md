@@ -53,8 +53,8 @@ These can be undone: do them when the user asks, then say how many were done.
 - `uv run apps/mail/scripts/mk.py archive 12 13` moves mail out of INBOX: to
   the archive folder, or on Gmail out of the inbox into All Mail.
 
-Both print `ok`, `done` (the ids done), `mailboxes`, `refused` and `errors`;
-`ok` is false when some were not done.
+Both print `ok`, `done` (how many were done), `ids` (the ids done),
+`mailboxes`, `refused` and `errors`; `ok` is false when some were not done.
 
 - An `errors` entry saying a mailbox has no archive folder: ask the user
   whether to create one named Archive. Only when they agree:
@@ -78,8 +78,8 @@ it. Deleting moves mail to Trash, never erases it.
    else is not a yes. When they change the selection ("not the second one"),
    make a new list and show it again.
 4. `uv run apps/mail/scripts/mk.py delete k3j9x2ab`, with the `list_id` you
-   showed. It prints `ok`, `done`, `mailboxes` (with `folder` and
-   `expunged`), `refused`, `errors`, `warnings` and `remaining`.
+   showed. It prints `ok`, `done` (how many), `ids`, `mailboxes` (with
+   `folder` and `expunged`), `refused`, `errors`, `warnings` and `remaining`.
 5. Say how many went to Trash.
    - `expunged: false` for a mailbox: its server could only flag the mail as
      deleted. Tell the user the mail stays visible in INBOX until a mail

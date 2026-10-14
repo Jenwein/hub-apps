@@ -110,7 +110,7 @@ These are scheduled tasks, kept in `hub.toml`:
 | `cc-hub cron set mail/poll "<cron>"` | how often mail is checked | `cc-hub cron set mail/poll "*/15 * * * *"` (every 15 minutes) |
 | `cc-hub cron set mail/digest "<cron>"` | when the digest is sent | `cc-hub cron set mail/digest "30 7 * * 1-5"` (07:30 on weekdays) |
 | `cc-hub cron set mail/digest --off` | no digest; `--on` turns it on again | `cc-hub cron set mail/digest --off` |
-| `cc-hub cron reset mail/poll` | back to the app's time (every 5 minutes; the digest: 08:00) | `cc-hub cron reset mail/digest` |
+| `cc-hub cron reset mail/poll` | back to the app's time: every 5 minutes; the digest 08:00 server time, so convert the user's time again when their time zone is not the server's (below) | `cc-hub cron reset mail/digest` |
 
 `<cron>` is a five-field cron expression (minute, hour, day of month, month,
 day of week), always in double quotes. `mail/triage` has no time, only `--off`
@@ -122,7 +122,9 @@ the task anew: follow them in a direct chat, as "Change a time" in
   (`date +%Z%z`, or `timedatectl` on Linux) with the user's. When they
   differ, tell the user, convert the time they asked for into server time,
   and say both: "08:00 Beijing time is 00:00 on the server (UTC)". When the
-  conversion crosses midnight, shift the day-of-week field too. Where the
+  conversion crosses midnight, shift the day-of-week field too. A reset
+  (`cc-hub cron reset mail/digest`) puts back 08:00 server time: convert
+  again and set the user's time with `cc-hub cron set mail/digest`. Where the
   user's zone (or the server's) has daylight saving time, the digest comes an
   hour off for part of the year: tell them.
 - **How often.** Every check that finds mail to judge starts one agent run,

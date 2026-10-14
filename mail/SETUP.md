@@ -110,10 +110,10 @@ the background check has really run:
 2. Note the time (`date -u +%Y-%m-%dT%H:%M:%SZ`). Find the id of
    `hub:mail/poll` with `cc-connect cron list`, and run
    `cc-connect cron exec <id>`: it runs the task now.
-3. Wait about a minute (`sleep 60`), then run
-   `uv run apps/mail/scripts/mk.py bg status` again: `last_poll` must be
-   later than the time you noted. If not, wait one more minute and look again
-   (a first check of a big inbox takes longer).
+3. Run `uv run apps/mail/scripts/mk.py bg status` again: `last_poll` must be
+   later than the time you noted. A check takes from a few seconds to a few
+   minutes (a first check of a big inbox takes longer): while it is not there
+   yet, run `bg status` again a few times over the next two minutes or so.
 4. If it still did not run, the cc-connect daemon most likely does not find
    `uv`, `cc-hub` or `cc-connect` on its PATH. "Script tasks and PATH" in
    cc-hub's

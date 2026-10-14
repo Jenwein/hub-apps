@@ -255,7 +255,7 @@ too:
 | `cc-hub cron set mail/poll "<cron>"` | How often mail is checked. `<cron>` is a cron expression (minute, hour, day, month, weekday) in the server's time, in quotes. | `cc-hub cron set mail/poll "*/15 * * * *"` |
 | `cc-hub cron set mail/digest "<cron>"` | When the digest comes. | `cc-hub cron set mail/digest "30 7 * * *"` |
 | `cc-hub cron set mail/digest --off` | No digest; `--on` brings it back. | `cc-hub cron set mail/digest --off` |
-| `cc-hub cron reset <task>` | Back to the app's time. `<task>` is `mail/poll` or `mail/digest`. | `cc-hub cron reset mail/digest` |
+| `cc-hub cron reset <task>` | Back to the app's time: every 5 minutes, or the digest at 08:00 server time (when your time zone is not the server's, ask the agent to set your time again). `<task>` is `mail/poll` or `mail/digest`. | `cc-hub cron reset mail/digest` |
 
 Then the agent registers the task anew in cc-connect, in a direct chat.
 
