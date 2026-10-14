@@ -618,10 +618,12 @@ def test_more_parts_than_are_walked_still_take_little_time():
     assert p.text.startswith("part 0") and took < 2 * BOUND, took
 
 
+@pytest.mark.parametrize("tail", [b"", BYTE8], ids=["ascii", "8bit"])
 @pytest.mark.parametrize("name", [b"Resent-To", b"Cc", b"To", b"From", b"Content-Type"])
-def test_many_copies_of_a_hostile_header_take_little_time(name):
-    # (every copy of a header was parsed, by the repair or by get_all; 300 x 0.2 s)
-    hostile = name + b": " + b'"' * 12_000 + BYTE8 + b"\r\n"
+def test_many_copies_of_a_hostile_header_take_little_time(name, tail):
+    # (the repair parsed every copy of a header with an 8-bit byte, and get_all every copy of
+    # the others: 300 copies x 0.2 s and more)
+    hostile = name + b": " + b'"' * 12_000 + tail + b"\r\n"
     p, took = timed(hostile * 300 + b"Subject: s\r\n\r\nbody")
     assert p.subject == "s" and p.text == "body" and took < BOUND, took
 
