@@ -19,12 +19,20 @@ import email.utils
 import re
 from dataclasses import dataclass, field
 from datetime import UTC
-from html.parser import HTMLParser
+from html import unescape
 
 from .config import MailError
 
 TEXT_LIMIT = 100_000  # characters of `Parsed.text`
-HTML_LIMIT = 2_000_000  # characters of one HTML body handed to the HTML parser
+HTML_LIMIT = 300_000  # characters of one HTML body that are converted to text
+# The stdlib's parsers for addresses and for the parameters of Content-Type and
+# Content-Disposition are quadratic on long hostile values (50 000 quotes: 3 s, 14 s on Python
+# 3.12.10); real ones are a few hundred characters. Past this many characters the value is cut.
+HEADER_LIMIT = 10_000
+STRUCTURED_HEADERS = frozenset({
+    "from", "to", "cc", "bcc", "sender", "reply-to", "content-type", "content-disposition",
+    "content-transfer-encoding",
+})
 
 # tried in this order after the charset the part declares; UTF-8 first because bytes that are not
 # GBK-shaped but are valid UTF-8 (text that declares nothing) almost never are GBK, while GBK text
@@ -90,6 +98,13 @@ class _Policy(email.policy.EmailPolicy):
     way the old compat32 policy read every header, instead of stopping the whole parse."""
 
     def header_fetch_parse(self, name, value):
+        if (
+            len(value) > HEADER_LIMIT
+            and name.lower() in STRUCTURED_HEADERS
+            and not hasattr(value, "name")  # a header object that was set is already parsed
+        ):
+            cut = value[:HEADER_LIMIT]
+            value = cut.rpartition(",")[0] or cut  # an address list is cut between two addresses
         try:
             return super().header_fetch_parse(name, value)
         except STDLIB_ERRORS:
@@ -159,12 +174,10 @@ def _one_line(text: str) -> str:
     return " ".join(_INVISIBLE.sub("", _CONTROL.sub("", text)).split())
 
 
-class _HtmlText(HTMLParser):
-    """HTML to the text a reader would see: no script, style or title; a line break where a
-    block starts or ends (a blank line around paragraphs, headings and tables) and a space
-    between table cells."""
+class _TextWriter:
+    """What the HTML-to-text conversion collects: a line break where a block starts or ends (a
+    blank line around paragraphs, headings and tables) and a space between table cells."""
 
-    HIDDEN = frozenset({"script", "style", "title"})
     LINES = frozenset({
         "address", "article", "aside", "dd", "div", "dl", "dt", "fieldset", "figcaption",
         "figure", "footer", "form", "header", "hr", "li", "main", "nav", "section", "tr",
@@ -175,13 +188,12 @@ class _HtmlText(HTMLParser):
     CELLS = frozenset({"td", "th"})
 
     def __init__(self) -> None:
-        super().__init__()
         self.out: list[str] = []
-        self.hidden = 0  # open script/style/title elements
         self.pre = 0  # open pre elements
         self.pending = 0  # line breaks owed before the next text, 0 to 2
 
-    def _break(self, tag: str) -> None:
+    def lone(self, tag: str) -> None:
+        """A tag that opens nothing to close ("<br>", "<br/>") or an end tag."""
         if tag == "br":
             self.pending = min(self.pending + 1, 2)
         elif tag in self.PARAGRAPHS:
@@ -189,34 +201,21 @@ class _HtmlText(HTMLParser):
         elif tag in self.LINES:
             self.pending = max(self.pending, 1)
 
-    def handle_starttag(self, tag, attrs):
-        if tag in self.HIDDEN:
-            self.hidden += 1
-        else:
-            if tag == "pre":
-                self.pre += 1
-            self._break(tag)
+    def start(self, tag: str) -> None:
+        if tag == "pre":
+            self.pre += 1
+        self.lone(tag)
 
-    def handle_startendtag(self, tag, attrs):
-        # "<br/>" is one break, and "<script/>" opens nothing that an end tag would close
-        if tag not in self.HIDDEN:
-            self._break(tag)
-
-    def handle_endtag(self, tag):
-        if tag in self.HIDDEN:
-            self.hidden = max(0, self.hidden - 1)
-            return
+    def end(self, tag: str) -> None:
         if tag == "pre":
             self.pre = max(0, self.pre - 1)
         if tag in self.CELLS:
             if not self.pending:
                 self.out.append(" ")
         elif tag != "br":
-            self._break(tag)
+            self.lone(tag)
 
-    def handle_data(self, data):
-        if self.hidden:
-            return
+    def data(self, data: str) -> None:
         if not self.pre:
             data = re.sub(r"\s+", " ", data)
         if not data.strip():  # the white space between two tags
@@ -234,11 +233,54 @@ class _HtmlText(HTMLParser):
         return "\n".join(" ".join(line.split()) for line in lines)
 
 
+# One token of HTML. Every alternative consumes what it scans (a tag or comment that never
+# closes runs to the end of the input), so a pass over the text is linear. The stdlib's
+# HTMLParser is not on every Python this runs on: on 3.12.10 it takes 25 s for 80 000 "<!--" and
+# minutes for 100 000 "<a ", and it raises AssertionError on "<![ x>".
+_HTML_TOKEN = re.compile(
+    r"<!--.*?(?:-->|\Z)"  # comment
+    r"|<[!?][^>]*(?:>|\Z)"  # doctype, CDATA section, processing instruction
+    r"|<(?P<slash>/?)(?P<name>[A-Za-z][^\s/>]*)(?P<rest>[^>]*)(?:>|\Z)"  # tag
+    r"|(?P<text>[^<]+)"
+    r"|(?P<lt><)",  # a "<" that starts nothing
+    re.DOTALL,
+)
+# the text of these elements is not shown; the search for their end tag is a plain scan
+_HIDDEN_ENDS = {
+    name: re.compile(rf"</{name}\b[^>]*>?", re.IGNORECASE) for name in ("script", "style", "title")
+}
+
+
 def _html_to_text(html: str) -> str:
-    parser = _HtmlText()
-    parser.feed(html[:HTML_LIMIT])
-    parser.close()
-    return parser.text()
+    """The text a reader of the HTML would see. Never raises, and takes time linear in the size."""
+    writer = _TextWriter()
+    html = html[:HTML_LIMIT]
+    pos, size = 0, len(html)
+    unclosed = set()  # hidden elements whose end tag was searched for and is not there
+    while pos < size:
+        token = _HTML_TOKEN.match(html, pos)
+        pos = token.end()
+        if token["text"] is not None:
+            writer.data(unescape(token["text"]))
+        elif token["lt"] is not None:
+            writer.data("<")
+        elif token["name"] is not None:
+            name = token["name"].lower()
+            if token["slash"]:
+                writer.end(name)
+            elif token["rest"].rstrip().endswith("/"):
+                writer.lone(name)
+            elif name in _HIDDEN_ENDS:
+                found = None if name in unclosed else _HIDDEN_ENDS[name].search(html, pos)
+                if found:
+                    pos = found.end()
+                else:
+                    unclosed.add(name)
+                    if name != "title":  # an unclosed script or style hides the rest, as in a browser
+                        pos = size
+            else:
+                writer.start(name)
+    return writer.text()
 
 
 def _part_bytes(part) -> bytes:
@@ -288,37 +330,79 @@ def _filename(part) -> str | None:
     return plain.strip() or "attachment"
 
 
-def _sort_parts(msg) -> tuple[list, list, list[tuple[str, object]]]:
-    """(plain text parts, HTML parts, [(file name, part)]) of a message."""
-    plain, html, attached = [], [], []
+def _attachments(msg) -> list[tuple[str, object]]:
+    """[(file name, part)] of a message, in message order."""
+    found = []
     for part in _leaves(msg):
         name = _filename(part)
         if name:
-            attached.append((name, part))
-        elif part.get_content_disposition() == "attachment":
-            continue
-        elif part.get_content_type() == "text/html":
-            html.append(part)
-        elif part.get_content_type() == "text/plain" or part.get_content_maintype() == "multipart":
-            # (a multipart that could not be split, for lack of a boundary, is read as text)
-            plain.append(part)
-    return plain, html, attached
+            found.append((name, part))
+    return found
 
 
-def _body_text(plain: list, html: list) -> str:
-    text = _clean("\n\n".join(t for t in map(_part_text, plain) if t.strip()))
-    if text or not html:
-        return text
-    return _clean("\n\n".join(_html_to_text(_part_text(part)) for part in html))
+def _has_text(segments: list[tuple[str, str]]) -> bool:
+    return any(kind == "html" or text.strip() for kind, text in segments)
 
 
-def attachment_bytes(raw: bytes, index: int) -> tuple[str, bytes]:
-    """(file name, content) of attachment `index` of the message `raw`."""
-    attached = _sort_parts(_load(raw))[2]
+def _best(alternatives: list[list[tuple[str, str]]]) -> list[tuple[str, str]]:
+    """The one alternative of a multipart/alternative to read: the first that is all plain text
+    and not blank, else the first with anything to read (HTML)."""
+    for segments in alternatives:
+        if _has_text(segments) and all(kind == "plain" for kind, _ in segments):
+            return segments
+    for segments in alternatives:
+        if _has_text(segments):
+            return segments
+    return []
+
+
+def _segments(part) -> list[tuple[str, str]]:
+    """[(kind, source text)] of the body of a part in message order, kind "plain" or "html".
+
+    Alternatives are chosen where they are (per multipart/alternative), so a plain footer next
+    to an HTML body adds to the body instead of replacing it. Attachments are not body."""
+    if part.get_content_maintype() == "multipart" and part.is_multipart():
+        children = [_segments(child) for child in part.get_payload()]
+        if part.get_content_subtype() == "alternative":
+            return _best(children)
+        return [segment for child in children for segment in child]
+    if _filename(part) or part.get_content_disposition() == "attachment":
+        return []
+    if part.get_content_type() == "text/html":
+        return [("html", _part_text(part))]
+    if part.get_content_type() == "text/plain" or part.get_content_maintype() == "multipart":
+        # (a multipart that could not be split, for lack of a boundary, is read as text)
+        return [("plain", _part_text(part))]
+    return []
+
+
+def _body_text(msg) -> str:
+    texts = []
+    for kind, source in _segments(msg):
+        text = _html_to_text(source) if kind == "html" else source
+        if text.strip():
+            texts.append(text)
+    return _clean("\n\n".join(texts))
+
+
+def _attachment(raw: bytes, index: int) -> tuple[str, bytes]:
+    attached = _attachments(_load(raw))
     if not 0 <= index < len(attached):
         raise MailError(f"the message has no attachment {index} (it has {len(attached)})")
     name, part = attached[index]
     return name, _part_bytes(part)
+
+
+def attachment_bytes(raw: bytes, index: int) -> tuple[str, bytes]:
+    """(file name, content) of attachment `index` of the message `raw`. Raises MailError when
+    there is no such attachment or the message cannot be read."""
+    try:
+        return _attachment(raw, index)
+    except MailError:
+        raise
+    except Exception as error:
+        # the contract is that only MailError comes out, whatever the stdlib raises on hostile mail
+        raise MailError(f"attachment {index} cannot be read ({type(error).__name__})") from error
 
 
 # -- headers ---------------------------------------------------------------------------------
@@ -329,13 +413,26 @@ def _header(msg, name: str) -> str:
     return "" if value is None else str(value)
 
 
+def _raw(msg, name: str) -> str:
+    """The text of the first header `name`, unfolded, without the header classes. For ids, the
+    date and Precedence there is nothing to decode, and the unstructured parser the stdlib would
+    use is quadratic on a long References."""
+    for key, value in msg.raw_items():
+        if key.lower() == name:
+            return _LINE_BREAKS.sub("", str(value))
+    return ""
+
+
 def _addresses(msg, name: str) -> list[tuple[str, str]]:
     """[(display name, address)] of every mailbox in the header(s) `name`; groups are flattened."""
     found = []
     for header in msg.get_all(name, []):
         addresses = getattr(header, "addresses", None)
         if addresses is None:  # the header class gave up (see _Policy): the old parser reads it
-            found.extend(email.utils.getaddresses([str(header)]))
+            try:
+                found.extend(email.utils.getaddresses([str(header)]))
+            except STDLIB_ERRORS:  # it recurses too, on a few thousand nested comments
+                continue
         else:
             found.extend((a.display_name, a.addr_spec) for a in addresses)
     return [(display, addr) for display, addr in found if addr]
@@ -363,32 +460,45 @@ def _is_bulk(msg) -> bool:
     return (
         "list-unsubscribe" in msg
         or "list-id" in msg
-        or _header(msg, "precedence").strip().lower() in ("bulk", "list")
+        or _raw(msg, "precedence").strip().lower() in ("bulk", "list")
     )
 
 
-def parse(raw: bytes) -> Parsed:
-    """The record of one message. Never raises on bad bytes."""
+def _parse(raw: bytes) -> Parsed:
     msg = _load(raw)
-    plain, html, attached = _sort_parts(msg)
+    attached = _attachments(msg)
+    try:
+        text = _body_text(msg)
+    except STDLIB_ERRORS:  # a tree nested too deep to walk: the headers are still worth having
+        text = ""
     from_name, from_addr = next(iter(_addresses(msg, "from")), ("", ""))
     return Parsed(
-        message_id=_first_id(_header(msg, "message-id")),
-        date=_iso(_header(msg, "date")),
+        message_id=_first_id(_raw(msg, "message-id")),
+        date=_iso(_raw(msg, "date")),
         from_addr=from_addr,
         from_name=_one_line(from_name),
         to=[addr for _, addr in _addresses(msg, "to")],
         cc=[addr for _, addr in _addresses(msg, "cc")],
         subject=_one_line(_header(msg, "subject")),
-        text=_body_text(plain, html),
+        text=text,
         attachments=[
             Attachment(i, name, part.get_content_type(), len(_part_bytes(part)))
             for i, (name, part) in enumerate(attached)
         ],
         bulk=_is_bulk(msg),
-        in_reply_to=_first_id(_header(msg, "in-reply-to")),
-        references=_ID.findall(_header(msg, "references")),
+        in_reply_to=_first_id(_raw(msg, "in-reply-to")),
+        references=_ID.findall(_raw(msg, "references")),
     )
+
+
+def parse(raw: bytes) -> Parsed:
+    """The record of one message. Never raises: a message nothing can be made of comes out as an
+    empty record rather than stopping the poll of its mailbox."""
+    try:
+        return _parse(raw)
+    except Exception:  # noqa: BLE001
+        # the contract is that nothing comes out, whatever the stdlib raises on hostile mail
+        return Parsed()
 
 
 def _bare(address: str) -> str:

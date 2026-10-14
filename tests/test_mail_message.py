@@ -1,6 +1,9 @@
 import base64
+import re
+import time
 from pathlib import Path
 
+import mailkit.message as mm
 import pytest
 from mailkit.config import MailError
 from mailkit.message import Attachment, addressed, attachment_bytes, parse
@@ -367,6 +370,137 @@ def test_message_rfc822_part_with_raw_gbk_header_is_written_out():
         b"Content-Disposition: attachment; filename=f.eml\r\n\r\n" + inner + b"\r\n--B--\r\n")
     data = attachment_bytes(raw, 0)[1]
     assert parse(data).subject == "面试" and parse(data).text == "body"
+
+
+# -- which parts are the body ----------------------------------------------------------------
+
+
+def multipart(kind: str, *parts: bytes) -> bytes:
+    """A message whose top part is multipart/<kind>; each part is its headers, a blank line and
+    its body (a part may itself be a multipart with its own boundary)."""
+    body = b"".join(b"--B\r\n" + part + b"\r\n" for part in parts) + b"--B--\r\n"
+    return message(b"From: a@x", b'Content-Type: multipart/' + kind.encode() + b'; boundary="B"',
+                   body=body)
+
+
+def nested(kind: str, boundary: str, *parts: bytes) -> bytes:
+    """A part that is a multipart/<kind> with its own boundary."""
+    b = boundary.encode()
+    body = b"".join(b"--" + b + b"\r\n" + part + b"\r\n" for part in parts) + b"--" + b + b"--"
+    return b'Content-Type: multipart/' + kind.encode() + b'; boundary="' + b + b'"\r\n\r\n' + body
+
+
+HTML_BODY = b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>The real body</p>"
+PLAIN_FOOTER = b"Content-Type: text/plain\r\n\r\nYou are on the list. <http://x/unsubscribe>"
+
+
+def test_html_body_with_a_plain_footer_keeps_both():
+    p = parse(multipart("mixed", HTML_BODY, PLAIN_FOOTER))
+    assert p.text == "The real body\n\nYou are on the list. <http://x/unsubscribe>"
+    p = parse(multipart("mixed", PLAIN_FOOTER, HTML_BODY))
+    assert p.text == "You are on the list. <http://x/unsubscribe>\n\nThe real body"
+
+
+def test_alternatives_are_chosen_where_they_are():
+    alternative = nested("alternative", "A", b"Content-Type: text/plain\r\n\r\nplain body", HTML_BODY)
+    p = parse(multipart("mixed", alternative, PLAIN_FOOTER))
+    assert p.text == "plain body\n\nYou are on the list. <http://x/unsubscribe>"
+    related = nested("related", "R", HTML_BODY, b"Content-Type: image/png\r\n\r\nPNG")
+    blank_plain = b"Content-Type: text/plain\r\n\r\n \r\n"
+    alternative = nested("alternative", "A", blank_plain, related)
+    assert parse(multipart("mixed", alternative, PLAIN_FOOTER)).text == (
+        "The real body\n\nYou are on the list. <http://x/unsubscribe>")
+    assert parse(multipart("alternative", blank_plain, related)).text == "The real body"
+
+
+def test_alternative_prefers_the_plain_one_that_is_all_plain():
+    mixed_html = nested("mixed", "M", HTML_BODY, PLAIN_FOOTER)
+    plain = b"Content-Type: text/plain\r\n\r\nthe plain version"
+    assert parse(multipart("alternative", mixed_html, plain)).text == "the plain version"
+    assert parse(multipart("alternative", plain, mixed_html)).text == "the plain version"
+    assert parse(multipart("alternative", mixed_html)).text == (
+        "The real body\n\nYou are on the list. <http://x/unsubscribe>")
+
+
+# -- hostile mail: no exception, no stall ----------------------------------------------------
+
+
+@pytest.mark.parametrize("header", [b"To", b"Cc", b"From"])
+def test_deeply_nested_comments_in_an_address_header(header):
+    raw = header + b": a@x " + b"(" * 3000 + b")" * 3000 + b"\r\nSubject: s\r\n\r\nbody"
+    p = parse(raw)
+    assert p.subject == "s" and p.text == "body"
+
+
+def test_long_hostile_header_values_are_bounded():
+    start = time.monotonic()
+    p = parse(b"To: " + b'"' * 50_000 + b"\r\nContent-Type: text/plain; " + b"a=b; " * 20_000
+              + b"\r\nSubject: s\r\n\r\nbody")
+    assert p.subject == "s" and time.monotonic() - start < 5
+    start = time.monotonic()
+    refs = b" ".join(b"<r%d@x>" % i for i in range(50_000))
+    p = parse(b"References: " + refs + b"\r\nMessage-ID: <m@x>\r\n\r\nbody")
+    assert len(p.references) == 50_000 and p.references[-1] == "<r49999@x>"
+    assert p.message_id == "<m@x>" and time.monotonic() - start < 5
+    # a long list of recipients is cut between two addresses
+    many = b", ".join(b"u%d@x.example" % i for i in range(3000))
+    p = parse(b"To: " + many + b"\r\n\r\nbody")
+    assert p.to[0] == "u0@x.example" and 100 < len(p.to) < 3000
+    assert all(re.fullmatch(r"u\d+@x\.example", address) for address in p.to)
+
+
+@pytest.mark.parametrize("junk", [b"<![ x>", b"<![foo]>", b"<![CDATA[x]]>", b"<?php x ?>", b"<!x>"])
+def test_html_declarations_do_not_raise(junk):
+    # (the stdlib's HTMLParser raises AssertionError on the first two on Python 3.12.10)
+    assert html_text("<p>before</p>" + junk.decode() + "<p>after</p>") == "before\n\nafter"
+
+
+def test_unclosed_html_constructs_end_at_the_end():
+    assert html_text("<p>before</p><!DOCTYPE") == "before"
+    assert html_text("<p>before</p><!-- never closed <p>x") == "before"
+    assert html_text("<p>before</p><b class=") == "before"
+    assert html_text("before<script>never closed</p> after") == "before"
+    assert html_text("<title>t</title>x") == "x"
+    assert html_text("<title>no end<p>body") == "no end\n\nbody"  # an unclosed title hides nothing
+
+
+@pytest.mark.parametrize("unit", [
+    b"<!--", b"<a ", b"<", b"<![CDATA[", b"<script>", b"<style>", b"<title>", b"&#", b"<p>x",
+    b"<a b=\"", b"</", b"<!",
+])
+def test_html_conversion_takes_linear_time(unit):
+    # 25 s for "<!--" x 80 000 and minutes for "<a " x 100 000 with HTMLParser on Python 3.12.10
+    html = unit * (400_000 // len(unit))
+    start = time.monotonic()
+    parse(message(b"From: a@x", b"Content-Type: text/html", body=html))
+    assert time.monotonic() - start < 5
+
+
+def test_html_conversion_details():
+    assert html_text("<P>One</P><SCRIPT>x</SCRIPT>two") == "One\n\ntwo"
+    assert html_text("a<script>if (x<y) { w(\"</p><td>\"); }</script> b") == "a b"
+    assert html_text("a<script>x</SCRIPT >b") == "ab"
+    assert html_text("a<style>p > b { }</style>b<style/>c") == "abc"
+    assert html_text("a<!-- <b>x</b> -->b<!--[if mso]><p>no</p><![endif]-->c") == "abc"
+    assert html_text("1 < 2 and 3<4 &lt;b&gt; &amp; &#x4e2d;") == "1 < 2 and 3<4 <b> & 中"
+    assert html_text("<a href='x'>link</a> and <img src=y alt=z>text") == "link and text"
+
+
+def test_an_unexpected_error_is_still_not_raised(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected")
+
+    raw = fixture("rfc2231-attachment.eml")
+    monkeypatch.setattr(mm, "_body_text", boom)
+    assert parse(raw) == mm.Parsed()
+    monkeypatch.undo()
+    monkeypatch.setattr(mm, "_load", boom)
+    assert parse(raw) == mm.Parsed()
+    with pytest.raises(MailError, match="cannot be read"):
+        attachment_bytes(raw, 0)
+    monkeypatch.undo()
+    with pytest.raises(MailError, match="no attachment"):
+        attachment_bytes(raw, 5)
 
 
 def test_truncated_parameter_keeps_the_body_readable():
