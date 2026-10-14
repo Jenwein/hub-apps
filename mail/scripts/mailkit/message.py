@@ -12,6 +12,7 @@ Everything in a message is data from a stranger. `parse` only reads it.
 from __future__ import annotations
 
 import email
+import email.errors
 import email.parser
 import email.policy
 import email.utils
@@ -33,7 +34,10 @@ FALLBACK_CHARSETS = ("utf-8", "gb18030")
 # What the stdlib's mail code has raised on hostile input: IndexError in the parameter parser,
 # TypeError in the RFC 2231 continuation sorter, ValueError for a NUL in a charset name,
 # RecursionError for multiparts nested thousands deep. Bad mail must not stop a poll.
-STDLIB_ERRORS = (ArithmeticError, AttributeError, LookupError, RecursionError, TypeError, ValueError)
+STDLIB_ERRORS = (
+    ArithmeticError, AttributeError, LookupError, RecursionError, TypeError, ValueError,
+    email.errors.MessageError,
+)
 
 
 @dataclass
@@ -100,6 +104,7 @@ class _Policy(email.policy.EmailPolicy):
 
 
 POLICY = _Policy()
+_WRITE_POLICY = email.policy.compat32.clone(linesep="\r\n")
 
 
 def _repair_headers(part) -> None:
@@ -108,13 +113,13 @@ def _repair_headers(part) -> None:
     The parser keeps such bytes as surrogate escapes, which the header classes turn into U+FFFD,
     so the text has to be recovered before anything reads the header."""
     names = {name.lower() for name, value in part.raw_items() if _SURROGATES.search(value)}
-    for name in names:
-        values = [value for key, value in part.raw_items() if key.lower() == name]
-        del part[name]
-        for value in values:
+    for lowered in names:
+        headers = [(key, value) for key, value in part.raw_items() if key.lower() == lowered]
+        del part[lowered]
+        for key, value in headers:
             text = decode(value.encode("utf-8", errors="surrogateescape"))
             try:
-                part[name] = _LINE_BREAKS.sub("", text)
+                part[key] = _LINE_BREAKS.sub("", text)
             except ValueError:  # a second copy of a header that may occur once
                 continue
 
@@ -237,10 +242,14 @@ def _html_to_text(html: str) -> str:
 
 
 def _part_bytes(part) -> bytes:
-    """The bytes of a part after transfer decoding; of a message/rfc822 part, that message."""
+    """The bytes of a part after transfer decoding; of a message/rfc822 part, that message
+    written out again (the old compat32 policy writes headers as they are, without parsing)."""
     if part.is_multipart():
         inner = part.get_payload()
-        return inner[0].as_bytes() if inner else b""
+        try:
+            return inner[0].as_bytes(policy=_WRITE_POLICY) if inner else b""
+        except STDLIB_ERRORS:
+            return b""
     return part.get_payload(decode=True) or b""
 
 

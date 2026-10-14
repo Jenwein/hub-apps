@@ -355,7 +355,18 @@ def test_message_rfc822_part_with_a_name_is_an_attachment():
     [att] = p.attachments
     assert att.filename == "forward.eml" and att.content_type == "message/rfc822"
     name, data = attachment_bytes(raw, 0)
-    assert name == "forward.eml" and b"inner body" in data and att.size == len(data)
+    assert name == "forward.eml" and att.size == len(data)
+    assert data.startswith(b"Subject: inner\r\nFrom: b@x\r\n\r\ninner body")
+
+
+def test_message_rfc822_part_with_raw_gbk_header_is_written_out():
+    inner = b"Subject: " + "面试".encode("gbk") + b"\r\nFrom: a@x\r\n\r\nbody"
+    raw = message(
+        b"From: a@x", b'Content-Type: multipart/mixed; boundary="B"',
+        body=b"--B\r\nContent-Type: message/rfc822\r\n"
+        b"Content-Disposition: attachment; filename=f.eml\r\n\r\n" + inner + b"\r\n--B--\r\n")
+    data = attachment_bytes(raw, 0)[1]
+    assert parse(data).subject == "面试" and parse(data).text == "body"
 
 
 def test_truncated_parameter_keeps_the_body_readable():
