@@ -16,6 +16,7 @@ import email.errors
 import email.parser
 import email.policy
 import email.utils
+import functools
 import re
 from dataclasses import dataclass, field
 from datetime import UTC
@@ -25,14 +26,38 @@ from .config import MailError
 
 TEXT_LIMIT = 100_000  # characters of `Parsed.text`
 HTML_LIMIT = 300_000  # characters of one HTML body that are converted to text
-# The stdlib's parsers for addresses and for the parameters of Content-Type and
-# Content-Disposition are quadratic on long hostile values (50 000 quotes: 3 s, 14 s on Python
-# 3.12.10); real ones are a few hundred characters. Past this many characters the value is cut.
+# The stdlib's header parsers are slow on hostile values: quadratic on quotes and semicolons
+# (50 000 quotes in a To: 3 s, 14 s on Python 3.12.10) and about 7 microseconds per character on
+# anything else, for each header that is read. An address list can really be long (hundreds of
+# recipients), so an address header is cut at HEADER_LIMIT characters. The parameters of
+# Content-Type, Content-Disposition and Content-Transfer-Encoding are short: up to PARSE_LIMIT
+# characters (a file name of a hundred Chinese characters, percent-encoded) they go to the
+# header classes, like every other header; a longer value is cut at PARAM_LIMIT, which is room
+# for the longest file name, and read as the plain text it is by the parameter parser of
+# `email.message`, which is fast on any input and understands RFC 2231 (but does not decode an
+# RFC 2047 word in a file name). A part costs two such headers, and the FeedParser reads them of
+# every part it builds.
 HEADER_LIMIT = 10_000
-STRUCTURED_HEADERS = frozenset({
-    "from", "to", "cc", "bcc", "sender", "reply-to", "content-type", "content-disposition",
-    "content-transfer-encoding",
-})
+PARSE_LIMIT = 500
+PARAM_LIMIT = 2_000
+MAX_PARAMS = 64  # a file name in RFC 2231 form needs about 40 parameters; 2 000 semicolons: 1 s
+_LIMITS = {
+    **dict.fromkeys((
+        "from", "to", "cc", "bcc", "sender", "reply-to",
+        "resent-from", "resent-to", "resent-cc", "resent-bcc", "resent-sender",
+    ), HEADER_LIMIT),
+    **dict.fromkeys(
+        ("content-type", "content-disposition", "content-transfer-encoding"), PARAM_LIMIT),
+}
+# The tree of a message has at most this many parts (the message, multiparts and attached
+# messages included). The rest are ignored: they are neither body nor listed attachments. Each
+# part costs the reading of its own headers, so a message of thousands of parts would take
+# minutes however short each header is. Real mail has a few parts; 200 is a mail with well over
+# a hundred attachments.
+MAX_PARTS = 200
+# A message has one From, To and Cc header; a copy or two is a mailer's mistake, a thousand is an
+# attack on the parser (each copy of a hostile address header is a parse of up to HEADER_LIMIT).
+MAX_ADDRESS_HEADERS = 2
 
 # tried in this order after the charset the part declares; UTF-8 first because bytes that are not
 # GBK-shaped but are valid UTF-8 (text that declares nothing) almost never are GBK, while GBK text
@@ -92,30 +117,59 @@ _SURROGATES = re.compile("[\udc80-\udcff]")  # what raw 8-bit bytes of a header 
 _LINE_BREAKS = re.compile(r"\r\n|\r|\n")
 
 
+def _plain(value: str) -> str:
+    """The text of a header that is read as plain text, the way the old compat32 policy read
+    every header: its parser gave up, or it is too long to be parsed."""
+    text = _LINE_BREAKS.sub("", value)
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+def _cut(value: str, limit: int) -> str:
+    """`value` cut to `limit` characters, and for parameters also before the MAX_PARAMS-th
+    semicolon (the parameter parsers slow down with the number of parameters as well). An
+    address list is cut between two addresses."""
+    if limit == PARAM_LIMIT:
+        at = -1
+        for _ in range(MAX_PARAMS):
+            at = value.find(";", at + 1, limit)
+            if at < 0:
+                return value[:limit]
+        return value[:at]
+    if len(value) <= limit:
+        return value
+    cut = value[:limit]
+    return cut.rpartition(",")[0] or cut
+
+
+@functools.lru_cache(maxsize=4 * MAX_PARTS)
+def _parse_header(name: str, value: str):
+    """The header object of a header that is cut to a limit, parsed once however many times it is
+    asked for: a part is asked its type, charset, disposition and file name many times, and the
+    stdlib parses the header anew each time. There are at most three such headers per part."""
+    try:
+        return email.policy.EmailPolicy.header_fetch_parse(POLICY, name, value)
+    except STDLIB_ERRORS:
+        return _plain(value)
+
+
 class _Policy(email.policy.EmailPolicy):
     """`email.policy.default`, except that a header whose parser gives up (the stdlib's have
     raised IndexError on `Content-Type: text/html; charset`) is read as the plain text it is, the
-    way the old compat32 policy read every header, instead of stopping the whole parse."""
+    way the old compat32 policy read every header, instead of stopping the whole parse; and
+    except that the headers with parsers that are slow on hostile values are cut (`_LIMITS`)."""
 
     def header_fetch_parse(self, name, value):
-        if (
-            len(value) > HEADER_LIMIT
-            and name.lower() in STRUCTURED_HEADERS
-            and not hasattr(value, "name")  # a header object that was set is already parsed
-        ):
-            cut = value[:HEADER_LIMIT]
-            value = cut.rpartition(",")[0] or cut  # an address list is cut between two addresses
+        if hasattr(value, "name"):  # a header object that was set is already parsed
+            return value
+        limit = _LIMITS.get(name.lower())
+        if limit is not None:
+            if limit == PARAM_LIMIT and len(value) > PARSE_LIMIT:
+                return _plain(_cut(value, limit))
+            return _parse_header(name, _cut(value, limit))
         try:
             return super().header_fetch_parse(name, value)
         except STDLIB_ERRORS:
-            text = _LINE_BREAKS.sub("", value)
-            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-
-    def header_store_parse(self, name, value):
-        try:
-            return super().header_store_parse(name, value)
-        except STDLIB_ERRORS:
-            return name, value
+            return _plain(value)
 
 
 POLICY = _Policy()
@@ -126,32 +180,48 @@ def _repair_headers(part) -> None:
     """Replace raw 8-bit header values (a GBK subject, a GBK attachment name) by their text.
 
     The parser keeps such bytes as surrogate escapes, which the header classes turn into U+FFFD,
-    so the text has to be recovered before anything reads the header."""
-    names = {name.lower() for name, value in part.raw_items() if _SURROGATES.search(value)}
-    for lowered in names:
-        headers = [(key, value) for key, value in part.raw_items() if key.lower() == lowered]
-        del part[lowered]
-        for key, value in headers:
-            text = decode(value.encode("utf-8", errors="surrogateescape"))
-            try:
-                part[key] = _LINE_BREAKS.sub("", text)
-            except ValueError:  # a second copy of a header that may occur once
-                continue
+    so the text has to be recovered before anything reads the header. The text is stored as it
+    is, like the value of any other header, and parsed when a header is read: the headers nobody
+    reads cost nothing, however many there are or however long (the header classes are slow on
+    hostile values). All copies of a header that has such a value in one copy are replaced; one
+    pass makes the new list, so thousands of such headers take time linear in their number."""
+    items = list(part.raw_items())
+    names = {key.lower() for key, value in items if _SURROGATES.search(value)}
+    if not names:
+        return
+    copies: dict[str, int] = {}
+    fixed = []
+    for key, value in items:
+        lowered = key.lower()
+        if lowered not in names:
+            fixed.append((key, value))
+            continue
+        most = POLICY.header_max_count(key)  # 1 for To, Subject and the like
+        if most and copies.get(lowered, 0) >= most:
+            continue  # a second copy of a header that may occur once
+        copies[lowered] = copies.get(lowered, 0) + 1
+        text = decode(value.encode("utf-8", errors="surrogateescape"))
+        fixed.append((key, _LINE_BREAKS.sub("", text)))
+    part._headers = fixed  # (`Message` keeps its headers in this list; `del part[name]` is O(n))
 
 
 def _load(raw: bytes):
-    """The message tree of `raw`, with readable headers."""
+    """The message tree of `raw`, with readable headers, of at most MAX_PARTS parts."""
     try:
         msg = email.message_from_bytes(raw, policy=POLICY)
     except STDLIB_ERRORS:  # the headers are kept, the body is not
         msg = email.parser.BytesHeaderParser(policy=POLICY).parsebytes(raw)
         msg.set_payload("")
+    admitted = 1
     stack = [msg]
     while stack:
         part = stack.pop()
         _repair_headers(part)
         if part.is_multipart():
-            stack.extend(part.get_payload())
+            children = part.get_payload()  # (the list itself)
+            del children[max(MAX_PARTS - admitted, 0):]
+            admitted += len(children)
+            stack.extend(reversed(children))  # message order, so that the first parts are kept
     return msg
 
 
@@ -424,9 +494,12 @@ def _raw(msg, name: str) -> str:
 
 
 def _addresses(msg, name: str) -> list[tuple[str, str]]:
-    """[(display name, address)] of every mailbox in the header(s) `name`; groups are flattened."""
+    """[(display name, address)] of every mailbox in the header(s) `name`; groups are flattened.
+    Only the first MAX_ADDRESS_HEADERS copies are read: `get_all` parses every copy."""
     found = []
-    for header in msg.get_all(name, []):
+    copies = [item for item in msg.raw_items() if item[0].lower() == name]
+    for key, value in copies[:MAX_ADDRESS_HEADERS]:
+        header = msg.policy.header_fetch_parse(key, value)
         addresses = getattr(header, "addresses", None)
         if addresses is None:  # the header class gave up (see _Policy): the old parser reads it
             try:

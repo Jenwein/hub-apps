@@ -552,3 +552,168 @@ def test_damaged_fixtures_never_raise():
             p = parse(bytes(data))
             for att in p.attachments:
                 attachment_bytes(bytes(data), att.index)
+
+
+# -- hostile mail: the work stays small ------------------------------------------------------
+# The stdlib's header parsers are slow on hostile values, so the work parse does is bounded by
+# cutting every header it parses, by reading long parameters as plain text, by walking at most
+# MAX_PARTS parts, and by parsing the headers of a part once. The bounds below are generous:
+# each input took from 6 s to over a minute on Python 3.12.10 before, and takes a fraction of a
+# second now.
+
+BYTE8 = b"\xe4"
+BOUND = 3.0  # seconds
+
+
+def timed(raw: bytes):
+    start = time.perf_counter()
+    parsed = parse(raw)
+    return parsed, time.perf_counter() - start
+
+
+HOSTILE_HEADERS = {
+    "to": (b"To", b'"' * 50_000 + BYTE8),
+    "cc": (b"Cc", b'"' * 50_000 + BYTE8),
+    "from": (b"From", b'"' * 50_000 + BYTE8),
+    # address headers that nothing reads, but that the stdlib parses
+    "resent-to": (b"Resent-To", b'"' * 50_000 + BYTE8),
+    "resent-from": (b"Resent-From", b"\\" * 50_000 + BYTE8),
+    "type-params": (b"Content-Type", b'text/plain; a="' * 50_000 + BYTE8),
+    "type-quotes": (b"Content-Type", b"text/plain; a=" + b'"' * 50_000 + BYTE8),
+    "type-semicolons": (b"Content-Type", b"text/plain" + b";" * 50_000 + BYTE8),
+    "disposition": (b"Content-Disposition", b'attachment; a="' * 50_000 + BYTE8),
+}
+
+
+@pytest.mark.parametrize("name, value", HOSTILE_HEADERS.values(), ids=list(HOSTILE_HEADERS))
+def test_one_8bit_byte_does_not_bypass_the_header_cap(name, value):
+    # (the repair of a header with raw 8-bit bytes parsed it whatever its length)
+    p, took = timed(message(name + b": " + value, b"Subject: s", body=b"body"))
+    assert p.subject == "s" and took < BOUND, took
+
+
+def hostile_parts(count: int, header: bytes = b"Content-Type", extra: bytes = b"") -> bytes:
+    """A multipart/mixed of `count` text parts; each has a different 9 900-quote `header`."""
+    return multipart("mixed", *[
+        header + b": text/plain; p%d=" % i + b'"' * 9_900 + b"\r\n" + extra
+        + b"\r\npart %d" % i for i in range(count)])
+
+
+def test_many_parts_with_hostile_content_types_take_little_time():
+    p, took = timed(hostile_parts(50))
+    assert "part 0" in p.text and "part 49" in p.text and took < BOUND, took
+
+
+def test_many_parts_with_hostile_attachment_headers_take_little_time():
+    raw = hostile_parts(
+        50, b"Content-Disposition", b'Content-Type: application/pdf; name="x.pdf"\r\n')
+    p, took = timed(raw)
+    assert len(p.attachments) == 50 and took < BOUND, took
+
+
+def test_more_parts_than_are_walked_still_take_little_time():
+    raw = hostile_parts(mm.MAX_PARTS + 100, b"Content-Type", b"Content-Disposition: inline; "
+                        + b'a="' * 600 + b"\r\n")
+    p, took = timed(raw)
+    assert p.text.startswith("part 0") and took < 2 * BOUND, took
+
+
+@pytest.mark.parametrize("name", [b"Resent-To", b"Cc", b"To", b"From", b"Content-Type"])
+def test_many_copies_of_a_hostile_header_take_little_time(name):
+    # (every copy of a header was parsed, by the repair or by get_all; 300 x 0.2 s)
+    hostile = name + b": " + b'"' * 12_000 + BYTE8 + b"\r\n"
+    p, took = timed(hostile * 300 + b"Subject: s\r\n\r\nbody")
+    assert p.subject == "s" and p.text == "body" and took < BOUND, took
+
+
+def test_distinct_raw_8bit_headers_are_repaired_in_linear_time():
+    # (the repair rescanned the header list for every distinct name: 18 s for 8 000)
+    headers = b"".join(b"X-%d: v" % i + BYTE8 + b"\r\n" for i in range(20_000))
+    p, took = timed(headers + b"Subject: s\r\n\r\nbody")
+    assert p.subject == "s" and p.text == "body" and took < BOUND, took
+
+
+def test_repaired_headers_keep_their_text():
+    p = parse(b"Subject: " + "面试".encode("gbk") + b"\r\nX-1: v" + BYTE8
+              + b"\r\nFrom: " + "人事部".encode("gbk") + b" <hr@x>\r\n\r\nbody")
+    assert p.subject == "面试" and p.from_name == "人事部" and p.from_addr == "hr@x"
+    # a second copy of a header that may occur once is dropped when one copy is repaired
+    p = parse(b"To: a@x\r\nTo: b" + BYTE8 + b"@x\r\nCc: c@x\r\nCc: d@x\r\n\r\nbody")
+    assert p.to == ["a@x"] and p.cc == ["c@x", "d@x"]
+
+
+def test_parts_beyond_the_limit_are_ignored():
+    files = [b'Content-Type: application/pdf; name="f%d.pdf"\r\n'
+             b"Content-Disposition: attachment\r\n\r\n%%PDF-%d" % (i, i)
+             for i in range(mm.MAX_PARTS + 50)]
+    raw = multipart("mixed", b"Content-Type: text/plain\r\n\r\nthe body", *files)
+    p = parse(raw)
+    # (the top part and the body count too)
+    assert p.text == "the body" and len(p.attachments) == mm.MAX_PARTS - 2
+    assert [a.filename for a in p.attachments[:3]] == ["f0.pdf", "f1.pdf", "f2.pdf"]
+    last = p.attachments[-1]
+    assert attachment_bytes(raw, last.index) == (last.filename, b"%%PDF-%d" % last.index)
+    with pytest.raises(MailError, match="no attachment"):
+        attachment_bytes(raw, mm.MAX_PARTS - 2)
+
+
+def test_a_message_within_the_limit_is_read_whole():
+    files = [b'Content-Type: application/pdf; name="f%d.pdf"\r\n'
+             b"Content-Disposition: attachment\r\n\r\n%%PDF" % i for i in range(mm.MAX_PARTS - 2)]
+    p = parse(multipart("mixed", b"Content-Type: text/plain\r\n\r\nthe body", *files))
+    assert p.text == "the body" and len(p.attachments) == mm.MAX_PARTS - 2
+    assert p.attachments[-1].filename == f"f{mm.MAX_PARTS - 3}.pdf"
+
+
+def test_headers_are_parsed_once_per_part(monkeypatch):
+    import email.policy
+
+    calls = []
+    original = email.policy.EmailPolicy.header_fetch_parse
+
+    def spy(self, name, value):
+        calls.append(name.lower())
+        return original(self, name, value)
+
+    monkeypatch.setattr(email.policy.EmailPolicy, "header_fetch_parse", spy)
+    parts = [b'Content-Type: application/pdf; name="f%d.pdf"\r\n'
+             b'Content-Disposition: attachment; filename="f%d.pdf"\r\n\r\n%%PDF' % (i, i)
+             for i in range(20)]
+    parse(multipart("mixed", b"Content-Type: text/plain\r\n\r\nthe body", *parts))
+    # a part is asked about its type, name, disposition and charset many times
+    types, dispositions = calls.count("content-type"), calls.count("content-disposition")
+    assert types <= 22 and dispositions <= 20, (types, dispositions)
+
+
+@pytest.mark.parametrize("filename", ["合同" * 40 + ".pdf", "报价单" * 28 + ".xlsx"])
+def test_a_long_real_file_name_is_not_cut(filename):
+    from urllib.parse import quote
+
+    encoded = quote(filename, safe="").encode()
+    assert 600 < len(encoded) < 1_500
+    pieces = [encoded[i:i + 60] for i in range(0, len(encoded), 60)]
+    # in one RFC 2231 value, and in continuations
+    for disposition in (
+        b"Content-Disposition: attachment; filename*=utf-8''" + encoded,
+        b"Content-Disposition: attachment; " + b"; ".join(
+            b"filename*%d*=" % i + (b"utf-8''" if i == 0 else b"") + piece
+            for i, piece in enumerate(pieces)),
+    ):
+        raw = with_attachment(b"Content-Type: application/pdf", disposition)
+        assert [a.filename for a in parse(raw).attachments] == [filename]
+        assert attachment_bytes(raw, 0)[0] == filename
+
+
+def test_a_long_content_type_is_still_read():
+    # (past PARSE_LIMIT characters a parameter list is read by the parser of email.message, not
+    # by the header classes; the type, the charset and the boundary come out the same)
+    pad = b'x="' + b"a" * 600 + b'"; '
+    top = message(b"From: a@x", b'Content-Type: multipart/mixed; ' + pad + b'boundary="B"',
+                  body=b"--B\r\nContent-Type: text/plain; " + pad + b"charset=gbk\r\n\r\n"
+                  + "本月工资".encode("gbk") + b"\r\n--B--\r\n")
+    assert len(b'Content-Type: multipart/mixed; ' + pad) > mm.PARSE_LIMIT
+    assert parse(top).text == "本月工资"
+    # a parameter list that never ends is cut, and what is before the cut is still read
+    junk = b"Content-Type: text/plain; charset=gbk" + b"; x=y" * 5_000
+    raw = message(b"From: a@x", junk, body="本月工资".encode("gbk"))
+    assert parse(raw).text == "本月工资"
