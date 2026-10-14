@@ -39,7 +39,7 @@ from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from . import accounts, config, server
+from . import accounts, config, poll, server
 from .config import Mailbox, MailError, Settings
 from .message import parse
 from .store import Store
@@ -56,6 +56,7 @@ DEFAULT_INTERVAL_MINUTES = 5  # the spacing assumed with fewer than two polls
 STALE_MARGIN_MINUTES = 10
 MAX_NUMBER = 10**12  # the largest id, page or `up_to` taken (SQLite integers are 63 bits)
 MESSAGE_LIMIT = 1000  # characters of a server error kept in a search result
+UNREADABLE = poll.UNREADABLE  # the subject of a server hit nothing could be read from
 DECISION = re.compile(r"([0-9]+)=([a-z]+)")
 
 
@@ -68,16 +69,17 @@ def _now(now: datetime | None) -> datetime:
 
 
 def _utc_iso(value: str | None) -> str | None:
-    """An ISO-8601 time as UTC with whole seconds, or None when it is none or not a time."""
+    """An ISO-8601 time as UTC with whole seconds, or None when it is none, not a time, or a
+    time UTC cannot write (`9999-12-31T23:59:59-05:00` is past the last UTC moment)."""
     if not value:
         return None
     try:
         moment = datetime.fromisoformat(value)
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat(timespec="seconds")
+    except (ValueError, OverflowError, TypeError):
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC).isoformat(timespec="seconds")
 
 
 def _check_number(value: int, what: str, minimum: int = 1) -> None:
@@ -332,13 +334,21 @@ def _scrub(text: str, password: str | None) -> str:
 
 
 def _hit(name: str, uid: int, raw: bytes) -> dict:
-    parsed = parse(raw)
-    return {
-        "id": None, "mailbox": name, "uid": uid, "from": parsed.from_addr,
-        "from_name": parsed.from_name, "subject": parsed.subject, "date": _utc_iso(parsed.date),
-        "excerpt": parsed.text[:EXCERPT_CHARS],
-        "attachments": _attachments([asdict(a) for a in parsed.attachments]),
-    }
+    """A server hit. One message nothing can be made of (`parse` is meant never to raise, but
+    this is mail from anywhere) is listed as unreadable, not an error of its mailbox."""
+    try:
+        parsed = parse(raw)
+        return {
+            "id": None, "mailbox": name, "uid": uid, "from": parsed.from_addr,
+            "from_name": parsed.from_name, "subject": parsed.subject,
+            "date": _utc_iso(parsed.date), "excerpt": parsed.text[:EXCERPT_CHARS],
+            "attachments": _attachments([asdict(a) for a in parsed.attachments]),
+        }
+    except Exception:  # noqa: BLE001 - a bad message must not fail the mailbox's search
+        return {
+            "id": None, "mailbox": name, "uid": uid, "from": "", "from_name": "",
+            "subject": UNREADABLE, "date": None, "excerpt": "", "attachments": [],
+        }
 
 
 def _from_sender(hit: dict, sender: str) -> bool:

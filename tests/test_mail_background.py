@@ -454,6 +454,58 @@ def test_server_search_one_mailbox_failing_does_not_stop_the_others(hub_dir):
     assert qq.closed  # closed although the login failed
 
 
+def test_server_search_a_hit_with_an_extreme_date_is_listed_with_no_date(hub_dir):
+    """`Date: ... 9999 ... -0500` is a valid date that cannot be written in UTC: the hit stays
+    in the answer (last, with `date: null`) and the mailbox is not an error."""
+    fake = FakeServer()
+    old_mail(fake, "Tax return 2024", 200)
+    year9999 = make_raw("Tax return forever", "spam@x.example", WORK, "about Tax return",
+                        date="Fri, 31 Dec 9999 23:59:59 -0500")
+    fake.deliver(year9999, received=NOW - timedelta(days=1))  # the newest UID
+    add(hub_dir, fake)
+    assert parse(year9999).date == "9999-12-31T23:59:59-05:00"  # what the test is about
+    out = server_search(hub_dir, fake, "return")
+    assert out["errors"] == [] and out["total"] == 2
+    assert subjects(out) == ["Tax return 2024", "Tax return forever"]
+    assert [item["date"] for item in out["items"]][1] is None
+    assert out["items"][0]["date"] == (NOW - timedelta(days=200)).isoformat(timespec="seconds")
+    json.dumps(out, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("9999-12-31T23:59:59-05:00", None),  # past the last UTC moment
+    ("0001-01-01T00:00:00+05:00", None),  # before the first
+    ("2026-10-14T09:00:00+08:00", "2026-10-14T01:00:00+00:00"),
+    ("2026-10-14T09:00:00", "2026-10-14T09:00:00+00:00"),
+    ("not a date", None), ("", None), (None, None),
+])
+def test_utc_iso_never_raises(value, expected):
+    assert background._utc_iso(value) == expected
+
+
+def test_server_search_one_message_that_cannot_be_read_does_not_fail_the_mailbox(
+        hub_dir, monkeypatch):
+    fake = FakeServer()
+    old_mail(fake, "Tax return fine", 200)
+    old_mail(fake, "Tax return broken", 100)
+    add(hub_dir, fake)
+    real = background.parse
+
+    def parse_or_fail(raw):
+        if b"broken" in raw:
+            raise RecursionError("a message nothing can be read from")
+        return real(raw)
+
+    monkeypatch.setattr(background, "parse", parse_or_fail)
+    out = server_search(hub_dir, fake, "return")
+    assert out["errors"] == []
+    assert sorted(item["uid"] for item in out["items"]) == [1, 2]
+    broken = next(item for item in out["items"] if item["uid"] == 2)
+    assert (broken["subject"], broken["from"], broken["date"], broken["excerpt"]) == (
+        background.UNREADABLE, "", None, "")
+    assert next(i for i in out["items"] if i["uid"] == 1)["subject"] == "Tax return fine"
+
+
 def test_server_search_error_text_never_holds_the_password(hub_dir):
     fake = FakeServer()
     old_mail(fake, "Tax return", 200)
