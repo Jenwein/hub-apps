@@ -1,0 +1,22 @@
+From: candidate@mail.example
+To: me@corp.example
+Subject: application
+Date: Wed, 14 Oct 2026 12:00:00 +0800
+Message-ID: <att-1@mail.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_mixed"
+
+--=_mixed
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+5oKo5aW977yM566A5Y6G6KeB6ZmE5Lu244CC
+--=_mixed
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment;
+ filename*0*=UTF-8''%E7%AE%80%E5%8E%86-;
+ filename*1*=%E5%BC%A0%E4%B8%89.pdf
+
+JVBERi0xLjQKMSAwIG9iajw8Pj5lbmRvYmoKdHJhaWxlcjw8Pj4KJSVFT0YK
+--=_mixed--
