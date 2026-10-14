@@ -911,10 +911,10 @@ def mk(hub_dir, monkeypatch, capsys):
     return run_mk
 
 
-def test_cli_bg_poll_wake(hub_dir, mk):
+def test_cli_poll_wake(hub_dir, mk):
     add(hub_dir, mk.fake)
     mk.fake.deliver(mail_from("boss@corp.example"))
-    status, out, err = mk("bg", "poll", "--wake")
+    status, out, err = mk("poll", "--wake")
     assert (status, err) == (0, "")
     assert out["mailboxes"] == [{"name": "工作", "new": 1, "error": None}]
     assert (out["pending"], out["woke"], out["wake_error"]) == (1, True, None)
@@ -931,9 +931,22 @@ def test_cli_bg_poll_without_wake(hub_dir, mk):
     assert mk.woken == []
 
 
-def test_cli_bg_poll_skipped(hub_dir, mk):
+def test_cli_bg_poll_cannot_wake(hub_dir, mk):
+    """`--wake` is not an option of `bg poll`: a restricted run cannot wake triage."""
+    add(hub_dir, mk.fake)
+    mk.fake.deliver(mail_from("boss@corp.example"))
+    status, out, err = mk("bg", "poll", "--wake")
+    assert status == 1 and out == "" and "mk: unrecognized arguments: --wake" in err
+    assert mk.woken == []
+    with Store.open(hub_dir / "mail") as store:
+        assert store.poll_times() == []  # nothing ran
+
+
+def test_cli_poll_skipped(hub_dir, mk):
     add(hub_dir, mk.fake)
     with poll.poll_lock(hub_dir / "mail"):
-        status, out, _ = mk("bg", "poll", "--wake")
+        status, out, _ = mk("poll", "--wake")
+        assert (status, out) == (0, {"skipped": "another poll is running"})
+        status, out, _ = mk("bg", "poll")
     assert status == 0 and out == {"skipped": "another poll is running"}
     assert mk.woken == []

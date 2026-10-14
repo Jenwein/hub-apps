@@ -1,7 +1,9 @@
 """The background check: take new mail from every mailbox into the index, wake `triage`.
 
-`mk bg poll [--wake]` runs every few minutes as a muted cc-hub script task. For each mailbox
-in config.toml, in config order, it reads INBOX without changing anything on the server
+`mk poll --wake` runs every few minutes as a muted cc-hub script task; `mk bg poll` is the same
+without the wake, the one the restricted triage and digest tasks may run (`--wake` is outside
+`bg`, so a restricted run cannot wake triage). For each mailbox in config.toml, in config
+order, it reads INBOX without changing anything on the server
 (EXAMINE and BODY.PEEK in the adapter: no \\Seen, no move, no delete) and:
 
 - **New mail** (UIDs above the stored `last_uid`) is fetched a few messages at a time, parsed

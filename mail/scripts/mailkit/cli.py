@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import accounts, config, poll
+from . import accounts, background, config, poll
 from .config import MailError
 from .providers import PROVIDERS
 
@@ -129,15 +131,93 @@ def add_account_commands(sub) -> None:
     a.set_defaults(func=run_account_list)
 
 
-def run_bg_poll(args: argparse.Namespace) -> None:
+def number(text: str, minimum: int) -> int:
+    """An argument that is a plain decimal number (no sign, no spaces, no underscores) from
+    `minimum` up to what the index can hold."""
+    if not re.fullmatch(r"[0-9]+", text):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number")
+    value = int(text)
+    if value < minimum:
+        raise argparse.ArgumentTypeError(f"must be at least {minimum}")
+    if value > background.MAX_NUMBER:
+        raise argparse.ArgumentTypeError(f"{text} is too large")
+    return value
+
+
+def positive_int(text: str) -> int:
+    return number(text, 1)
+
+
+def non_negative_int(text: str) -> int:
+    return number(text, 0)
+
+
+def run_poll(args: argparse.Namespace) -> None:
     wake = (lambda: poll.wake_triage(args.hub)) if args.wake else None
     print_json(poll.poll(args.hub, args.mail_dir, wake=wake))
 
 
+def add_poll_command(sub) -> None:
+    """`mk poll`: the poll that wakes `triage`. It is outside `bg` on purpose: the restricted
+    tasks may run only `mk bg ...`, so they cannot wake themselves."""
+    p = sub.add_parser(
+        "poll", help="take new mail from every mailbox's INBOX into the index without "
+        "changing anything on the server, route it, and note mailbox problems; the poll task "
+        "runs this")
+    p.add_argument("--wake", action="store_true",
+                   help="wake the mail/triage task (cc-hub cron wake) when there is mail to "
+                   "judge or a mailbox problem to report")
+    p.set_defaults(func=run_poll)
+
+
+def run_bg_poll(args: argparse.Namespace) -> None:
+    print_json(poll.poll(args.hub, args.mail_dir))
+
+
+def run_bg_pending(args: argparse.Namespace) -> None:
+    print_json(background.pending(args.mail_dir, page=args.page))
+
+
+def run_bg_judge(args: argparse.Namespace) -> None:
+    print_json(background.judge(args.mail_dir, args.decisions))
+
+
+def run_bg_read(args: argparse.Namespace) -> None:
+    print_json(background.read(args.mail_dir, args.id))
+
+
+def run_bg_search(args: argparse.Namespace) -> None:
+    print_json(background.search(
+        args.hub, args.mail_dir, args.text, mailbox=args.mailbox, sender=args.sender,
+        since=args.since, page=args.page, on_server=args.server))
+
+
+def run_bg_recent_pushed(args: argparse.Namespace) -> None:
+    print_json(background.recent_pushed(args.mail_dir, limit=args.limit))
+
+
+def run_bg_problems(args: argparse.Namespace) -> None:
+    print_json(background.problems(
+        args.mail_dir, mark_reported=args.mark_reported, page=args.page))
+
+
+def run_bg_digest_items(args: argparse.Namespace) -> None:
+    print_json(background.digest_items(args.mail_dir, page=args.page, up_to=args.up_to))
+
+
+def run_bg_digest_done(args: argparse.Namespace) -> None:
+    print_json(background.digest_done(args.mail_dir, args.up_to))
+
+
+def run_bg_status(args: argparse.Namespace) -> None:
+    print_json(background.status(args.mail_dir))
+
+
 def add_bg_commands(sub) -> None:
     """`mk bg ...`: the background commands. They never change anything on a mail server
-    (no send, flag, move or delete), and the restricted triage and digest tasks may run only
-    these."""
+    (no send, flag, move or delete), never print a password, and take only ids, page numbers,
+    `ID=DECISION` pairs and short words: the restricted triage and digest tasks may run only
+    these, and the command line of a restricted task cannot hold shell syntax."""
     p = sub.add_parser(
         "bg", help="background commands: they only read mail and the local index; the "
         "restricted triage and digest tasks may run only these")
@@ -145,11 +225,77 @@ def add_bg_commands(sub) -> None:
 
     a = actions.add_parser(
         "poll", help="take new mail from every mailbox's INBOX into the index without "
-        "changing anything on the server, route it, and note mailbox problems")
-    a.add_argument("--wake", action="store_true",
-                   help="wake the mail/triage task (cc-hub cron wake) when there is mail to "
-                   "judge or a mailbox problem to report")
+        "changing anything on the server (it never wakes triage; `mk poll --wake` does)")
     a.set_defaults(func=run_bg_poll)
+
+    a = actions.add_parser(
+        "pending", help="the mail waiting for a verdict, 10 to a page, oldest first, with the "
+        "rules of each mailbox and the mailbox problems not reported yet; a judged message "
+        "leaves the list, so after judging a page ask for page 1 again")
+    a.add_argument("--page", type=positive_int, default=1)
+    a.set_defaults(func=run_bg_pending)
+
+    a = actions.add_parser(
+        "judge", help="give verdicts to pending mail: ID=important (push it) or ID=digest "
+        "(leave it for the daily digest), for example: judge 12=important 13=digest")
+    a.add_argument("decisions", nargs="+", metavar="ID=DECISION")
+    a.set_defaults(func=run_bg_judge)
+
+    a = actions.add_parser("read", help="one stored message, its whole text included")
+    a.add_argument("id", type=non_negative_int, help="the id of the message")
+    a.set_defaults(func=run_bg_read)
+
+    a = actions.add_parser(
+        "search", help="find mail in the local index, 10 to a page, newest first; with "
+        "--server in each mailbox's own search instead, for mail older than the index")
+    a.add_argument("text", nargs="?", default="",
+                   help="one substring of the subject, the sender or the text, as one "
+                   "argument (empty: any)")
+    a.add_argument("--mailbox", metavar="NAME", help="only this mailbox, by its short name")
+    a.add_argument("--from", dest="sender", metavar="ADDR",
+                   help="only mail whose From address or name contains this")
+    a.add_argument("--since", metavar="YYYY-MM-DD", help="only mail from that day on")
+    a.add_argument("--page", type=positive_int, default=1)
+    a.add_argument("--server", action="store_true",
+                   help="ask the mail servers (read-only); the hits are not stored and have "
+                   "no id; needs the search text")
+    a.set_defaults(func=run_bg_search)
+
+    a = actions.add_parser(
+        "recent-pushed", help="the last pushes, newest first: what a reply to that one "
+        "points at")
+    a.add_argument("--limit", type=positive_int, default=None,
+                   help=f"how many (default {background.PUSHED_DEFAULT}, "
+                   f"at most {background.PUSHED_MAX})")
+    a.set_defaults(func=run_bg_recent_pushed)
+
+    a = actions.add_parser(
+        "problems", help="the mailbox problems and recoveries not reported yet, 10 to a page")
+    a.add_argument("--page", type=positive_int, default=1)
+    a.add_argument("--mark-reported", nargs="+", type=positive_int, metavar="ID",
+                   help="the user was told about the problems with these ids (the `ids` of "
+                   "an item), instead of listing")
+    a.set_defaults(func=run_bg_problems)
+
+    a = actions.add_parser(
+        "digest-items", help="the mail waiting for the digest, 10 to a page, grouped by "
+        "mailbox, with the pushes since the last digest, every open problem and whether "
+        "polling stopped; page 1 returns up_to, later pages must pass it back")
+    a.add_argument("--page", type=positive_int, default=1)
+    a.add_argument("--up-to", type=non_negative_int, metavar="N",
+                   help="the up_to of the first page")
+    a.set_defaults(func=run_bg_digest_items)
+
+    a = actions.add_parser(
+        "digest-done", help="the digest was sent: the mail listed up to N becomes digested "
+        "(N is the up_to of digest-items; 0 when it listed nothing)")
+    a.add_argument("up_to", type=non_negative_int, metavar="UP_TO")
+    a.set_defaults(func=run_bg_digest_done)
+
+    a = actions.add_parser(
+        "status", help="when the last poll ran, whether that is too long ago, and the state "
+        "of each mailbox")
+    a.set_defaults(func=run_bg_status)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,6 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
         "check", help="read config.toml and print the mailboxes in it; an error names the bad key")
     check.set_defaults(func=run_config_check)
     add_account_commands(sub)
+    add_poll_command(sub)
     add_bg_commands(sub)
     return parser
 
@@ -182,4 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args) or 0
     except MailError as err:
         print(f"mk: {err}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as err:  # the index is damaged, or busy in a way Store did not name
+        print(f"mk: the mail index failed: {err}", file=sys.stderr)
         return 1
