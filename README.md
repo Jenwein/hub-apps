@@ -8,12 +8,14 @@ work, and runs a command only after you agree to it.
 | App | What it does |
 |---|---|
 | [`ledger`](ledger/) | Bookkeeping with beancount and Fava: record spending from chat, import Alipay, WeChat and bank bills, ask about your money, get charts. |
+| [`mail`](mail/) | Your mailboxes in the chat: important mail pushed within minutes, a daily digest of the rest, search, archive, delete, and replies sent only after you approve the draft. Needs cc-hub 0.5.0. |
 
 ## Install
 
 ```
 cc-hub tap add Jenwein/hub-apps
 cc-hub app install hub-apps/ledger
+cc-hub app install hub-apps/mail
 ```
 
 Or ask your agent in the chat: "Install the ledger app from Jenwein/hub-apps."
@@ -194,6 +196,78 @@ converted on your machine, the app's scripts make no network calls, and price
 lookups send only the symbols of what you hold, not amounts. Removing the app
 leaves `ledger/` as it is.
 
+## mail
+
+Your mailboxes, watched by the agent in your hub. Important mail is pushed to
+the chat within minutes, the rest comes in a daily digest, and you search,
+read, archive, delete and write mail by chatting. Needs cc-hub 0.5.0 or newer,
+for its script, on-demand and restricted tasks.
+
+- **Supported mailboxes.** NetEase 163, 126 and yeah.net; QQ Mail (also
+  foxmail.com); Gmail (also Google Workspace); Feishu Mail. Not yet: Outlook
+  and Hotmail, iCloud, Lark, Microsoft 365, and Tencent or NetEase enterprise
+  mail. The app logs in over IMAP and SMTP with an app password or
+  authorization code, which you make in the mailbox's settings; the agent
+  tells you where. Feishu Mail needs your company's Feishu admin to allow mail
+  clients.
+- **Pushes.** Every 5 minutes a script checks the inbox of each mailbox,
+  read-only: nothing is marked read, moved or deleted. When new mail arrived,
+  it wakes the agent, which judges each mail against your rules and pushes
+  the important ones in one message. Reply to a push in the chat ("回他：好的，
+  周三可以") and the agent drafts the answer. Mail that was in the inbox before
+  you added the mailbox is never pushed.
+- **Daily digest**, at 08:00 your time: what arrived, counted by mailbox and
+  kind, a few mails worth a look, and anything wrong with a mailbox. If the
+  background check stops, the digest says so first.
+- **Your rules.** One sentence of what counts as important, for all mailboxes
+  or one of them ("only mail sent to me directly that needs my answer");
+  senders that are never pushed; corrections you give in the chat ("don't
+  push these").
+- **Nothing happens behind your back.** A mail is sent only after you saw the
+  whole draft and said send; mail is deleted only after you saw the list and
+  said delete, and it goes to Trash. The tasks that read your mail can run
+  only the app's read-only commands (on Claude Code, cc-hub's guard enforces
+  that), so a mail that tries to give the agent orders cannot make it send or
+  delete anything. Passwords stay in `secrets/mail/` on your machine, never in
+  git.
+- **Attachments** are described by name and content; the agent sends one to
+  the chat when you ask (Feishu takes files up to 30 MB, images up to 10 MB).
+  To attach a file over 2 MB that you send from Feishu, you need cc-connect
+  1.5.1 or newer.
+
+You can say these in the chat:
+
+```
+Add my QQ mailbox 12345@qq.com
+回他：好的，周三可以
+Find the contract Zhang sent last month
+Archive this week's newsletters
+Forward the offer mail to hr@example.com
+Don't push mail from GitHub any more
+Send the digest at 7:30
+```
+
+The agent changes the times with these commands; you can run them yourself
+too:
+
+| Command | What it does | Example |
+|---|---|---|
+| `cc-hub cron set mail/poll "<cron>"` | How often mail is checked. `<cron>` is a cron expression (minute, hour, day, month, weekday) in the server's time, in quotes. | `cc-hub cron set mail/poll "*/15 * * * *"` |
+| `cc-hub cron set mail/digest "<cron>"` | When the digest comes. | `cc-hub cron set mail/digest "30 7 * * *"` |
+| `cc-hub cron set mail/digest --off` | No digest; `--on` brings it back. | `cc-hub cron set mail/digest --off` |
+| `cc-hub cron reset <task>` | Back to the app's time. `<task>` is `mail/poll` or `mail/digest`. | `cc-hub cron reset mail/digest` |
+
+Then the agent registers the task anew in cc-connect, in a direct chat.
+
+### Your data
+
+The mailboxes and rules are in `mail/config.toml`, in the hub's git history.
+The local index of your mail (for search), the drafts and the delete lists are
+in `mail/.state/`, the downloaded attachments in `mail/attachments/`; neither
+is in git, so neither moves with the hub to another machine. Mail goes only
+between your mail servers, your hub and the chat. Removing the app leaves
+`mail/` as it is; the agent asks whether to delete the passwords.
+
 ## Develop
 
 ```
@@ -203,10 +277,12 @@ cc-hub app install /path/to/hub-apps/ledger --link --yes
 ```
 
 The last command links the working copy into a hub as an app, so edits apply at
-once. `/path/to/hub-apps/ledger` is the `ledger/` directory of your clone. The
-tests use synthetic bills only; some fixtures are copied from
-double-entry-generator's examples (Apache-2.0, see `tests/fixtures/deb/NOTICE`).
-No real bill or ledger belongs in this repository.
+once. `/path/to/hub-apps/ledger` is the `ledger/` directory of your clone; use
+`mail/` for the mail app. The tests use synthetic bills and mail only; some
+fixtures are copied from double-entry-generator's examples (Apache-2.0, see
+`tests/fixtures/deb/NOTICE`). No real bill, ledger or mail belongs in this
+repository. The mail tests marked `imapserver` need an IMAP and SMTP test
+server and run only when `MAIL_TEST_IMAP=host:port` is set.
 
 ## License
 
