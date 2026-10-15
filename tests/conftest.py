@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 ROOT = Path(__file__).parents[1]
 SEED = ROOT / "ledger" / "seed" / "ledger"
 sys.path.insert(0, str(ROOT / "ledger" / "scripts"))
+sys.path.insert(0, str(ROOT / "mail" / "scripts"))
 
 # marker -> (executable it needs, reason shown for the skip)
 NEEDS_EXECUTABLE = {
@@ -20,6 +22,8 @@ def pytest_collection_modifyitems(config, items):
         for marker, exe in NEEDS_EXECUTABLE.items():
             if marker in item.keywords and shutil.which(exe) is None:
                 item.add_marker(pytest.mark.skip(reason=f"{exe} is not on PATH"))
+        if "imapserver" in item.keywords and not os.environ.get("MAIL_TEST_IMAP"):
+            item.add_marker(pytest.mark.skip(reason="MAIL_TEST_IMAP=host:port is not set"))
 
 
 @pytest.fixture

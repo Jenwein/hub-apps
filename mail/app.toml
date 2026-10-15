@@ -1,0 +1,17 @@
+[app]
+name = "mail"
+version = "0.1.0"
+description = "Email in chat: important mail pushed, a daily digest, search, drafts and replies"
+min_hub = "0.5.0"
+
+[data]
+dirs = ["mail"]
+
+[[requires]]
+name = "uv"
+bin = "uv"
+
+[requires.install]
+linux = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+macos = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+windows = "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\""
