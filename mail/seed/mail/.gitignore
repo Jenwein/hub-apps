@@ -1,5 +1,0 @@
-# Kept out of git: the local index, drafts and delete lists; downloaded attachments; and
-# the temporary file a write of config.toml leaves behind when it is interrupted.
-.state/
-attachments/
-.*.tmp
