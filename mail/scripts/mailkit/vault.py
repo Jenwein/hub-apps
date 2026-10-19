@@ -107,14 +107,18 @@ def exists(state: Path, mailbox: str) -> bool:
 
 
 def remove(state: Path, mailbox: str) -> bool:
-    """Delete the secret of `mailbox`. True if there was one."""
-    try:
-        secret_path(state, mailbox).unlink()
-    except FileNotFoundError:
-        return False
-    except OSError as err:
-        raise MailError(f"cannot remove the secret of {mailbox}: {err}") from err
-    return True
+    """Delete the secrets of `mailbox`: its password and its OAuth token, so that deleting an
+    Outlook mailbox's secret drops the refresh token too. True if there was either."""
+    existed = False
+    for path in (secret_path(state, mailbox), token_path(state, mailbox)):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            raise MailError(f"cannot remove the secret of {mailbox}: {err}") from err
+        existed = True
+    return existed
 
 
 def token_path(state: Path, mailbox: str) -> Path:

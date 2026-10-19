@@ -370,6 +370,30 @@ def test_secret_delete(boxes, capsys):
     assert "no mailbox nope" in capsys.readouterr().err
 
 
+def test_secret_delete_drops_the_token_of_an_oauth_mailbox(boxes, capsys):
+    vault.store_token(boxes.state, "outlook", b'{"refresh_token": "R3FRESH"}')
+    vault.store_token(boxes.state, "qq", b"{}")  # another mailbox's token stays
+    store(boxes.state, "qq", "abcd")
+    token = vault.token_path(boxes.state, "outlook")
+    assert token.is_file()
+    assert main(["secret-delete", "outlook"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": "outlook", "existed": True}
+    assert not token.exists() and not vault.has_token(boxes.state, "outlook")
+    assert vault.has_token(boxes.state, "qq") and exists(boxes.state, "qq")
+    assert main(["secret-delete", "outlook"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": "outlook", "existed": False}
+
+
+def test_remove_drops_the_password_and_the_token(hub):
+    store(hub.state, "qq", "abcd")
+    vault.store_token(hub.state, "qq", b"{}")
+    assert remove(hub.state, "qq") is True
+    assert not exists(hub.state, "qq") and not vault.has_token(hub.state, "qq")
+    vault.store_token(hub.state, "qq", b"{}")  # a token alone counts as one
+    assert remove(hub.state, "qq") is True
+    assert remove(hub.state, "qq") is False
+
+
 def fill_state(state: Path) -> None:
     store(state, "qq", "abcd")
     (state / "drafts").mkdir()
