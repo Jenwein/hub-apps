@@ -5,7 +5,7 @@ named by a relative file name (himalaya splits `-c` at colons, so `C:\\...` woul
 stdin closed unless the call hands it a mail. The parsers read every key through `norm`, so the
 kebab-case of v2.2.1, snake_case and the camelCase of 3.0 all work. No method runs `message
 delete`, `imap expunge` or `--seen`: "delete" is a move to the trash folder, and a mail is marked
-as read only by `mark_seen`.
+as read only by `mark_seen`. `run` refuses those commands (see FORBIDDEN) whoever asks.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -20,6 +21,7 @@ import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import pairwise
 from typing import NoReturn
 
 from .configs import HIMALAYA_CONFIG
@@ -42,9 +44,10 @@ class ConnectError(HimalayaError):
     """The server could not be reached, or did not answer in time."""
 
 
-# Lowercase substrings of what himalaya prints. The last five connection patterns are the
-# locale-free Winsock error numbers, since Windows words the rest in the language of the system
-# (a refused connection reads `... (os error 10061)` after a Chinese sentence there).
+# Lowercase substrings of what himalaya prints, except `535` (the SMTP code), which counts only as
+# a number of its own: `message 15350 not found` is no login failure. The last five connection
+# patterns are the locale-free Winsock error numbers, since Windows words the rest in the language
+# of the system (a refused connection reads `... (os error 10061)` after a Chinese sentence there).
 AUTH_PATTERNS = (
     "authenticationfailed", "authentication failed", "invalid credentials", "login failed",
     "535", "invalid_grant", "missing refresh token", "no password stored",
@@ -56,12 +59,18 @@ CONNECT_PATTERNS = (
 )
 
 
+def _found(pattern: str, low: str) -> bool:
+    if pattern.isdigit():  # a number: not a piece of a longer number, word or host name
+        return re.search(rf"(?<![0-9a-z]){pattern}(?![0-9a-z])", low) is not None
+    return pattern in low
+
+
 def classify(text: str) -> type[HimalayaError]:
-    """The error class of a message from himalaya."""
+    """The error class of what himalaya printed."""
     low = text.lower()
-    if any(pattern in low for pattern in AUTH_PATTERNS):
+    if any(_found(pattern, low) for pattern in AUTH_PATTERNS):
         return AuthError
-    if any(pattern in low for pattern in CONNECT_PATTERNS):
+    if any(_found(pattern, low) for pattern in CONNECT_PATTERNS):
         return ConnectError
     return HimalayaError
 
@@ -74,8 +83,9 @@ def kind(error: type[HimalayaError]) -> str:
 
 
 def parse_error(stdout: str) -> str:
-    """The message of a failed call: `error` and `sources` of the JSON that himalaya prints
-    (F-CLI) joined with `: `, else the first non-empty line."""
+    """The message of a failed call, from what himalaya printed (F-CLI): with `--json` the `error`
+    and the `sources` joined with `: `; without it the `Error:` line (no `Error: ` prefix) and the
+    `Caused by:` items joined the same way, up to `Suggestions:`; else the first non-empty line."""
     try:
         data = json.loads(stdout)
     except ValueError:
@@ -87,10 +97,22 @@ def parse_error(stdout: str) -> str:
             more = [s for s in sources if isinstance(s, str) and s] if isinstance(
                 sources, list) else []
             return ": ".join([found, *more])
-    for line in stdout.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+    lines = [line.strip() for line in stdout.splitlines()]
+    head = next((line for line in lines if line), "")
+    if not head.startswith("Error:"):
+        return head
+    parts = [head[len("Error:"):].strip()]
+    causes = False
+    for line in lines[lines.index(head) + 1:]:
+        if line.startswith("Suggestions:"):
+            break
+        if line == "Caused by:":
+            causes = True
+        elif causes and line.startswith("- "):
+            parts.append(line[2:].strip())
+        elif causes and line:  # a cause that goes on over several lines
+            parts[-1] += "\n" + line
+    return ": ".join(part for part in parts if part) or head
 
 
 # --- reading JSON ------------------------------------------------------------------------------
@@ -325,6 +347,26 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.communicate(timeout=10)
 
 
+# F-NODEL: what mx never runs, in every spelling himalaya knows. Deleting for good (inside the
+# trash too), expunging (CLOSE expunges as well), `imap raw` (it could send any of them), and
+# `--seen`, which marks a mail as read (as a filter of `imap search` it only selects).
+FORBIDDEN = frozenset({
+    ("message", "delete"), ("message", "rm"), ("msg", "delete"), ("msg", "rm"),
+    ("imap", "delete"), ("imap", "expunge"), ("imap", "close"), ("imap", "raw"),
+})
+
+
+def forbidden(args: tuple[str, ...]) -> str | None:
+    """The forbidden command that `args` contain, as it is spelled there, else None."""
+    words = [arg.lower() for arg in args]
+    for pair in pairwise(words):
+        if pair in FORBIDDEN:
+            return " ".join(pair)
+    if "--seen" in words and words[:2] != ["imap", "search"]:
+        return "--seen"
+    return None
+
+
 def _first_line(data: bytes) -> str:
     for line in data.decode("utf-8", "replace").splitlines():
         if line.strip():
@@ -355,8 +397,16 @@ class Himalaya:
         """`himalaya -c himalaya.toml -a <mailbox> [--json] <args>` in the state directory; the
         bytes it printed. Stdin is the null device unless `input` is given. A non-zero exit is an
         HimalayaError (an AuthError or ConnectError when the text says so) with the message from
-        stdout; no answer within the timeout kills it and is a ConnectError."""
-        argv = [self.executable(), "-c", HIMALAYA_CONFIG, "-a", mailbox]
+        stdout; no answer within the timeout kills it and is a ConnectError. A forbidden command
+        (FORBIDDEN) is refused before anything runs, and so is any call while the machine has no
+        himalaya.toml: himalaya would tell the caller to run its own `himalaya configure`."""
+        refused = forbidden(args)
+        if refused:
+            raise MailError(f"mx never runs himalaya {refused}: mail is never deleted for good")
+        exe = self.executable()
+        if not (self.ctx.state / HIMALAYA_CONFIG).is_file():
+            raise MailError("this machine has no mail config yet: run mx configure")
+        argv = [exe, "-c", HIMALAYA_CONFIG, "-a", mailbox]
         if json:
             argv.append("--json")
         argv.extend(args)
@@ -378,10 +428,11 @@ class Himalaya:
             _kill_tree(proc)
             raise
         if proc.returncode != 0:
+            shown, logged = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
             text = (
-                parse_error(out.decode("utf-8", "replace")) or _first_line(err)
+                parse_error(shown) or _first_line(err)
                 or f"himalaya exited with status {proc.returncode}")
-            raise classify(text)(text[:300])
+            raise classify(f"{shown}\n{logged}")(text[:300])
         return out
 
     def _answer(self, mailbox: str, *args: str) -> object:

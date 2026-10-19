@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fakes import FakeHimalaya, himalaya_body
-from mailtest import ROOT, SEED, Hub
+from mailtest import ROOT, SEED, Hub, windows_launcher, write_placeholder_config
 
 sys.path.insert(0, str(ROOT / "mail" / "scripts"))
 
@@ -35,8 +35,10 @@ def hub(tmp_path, monkeypatch) -> Hub:
 def make_exe(tmp_path, monkeypatch):
     """Return make_exe(name, body) -> Path: an executable `name` that runs the Python `body`.
 
-    The script runs through sys.executable behind a shell script (POSIX) or a .cmd shim
-    (Windows). Its directory, `<tmp>/bin`, is first on PATH.
+    The script `<tmp>/bin/<name>.py` runs through sys.executable behind a shell script (POSIX) or
+    an `.exe` launcher (Windows), and gets its arguments, stdin, stdout, stderr and exit status
+    unchanged. Not a `.cmd` shim: cmd.exe reads `&`, `%` and `^` in the arguments (every non-ASCII
+    IMAP folder name has an `&`). The directory `<tmp>/bin` is first on PATH.
     """
     folder = tmp_path / "bin"
     folder.mkdir(exist_ok=True)
@@ -46,30 +48,31 @@ def make_exe(tmp_path, monkeypatch):
         script = folder / f"{name}.py"
         script.write_text(body, "utf-8", newline="\n")
         if sys.platform == "win32":
-            exe = folder / f"{name}.cmd"
-            exe.write_text(f'@"{sys.executable}" "{script}" %*\r\n', "utf-8", newline="")
-        else:
-            exe = folder / name
-            exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', "utf-8")
-            exe.chmod(0o755)
+            return windows_launcher(folder, tmp_path / "stubs", name, script)
+        exe = folder / name
+        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', "utf-8")
+        exe.chmod(0o755)
         return exe
 
     return make
 
 
 @pytest.fixture
-def fake_himalaya(tmp_path, make_exe):
+def fake_himalaya(hub, tmp_path, make_exe):
     """Return make(server) -> FakeHimalaya: a fake `himalaya` first on PATH that answers from the
-    `server` dict (the format is described at FAKE_HIMALAYA in fakes.py) and logs its calls.
+    `server` dict (the format is described at FAKE_HIMALAYA in fakes.py) and logs its calls. The
+    state directory gets a placeholder himalaya.toml (Himalaya.run wants the file; the fake does
+    not read it).
 
-    One fake per test. The test fails at teardown if a call exited 99: the wrapper asked for
-    something F-NODEL forbids.
+    One fake per test. The test fails at teardown if a call exited 99 (the wrapper asked for
+    something F-NODEL forbids) or 97 (the fake crashed).
     """
     made: list[FakeHimalaya] = []
 
     def make(server: dict) -> FakeHimalaya:
         if made:
             raise RuntimeError("one fake himalaya per test")
+        write_placeholder_config(hub)
         folder = tmp_path / "fake-himalaya"
         folder.mkdir()
         path, log = folder / "server.json", folder / "calls.jsonl"
@@ -79,6 +82,10 @@ def fake_himalaya(tmp_path, make_exe):
         return fake
 
     yield make
-    forbidden = [call["argv"][1:] for fake in made for call in fake.calls() if call["exit"] == 99]
+    calls = [call for fake in made for call in fake.calls()]
+    forbidden = [call["argv"][1:] for call in calls if call["exit"] == 99]
     if forbidden:
         pytest.fail(f"the fake himalaya was asked for what F-NODEL forbids: {forbidden}")
+    crashed = [call["argv"][1:] for call in calls if call["exit"] == 97]
+    if crashed:
+        pytest.fail(f"the fake himalaya crashed on: {crashed}")

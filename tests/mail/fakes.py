@@ -14,7 +14,7 @@ from pathlib import Path
 #     {"<mailbox>": {"<folder>": {"uidvalidity": "1", "uidnext": 40,
 #                                 "messages": [{"uid": 1, "date": "...", "internal_date": "...",
 #                                               "seen": false, "raw": "<eml text>"}]}},
-#      "fail": {"<mailbox>": "<error text>" | {"imap": "<text>", "smtp": "<text>"}}}
+#      "fail": {"<mailbox>": <failure> | {"imap": <failure>, "smtp": <failure>}}}
 # - `<mailbox>` is the account name (`-a`), `<folder>` the folder name as the server gives it
 #   (modified UTF-7 included). `uidnext` is optional (default: highest UID + 1).
 # - `date` is the Date header and `internal_date` the received time, RFC 3339 or RFC 2822; each
@@ -22,8 +22,10 @@ from pathlib import Path
 # - `raw` is the mail as UTF-8 text; for bytes that are not UTF-8 use `raw_b64` (base64 of the
 #   exact bytes) or a `raw` with lone surrogates `\udcXX` (surrogateescape), which round-trip.
 # - `flags` (optional, a list such as ["answered"]) holds the flags other than seen.
-# - `fail`: a text makes every command of that account exit 1 with it as the F-CLI error on
-#   stdout, except `account check`, which reports both backends failing (exit 0). A dict fails
+# - `fail`: a <failure> is an error text, or [error, source, ...] for an error with causes. It
+#   makes every command of that account exit 1 with it on stdout: the F-CLI JSON with `--json`,
+#   else the layout of the real binary (`Error: ...`, `Caused by:` with ` - ...` items,
+#   `Suggestions:`). `account check` reports both backends failing instead (exit 0). A dict fails
 #   one backend: "imap" for every command but `message send`, "smtp" for `message send`.
 # - `message send` appends {"mailbox", "raw"} to the top-level list "_sent" (what a send would
 #   deliver, cut at the first line that is not UTF-8, as himalaya does); `message add` and
@@ -34,7 +36,8 @@ from pathlib import Path
 # or closed), `stdin` (what `message send` and `message add` read, else null) and `exit`.
 #
 # Exit 99 with `F-NODEL` on stdout: `message delete`, `imap expunge` and `--seen` (except as the
-# filter of `imap search`). A command or option the fake does not know exits 2.
+# filter of `imap search`), with himalaya's aliases (`msg`, `rm`) and `imap delete`, `imap close`,
+# `imap raw`. Exit 97: the fake itself crashed. A command or option it does not know exits 2.
 FAKE_HIMALAYA = r'''
 import base64
 import json
@@ -72,9 +75,26 @@ def emit(data):
 def fail(message, sources=(), code=1):
     if STATE["json"]:
         emit({"error": message, "sources": list(sources), "backtrace": None})
-    else:
-        sys.stdout.buffer.write(("\n".join([message, *sources]) + "\n").encode("utf-8"))
+    else:  # the layout of the real one: Error, Caused by, Suggestions
+        lines = [f"Error: {message}", ""]
+        if sources:
+            lines += ["Caused by:", *[f" - {source}" for source in sources], ""]
+        lines += ["Suggestions:", " - Run with --log-level to enable more verbose logs"]
+        sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
     finish(code)
+
+
+def refuse(entry):
+    """Fail with a `fail` entry of the server file: a text, or [error, source, ...]."""
+    if isinstance(entry, list):
+        fail(entry[0], entry[1:])
+    fail(entry)
+
+
+def check_failure(server, backend):
+    entry = failure(server, backend)
+    if entry:
+        refuse(entry)
 
 
 def stdin_is_null():
@@ -413,8 +433,7 @@ def parse_options(rest, valued, flags, query=False):
 
 def mailbox_list(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     out = []
     for name, folder in folders_of(server).items():
         messages = folder["messages"]
@@ -428,8 +447,7 @@ def mailbox_list(opts, positional):
 
 def envelope_search(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     folder = folder_of(server, opts.get("mailbox", "INBOX"))
     tokens = tokenize(" ".join(positional))
     order = None
@@ -458,8 +476,7 @@ def envelope_search(opts, positional):
 
 def imap_status(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     folder = folder_of(server, positional[0])
     messages = folder["messages"]
     emit({
@@ -482,8 +499,7 @@ def sequence_set(text, top):
 
 def imap_fetch(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     folder = folder_of(server, opts.get("mailbox", "INBOX"))
     if len(positional) != 1:
         fail("fake himalaya: imap fetch wants one sequence set", code=2)
@@ -517,8 +533,7 @@ def imap_fetch(opts, positional):
 
 def imap_search(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     folder = folder_of(server, opts.get("mailbox", "INBOX"))
     out = []
     for position, m in enumerate(folder["messages"], 1):
@@ -546,8 +561,7 @@ def imap_search(opts, positional):
 
 def message_read(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     name = opts.get("mailbox", "INBOX")
     folder = folder_of(server, name)
     if not opts.get("raw") or len(positional) != 1:
@@ -579,8 +593,7 @@ def message_send(opts, positional):
     mail = read_stdin()
     server = load()
     folders_of(server)
-    if failure(server, "smtp"):
-        fail(failure(server, "smtp"))
+    check_failure(server, "smtp")
     server.setdefault("_sent", []).append(
         {"mailbox": STATE["account"], "raw": mail.decode("utf-8", "surrogateescape")})
     save(server)
@@ -590,8 +603,7 @@ def message_send(opts, positional):
 def message_add(opts, positional):
     mail = read_stdin()
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     if "mailbox" not in opts:
         fail("fake himalaya: message add needs -m", code=2)
     folder = folder_of(server, opts["mailbox"], missing="TRYCREATE")
@@ -606,8 +618,7 @@ def message_add(opts, positional):
 
 def flag_add(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     folder = folder_of(server, opts.get("mailbox", "INBOX"))
     flags = opts.get("flag", [])
     if not flags or any(f not in FLAGS for f in flags):
@@ -626,8 +637,7 @@ def flag_add(opts, positional):
 
 def message_move(opts, positional):
     server = load()
-    if failure(server, "imap"):
-        fail(failure(server, "imap"))
+    check_failure(server, "imap")
     if "from" not in opts or "to" not in opts:
         fail("fake himalaya: message move needs --from and --to", code=2)
     source = folder_of(server, opts["from"])
@@ -650,9 +660,17 @@ def account_check(opts, positional):
     backends = []
     for backend in ("imap", "smtp"):
         text = failure(server, backend)
+        if isinstance(text, list):
+            text = ": ".join(text)
         backends.append({"backend": backend, "ok": not text, "error": text or None})
     emit({"account": STATE["account"], "backends": backends})
 
+
+# F-NODEL, with the aliases of himalaya (`msg`, `rm`), `imap close` (it expunges) and `imap raw`.
+NODEL = {
+    ("message", "delete"), ("message", "rm"), ("msg", "delete"), ("msg", "rm"),
+    ("imap", "delete"), ("imap", "expunge"), ("imap", "close"), ("imap", "raw"),
+}
 
 COMMANDS = {
     ("mailbox", "list"): (mailbox_list, {}, {"--counts": "counts"}, False),
@@ -703,8 +721,7 @@ def main():
             break
     rest = args[at:]
     head = rest[:2]
-    if head in (["message", "delete"], ["imap", "expunge"]) or (
-            "--seen" in rest and head != ["imap", "search"]):
+    if tuple(head) in NODEL or ("--seen" in rest and head != ["imap", "search"]):
         sys.stdout.write("F-NODEL\n")
         finish(99)
     spec = COMMANDS.get(tuple(head))

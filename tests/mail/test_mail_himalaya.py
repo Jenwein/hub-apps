@@ -1,6 +1,7 @@
 import base64
 import json
 import shutil
+import socket
 import subprocess
 import time
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -29,7 +30,7 @@ from mailkit.himalaya import (
     parse_folders,
 )
 from mailkit.settings import MailError
-from mailtest import write_mailboxes
+from mailtest import write_mailboxes, write_placeholder_config
 
 FIXTURES = Path(__file__).parent / "fixtures" / "himalaya"
 
@@ -90,7 +91,9 @@ def make_server() -> dict:
 @pytest.fixture
 def ctx(hub):
     write_mailboxes(hub, BOXES)
-    return load(hub.root)
+    context = load(hub.root)
+    write_placeholder_config(hub)  # Himalaya.run wants a himalaya.toml; the fakes ignore it
+    return context
 
 
 def words(call: dict) -> list[str]:
@@ -211,20 +214,53 @@ def test_no_method_runs_a_forbidden_command(hub, ctx, fake_himalaya):
         assert call["argv"][5:7] not in (["message", "delete"], ["imap", "expunge"])
 
 
+FORBIDDEN_SPELLINGS = [
+    ["message", "delete", "1"], ["message", "rm", "1"], ["msg", "delete", "1"],
+    ["msg", "rm", "1"], ["imap", "expunge"], ["imap", "close"], ["imap", "delete", "Trash"],
+    ["imap", "raw", "A1 EXPUNGE"], ["message", "read", "1", "-m", "INBOX", "--raw", "--seen"],
+    ["Message", "Delete", "1"], ["--log-level", "off", "message", "delete", "1"],
+]
+
+
 def test_the_fake_refuses_what_must_never_run(hub, ctx, make_exe):
-    """The fake exits 99 with F-NODEL on stdout for each command of F-NODEL, so a wrapper that
-    ever ran one fails its test; `imap search --seen` is only a search filter and passes."""
+    """The fake exits 99 with F-NODEL on stdout for each spelling of F-NODEL, so a wrapper that
+    ever ran one fails its test; `imap search --seen` is only a search filter and passes. The
+    fake is started directly: Himalaya.run would not."""
     server, log = hub.state / "server.json", hub.state / "calls.log"
     server.write_text(json.dumps(make_server()), "utf-8")
-    make_exe("himalaya", himalaya_body(server, log))
-    hima = Himalaya(ctx)
-    for args in (["message", "delete", "1"], ["imap", "expunge"],
-                 ["message", "read", "1", "--raw", "--seen"]):
-        with pytest.raises(HimalayaError, match="F-NODEL"):
-            hima.run("qq", *args)
-    assert hima.run("qq", "imap", "search", "-m", "INBOX", "--seen")
+    exe = make_exe("himalaya", himalaya_body(server, log))
+
+    def start(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [exe, "-c", "himalaya.toml", "-a", "qq", "--json", *args], cwd=hub.state,
+            stdin=subprocess.DEVNULL, capture_output=True, check=False)
+
+    spellings = [args for args in FORBIDDEN_SPELLINGS if args[0] != "Message"]  # clap: no case
+    for args in spellings:
+        done = start(*args)
+        assert (done.returncode, done.stdout.strip()) == (99, b"F-NODEL"), args
+    assert start("imap", "search", "-m", "INBOX", "--seen").returncode == 0
     codes = [json.loads(line)["exit"] for line in log.read_text("utf-8").splitlines()]
-    assert codes == [99, 99, 99, 0]
+    assert codes == [99] * len(spellings) + [0]
+
+
+@pytest.mark.parametrize("args", FORBIDDEN_SPELLINGS)
+def test_the_guard_refuses_each_spelling_before_anything_runs(hub, ctx, fake_himalaya, args):
+    fake = fake_himalaya(make_server())
+    with pytest.raises(MailError, match="never runs") as raised:
+        Himalaya(ctx).run("qq", *args)
+    assert type(raised.value) is MailError
+    assert fake.calls() == []
+
+
+def test_the_guard_leaves_a_search_filter_and_the_move_to_the_trash_alone(
+        hub, ctx, fake_himalaya):
+    fake = fake_himalaya(make_server())
+    hima = Himalaya(ctx)
+    assert hima.run("qq", "imap", "search", "-m", "INBOX", "--seen")
+    hima.move("qq", "INBOX", "2", "Deleted Messages")  # "delete" is a move
+    hima.search("qq", "INBOX", ["subject", '"delete"', "and", "not", "flag", "seen"], 5)
+    assert [call["exit"] for call in fake.calls()] == [0, 0, 0]
 
 
 def test_missing_himalaya_names_the_installer(hub, ctx, monkeypatch, tmp_path):
@@ -235,6 +271,17 @@ def test_missing_himalaya_names_the_installer(hub, ctx, monkeypatch, tmp_path):
         Himalaya(ctx).folders("qq")
     with pytest.raises(MailError, match="mx install-tool himalaya"):
         Himalaya(ctx, exe="no-such-himalaya").folders("qq")
+
+
+def test_a_machine_without_a_config_is_told_to_run_configure(hub, ctx, fake_himalaya, capsys):
+    fake = fake_himalaya(make_server())
+    (hub.state / "himalaya.toml").unlink()
+    with pytest.raises(MailError, match="no mail config yet: run mx configure") as raised:
+        Himalaya(ctx).folders("qq")
+    assert type(raised.value) is MailError  # himalaya's own "run himalaya configure" is not heard
+    assert fake.calls() == []  # himalaya was not called
+    code, out, err = run_cli(hub, capsys, "check")
+    assert (code, out) == (1, "") and "run mx configure" in err
 
 
 def test_exe_overrides_the_path(hub, ctx, fake_himalaya, make_exe):
@@ -327,10 +374,34 @@ def test_parse_error():
         == "imap: boom: inner: deeper"
     assert parse_error('{"error":"alone","sources":[],"backtrace":null}') == "alone"
     assert parse_error('{"error":"alone"}') == "alone"
-    assert parse_error("\n  \nError: it broke\nsecond line\n") == "Error: it broke"
+    assert parse_error("\n  \nwhat happened\nsecond line\n") == "what happened"
     assert parse_error('{"something":"else"}') == '{"something":"else"}'
     assert parse_error("") == ""
     assert parse_error('["not","an","object"]') == '["not","an","object"]'
+
+
+# What the real binary prints without --json, run against a refused loopback port on Windows.
+PLAIN_REFUSED = (
+    "Error: connect 127.0.0.1:1\n\nCaused by:\n"
+    " - 由于目标计算机积极拒绝，无法连接。 (os error 10061)\n\n"
+    "Suggestions:\n - Run with --log-level to enable more verbose logs\n")
+SUGGESTION = "Suggestions:\n - Run with --log-level to enable more verbose logs\n"
+
+
+def test_parse_error_reads_the_plain_layout():
+    refused = "connect 127.0.0.1:1: 由于目标计算机积极拒绝，无法连接。 (os error 10061)"
+    assert parse_error(PLAIN_REFUSED) == refused
+    assert classify(PLAIN_REFUSED) is ConnectError
+    assert parse_error("Error: Account `nope` not found, it holds: qq\n\n" + SUGGESTION) \
+        == "Account `nope` not found, it holds: qq"
+    assert parse_error("Error: outer\n\nCaused by:\n - middle\n - inner\n\n" + SUGGESTION) \
+        == "outer: middle: inner"
+    assert parse_error("Error: outer\n\nCaused by:\n - first line\n   second line\n") \
+        == "outer: first line\nsecond line"
+    assert parse_error("Error:\n\nCaused by:\n - only the cause\n") == "only the cause"
+    assert parse_error("Error:\n") == "Error:"
+    assert parse_error("\n\nError: after blank lines\n") == "after blank lines"
+    assert parse_error("Errors are fine\n") == "Errors are fine"  # not the `Error:` line
 
 
 def test_classify():
@@ -347,6 +418,19 @@ def test_classify():
     assert issubclass(AuthError, HimalayaError) and issubclass(ConnectError, HimalayaError)
     assert issubclass(HimalayaError, MailError)
     assert all(p == p.lower() for p in AUTH_PATTERNS + CONNECT_PATTERNS)
+
+
+def test_535_is_a_login_failure_only_as_a_number_of_its_own():
+    for text in ("smtp: 535 5.7.8 Username and Password not accepted",
+                 "535-5.7.8 Username and Password not accepted", "SMTP error 535.", "code=535",
+                 "(535)"):
+        assert classify(text) is AuthError, text
+    for text in ("message 15350 not found", "uid 5350 is gone", "no message 1535", "x535y",
+                 "host mail535.example.com", "5.3.5", "5350"):
+        assert classify(text) is HimalayaError, text
+    # the other patterns stay substrings
+    assert classify("noAUTHENTICATIONFAILEDno") is AuthError
+    assert classify("xxconnection refusedxx") is ConnectError
 
 
 def test_windows_connection_errors_are_connect_errors_whatever_the_language():
@@ -375,6 +459,56 @@ def test_errors_read_from_stdout_json_and_classified(hub, ctx, fake_himalaya):
     with pytest.raises(HimalayaError, match="some other trouble") as raised:
         hima.status("feishu", "INBOX")
     assert type(raised.value) is HimalayaError
+
+
+@pytest.mark.parametrize(("failure", "cls", "message"), [
+    (["connect imap.qq.com:993", "Connection refused (os error 111)"], ConnectError,
+     "connect imap.qq.com:993: Connection refused (os error 111)"),
+    (["imap login", "NO [AUTHENTICATIONFAILED] Invalid credentials"], AuthError,
+     "imap login: NO [AUTHENTICATIONFAILED] Invalid credentials"),
+    (["something broke", "inner detail"], HimalayaError, "something broke: inner detail"),
+    ("plain", HimalayaError, "plain"),
+])
+def test_a_failure_in_the_plain_layout_is_classified_with_its_cause(
+        hub, ctx, fake_himalaya, failure, cls, message):
+    """`raw()` runs without --json, so the cause sits on a `Caused by:` line, not in a field."""
+    fake = fake_himalaya({"qq": {}, "fail": {"qq": failure}})
+    hima = Himalaya(ctx)
+    with pytest.raises(cls) as plain:
+        hima.raw("qq", "INBOX", "1")
+    assert fake.calls()[0]["argv"][5] != "--json"  # the plain layout was the one asked for
+    assert type(plain.value) is cls
+    assert str(plain.value) == message and "Error:" not in str(plain.value)
+    with pytest.raises(cls) as with_json:  # the same failure with --json reads the same
+        hima.folders("qq")
+    assert str(with_json.value) == message
+
+
+def test_the_whole_output_classifies_but_the_message_is_the_error(hub, ctx, make_exe):
+    make_exe("himalaya", (
+        "import json, sys\n"
+        "print(json.dumps({'error': 'it failed', 'sources': [], 'backtrace': None}))\n"
+        "print('operation timed out', file=sys.stderr)\n"
+        "sys.exit(1)\n"))
+    with pytest.raises(ConnectError) as raised:
+        Himalaya(ctx).folders("qq")
+    assert str(raised.value) == "it failed"
+
+
+def test_a_number_inside_a_message_is_not_a_login_failure(hub, ctx, make_exe):
+    make_exe("himalaya", "print('Error: message 15350 not found')\nraise SystemExit(1)\n")
+    with pytest.raises(HimalayaError, match="^message 15350 not found$") as raised:
+        Himalaya(ctx).raw("qq", "INBOX", "15350")
+    assert type(raised.value) is HimalayaError
+
+
+def test_the_fake_reports_its_own_crash_as_97(hub, ctx, make_exe):
+    server, log = hub.state / "server.json", hub.state / "calls.log"
+    server.write_text("this is not json", "utf-8")
+    make_exe("himalaya", himalaya_body(server, log))
+    with pytest.raises(HimalayaError, match="fake himalaya crashed"):
+        Himalaya(ctx).folders("qq")
+    assert json.loads(log.read_text("utf-8").splitlines()[0])["exit"] == 97
 
 
 def test_the_error_comes_from_stdout_not_stderr(hub, ctx, make_exe):
@@ -869,6 +1003,28 @@ def test_json_schema_has_the_fields_we_read():
         assert not missing, f"{key}: no {missing} in the schema"
         captured = json.loads((FIXTURES / "schema" / f"{key}.json").read_text("utf-8"))
         assert schema == captured, f"{key}: himalaya's schema changed: capture it again"
+
+
+@pytest.mark.himalaya
+def test_the_real_binary_failing_to_connect_is_a_connect_error(hub, ctx):
+    """A loopback port that nothing listens on: no server is contacted. `raw()` gets the plain
+    layout (Error, Caused by, Suggestions), `folders()` the JSON; both say the same."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # free now, and nothing listens on it
+    config = (
+        "[accounts.qq]", "default = true", "email = 'me@qq.com'",
+        f"imap.server = 'imap://127.0.0.1:{port}'",
+        "imap.sasl.plain.username = 'me@qq.com'", "imap.sasl.plain.password.raw = 'x'")
+    (hub.state / "himalaya.toml").write_text("\n".join(config), "utf-8", newline="")
+    hima = Himalaya(ctx, timeout=60)
+    with pytest.raises(ConnectError) as plain:
+        hima.raw("qq", "INBOX", "1")
+    with pytest.raises(ConnectError) as with_json:
+        hima.folders("qq")
+    assert str(plain.value).startswith(f"connect 127.0.0.1:{port}: ")
+    assert "Error:" not in str(plain.value) and "Suggestions" not in str(plain.value)
+    assert str(plain.value) == str(with_json.value)
 
 
 def test_the_captured_schemas_carry_the_fields_we_read():

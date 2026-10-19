@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import shutil
@@ -493,3 +494,33 @@ def test_make_exe_fixture_runs_a_python_script_from_path(make_exe):
     assert found and Path(found) == made
     done = subprocess.run([found, "a b", "c"], capture_output=True, text=True, check=True)
     assert done.stdout.strip() == "args: a b c"
+
+
+ARGV_LOGGER = '''\
+import json, os, sys
+from pathlib import Path
+
+Path(__file__).with_name("argv.json").write_text(
+    json.dumps({"argv": sys.argv[1:], "file": os.path.basename(__file__), "arg0": sys.argv[0]}),
+    "utf-8")
+sys.stdout.buffer.write(sys.stdin.buffer.read())
+print("to stderr", file=sys.stderr)
+sys.exit(3)
+'''
+
+
+def test_make_exe_hands_over_arguments_exactly(make_exe):
+    """The fake gets what the caller passed: `&` (every non-ASCII IMAP folder name has one), `%`
+    and `^` mean nothing to it, and stdin, stdout, stderr and the exit status pass through."""
+    made = make_exe("argv-tool", ARGV_LOGGER)
+    args = ["&XfJT0ZAB-", "R%PATH%D", "x^y", "a b", 'say "hi"', "", "100%", "!x!", "a|b", "a>b",
+            "<c>", "(d)", "e&f&g", "--seen", "已发送"]
+    done = subprocess.run(
+        [shutil.which("argv-tool"), *args], input=b"mail \xe4\xbd\xa0 bytes\r\n",
+        capture_output=True, check=False)
+    logged = json.loads((made.parent / "argv.json").read_text("utf-8"))
+    assert logged["argv"] == args
+    assert logged["file"] == "argv-tool.py" and logged["arg0"].endswith("argv-tool.py")
+    assert done.stdout == b"mail \xe4\xbd\xa0 bytes\r\n"
+    assert done.stderr.strip() == b"to stderr"
+    assert done.returncode == 3
