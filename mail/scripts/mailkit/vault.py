@@ -1,11 +1,14 @@
-"""The secrets of the mail app: passwords, kept in the state directory and never in the hub.
+"""The secrets of the mail app: passwords and OAuth tokens, kept in the state directory and never
+in the hub.
 
-A secret is one file, `secrets/<mailbox>`, holding the text and nothing else (no line break).
-Nothing here prints one: only `secret-fetch` does, for himalaya and carillon.
+A password is one file, `secrets/<mailbox>`, holding the text and nothing else (no line break). An
+OAuth token is `secrets/<mailbox>.oauth.json`, the JSON that ortie hands over. Nothing here prints
+one: only `secret-fetch` and `token-store read` do, for himalaya, carillon and ortie.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -52,6 +55,17 @@ def _check(mailbox: str) -> str:
 
 def secret_path(state: Path, mailbox: str) -> Path:
     return Path(state) / "secrets" / _check(mailbox)
+
+
+def _put(path: Path, data: bytes, mailbox: str) -> None:
+    """Write a secret file into `secrets/`, which is made private first."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if POSIX:
+            path.parent.chmod(0o700)
+        write_private(path, data)
+    except OSError as err:
+        raise MailError(f"cannot store the secret of {mailbox}: {err}") from err
 
 
 def store(state: Path, mailbox: str, value: str) -> None:
@@ -101,6 +115,43 @@ def remove(state: Path, mailbox: str) -> bool:
     except OSError as err:
         raise MailError(f"cannot remove the secret of {mailbox}: {err}") from err
     return True
+
+
+def token_path(state: Path, mailbox: str) -> Path:
+    """Where ortie's token of `mailbox` is kept: next to the passwords, never in the generated
+    configs."""
+    base = secret_path(state, mailbox)
+    return base.with_name(f"{base.name}.oauth.json")
+
+
+def store_token(state: Path, mailbox: str, data: bytes) -> None:
+    """Keep the token JSON ortie wrote. Anything else is refused, and the old token stays; the
+    message never quotes `data`."""
+    path = token_path(state, mailbox)
+    try:
+        json.loads(data.decode("utf-8"))
+    except ValueError:  # not UTF-8, or not JSON
+        raise MailError("the token is not JSON: nothing stored") from None
+    _put(path, data, mailbox)
+
+
+def read_token(state: Path, mailbox: str) -> str | None:
+    """The token JSON of `mailbox`, or None when none is stored. For `token-store read` only."""
+    path = token_path(state, mailbox)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise MailError(f"cannot read the token of {mailbox}: {err}") from err
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:  # the error would quote a byte of it
+        raise MailError(f"the token of {mailbox} is not UTF-8 text: sign in again") from None
+
+
+def has_token(state: Path, mailbox: str) -> bool:
+    return token_path(state, mailbox).is_file()
 
 
 def mx_command(ctx: Ctx, *args: str) -> list[str]:

@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import context, tools, vault
+from . import configs, context, tools, vault
 from .paths import locked
 from .settings import Mailbox, MailError
+from .tools import NO_WINDOW
 
 
 class Parser(argparse.ArgumentParser):
@@ -94,6 +97,169 @@ def run_secret_fetch(args: argparse.Namespace) -> None:
     sys.stdout.flush()
 
 
+def run_configure(args: argparse.Namespace) -> None:
+    """Write the himalaya, carillon and ortie configs, and say what the user still has to type."""
+    ctx = load_ctx(args)
+    written = configs.write_configs(ctx)
+    boxes = ctx.mailboxes.items()
+    print_json({
+        "written": written,
+        "missing_secrets": [
+            name for name, box in boxes
+            if box.auth == "password" and not vault.exists(ctx.state, name)],
+        "missing_sign_in": [
+            name for name, box in boxes
+            if box.auth == "oauth" and not vault.has_token(ctx.state, name)],
+    })
+
+
+def oauth_mailbox(ctx: context.Ctx, name: str) -> Mailbox:
+    """The mailbox `name`, which must sign in with OAuth: a password one has no token."""
+    box = ctx.mailbox(name)
+    if box.auth != "oauth":
+        raise MailError(f"{name} signs in with a password, not OAuth: mx secret-set {name}")
+    return box
+
+
+def read_stdin_bytes() -> bytes:
+    stream = sys.stdin
+    if stream is None:
+        return b""
+    buffer = getattr(stream, "buffer", None)
+    return buffer.read() if buffer is not None else stream.read().encode("utf-8")
+
+
+def run_token_store(args: argparse.Namespace) -> None:
+    """The storage commands of ortie: `read` prints the token it asks for, `write` keeps what it
+    sends on stdin. The only commands that handle a token, and only ortie calls them."""
+    ctx = load_ctx(args)
+    box = oauth_mailbox(ctx, args.mailbox)
+    if args.action == "write":
+        vault.store_token(ctx.state, box.name, read_stdin_bytes())
+        return
+    token = vault.read_token(ctx.state, box.name)
+    if token is None:
+        raise MailError(
+            f"no token stored for {box.name}: "
+            f"sign in on the server's terminal with mx oauth-login {box.name}")
+    sys.stdout.write(token)
+    sys.stdout.flush()
+
+
+def ortie_json(ctx: context.Ctx, ortie: str, mailbox: str, *args: str) -> dict:
+    """Run ortie in the state directory and read its JSON answer. A failure is a MailError with
+    the error ortie gives."""
+    try:
+        done = subprocess.run(
+            configs.ortie_argv(ortie, mailbox, "--json", *args), cwd=ctx.state, check=False,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=60, creationflags=NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        raise MailError(f"cannot run ortie: {err}") from err
+    try:
+        answer = json.loads(done.stdout)
+    except ValueError:  # not JSON, or bytes that are not UTF-8
+        answer = None
+    if done.returncode != 0:
+        said = answer.get("error") if isinstance(answer, dict) else None
+        reason = said[:300] if isinstance(said, str) and said else f"exit {done.returncode}"
+        raise MailError(f"ortie said: {reason}")
+    if not isinstance(answer, dict):
+        raise MailError("ortie answered something that is not JSON")
+    return answer
+
+
+def ortie_attached(ctx: context.Ctx, ortie: str, mailbox: str, *args: str) -> None:
+    """Run ortie on the terminal the user is at: it waits for the user, and shows its progress."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        done = subprocess.run(  # no capture, no NO_WINDOW: this one talks to the person
+            configs.ortie_argv(ortie, mailbox, *args), cwd=ctx.state, check=False)
+    except OSError as err:
+        raise MailError(f"cannot run ortie: {err}") from err
+    if done.returncode != 0:
+        raise MailError(f"ortie could not finish the sign-in (exit {done.returncode})")
+
+
+def answer_field(answer: dict, key: str) -> str:
+    value = answer.get(key)
+    if not isinstance(value, str) or not value:
+        raise MailError(f"ortie's answer has no {key}")
+    return value
+
+
+def sign_in_with_device(ctx: context.Ctx, ortie: str, name: str) -> None:
+    """The device grant: the user opens an address on any device and types a short code there."""
+    try:
+        answer = ortie_json(ctx, ortie, name, "auth", "get")
+        device_code = answer_field(answer, "device_code")
+        user_code = answer_field(answer, "user_code")
+        address = answer_field(answer, "verification_uri")
+        print(f"On any device, open {address} and enter the code {user_code}", file=sys.stderr)
+        print("Waiting until you have approved the sign-in...", file=sys.stderr, flush=True)
+        ortie_attached(ctx, ortie, name, "auth", "resume", device_code)
+    except MailError as err:
+        raise MailError(
+            f"{err}\nIf Microsoft refuses the device sign-in, run it again with --paste: "
+            f"uv run apps/mail/scripts/mx.py oauth-login {name} --paste") from None
+
+
+def sign_in_with_code(ctx: context.Ctx, ortie: str, name: str) -> None:
+    """The authorization-code grant: the browser ends on https://localhost/?code=..., which does
+    not load, and the user pastes that address here."""
+    answer = ortie_json(ctx, ortie, name, "auth", "get")
+    address = answer_field(answer, "authorization_uri")
+    state = answer_field(answer, "state")
+    verifier = answer_field(answer, "pkce_code_verifier")
+    print(f"Open this address in a browser and sign in:\n{address}\n", file=sys.stderr)
+    print(
+        "The browser ends on a page that does not load, https://localhost/?code=...\n"
+        "Copy its address from the address bar and paste it here: ",
+        end="", file=sys.stderr, flush=True)
+    try:
+        pasted = input().strip()
+    except EOFError:
+        raise MailError("no address given: nothing signed in") from None
+    if not pasted or pasted.startswith("-"):
+        raise MailError("that is not an address: nothing signed in")
+    ortie_attached(
+        ctx, ortie, name, "auth", "resume", "--state", state, "--pkce", verifier, pasted)
+
+
+def sign_in(ctx: context.Ctx, ortie: str, name: str, *, paste: bool) -> None:
+    """Run the sign-in, then ask ortie whether it left a token."""
+    if paste:
+        sign_in_with_code(ctx, ortie, name)
+    else:
+        sign_in_with_device(ctx, ortie, name)
+    try:
+        ortie_json(ctx, ortie, name, "token", "inspect")
+    except MailError as err:
+        raise MailError(f"the sign-in left no token for {name}: {err}") from None
+
+
+def run_oauth_login(args: argparse.Namespace) -> None:
+    """Sign an Outlook mailbox in. Like secret-set it needs a person at a terminal: the code or
+    the pasted address is the user's consent, and it cannot come from the chat."""
+    if not vault.at_terminal():
+        raise MailError(
+            "type it yourself in the server's terminal: "
+            f"uv run apps/mail/scripts/mx.py oauth-login {args.mailbox}")
+    ctx = load_ctx(args)
+    box = oauth_mailbox(ctx, args.mailbox)
+    ortie = shutil.which("ortie")
+    if ortie is None:
+        raise MailError("ortie is not installed: uv run apps/mail/scripts/mx.py install-tool ortie")
+    with locked(ctx.state):
+        configs.record_grant(ctx.state, box.name, "authorization-code" if args.paste else "device")
+        configs.write_configs(ctx)
+    try:
+        sign_in(ctx, ortie, box.name, paste=args.paste)
+    except KeyboardInterrupt:
+        raise MailError("cancelled: nothing signed in") from None
+    print_json({"signed_in": box.name})
+
+
 def run_forget(args: argparse.Namespace) -> None:
     ctx = load_ctx(args)
     with locked(ctx.state):
@@ -137,6 +303,24 @@ def build_parser() -> Parser:
     p = sub.add_parser("secret-fetch")
     p.add_argument("mailbox")
     p.set_defaults(func=run_secret_fetch)
+
+    p = sub.add_parser(
+        "configure", help="write the himalaya, carillon and ortie configs from mailboxes.toml")
+    p.set_defaults(func=run_configure)
+
+    p = sub.add_parser(
+        "oauth-login", help="sign an Outlook mailbox in (do it yourself, in a terminal)")
+    p.add_argument("mailbox")
+    p.add_argument(
+        "--paste", action="store_true",
+        help="sign in by pasting the address the browser ends on, if the device sign-in is refused")
+    p.set_defaults(func=run_oauth_login)
+
+    # No help text, like secret-fetch: only ortie calls it.
+    p = sub.add_parser("token-store")
+    p.add_argument("action", choices=["read", "write"])
+    p.add_argument("mailbox")
+    p.set_defaults(func=run_token_store)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")
