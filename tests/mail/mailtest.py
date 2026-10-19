@@ -28,6 +28,17 @@ def write_mailboxes(hub: Hub, text: str) -> None:
     (hub.data / "mailboxes.toml").write_text(text, "utf-8", newline="\n")
 
 
+def eml_with_attachment(subject: str, sender: str, when: str, body: str = "see the file") -> str:
+    """The text of an .eml with a plain body and a PDF attachment."""
+    return (
+        f"From: {sender}\nTo: me@example.org\nSubject: {subject}\nDate: {when}\n"
+        'MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary="b0"\n\n'
+        f"--b0\nContent-Type: text/plain; charset=utf-8\n\n{body}\n"
+        '--b0\nContent-Type: application/pdf; name="a.pdf"\n'
+        'Content-Disposition: attachment; filename="a.pdf"\n'
+        "Content-Transfer-Encoding: base64\n\nJVBERi0xLjQK\n--b0--\n")
+
+
 def write_placeholder_config(hub: Hub) -> None:
     """A himalaya.toml in the state directory that says nothing. Himalaya.run wants the file to
     exist (`mx configure` writes the real one); the fakes never read it. An existing one stays."""

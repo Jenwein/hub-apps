@@ -30,7 +30,7 @@ from mailkit.himalaya import (
     parse_folders,
 )
 from mailkit.settings import MailError
-from mailtest import write_mailboxes, write_placeholder_config
+from mailtest import eml_with_attachment, write_mailboxes, write_placeholder_config
 
 FIXTURES = Path(__file__).parent / "fixtures" / "himalaya"
 
@@ -184,7 +184,7 @@ def test_each_method_is_one_command(hub, ctx, fake_himalaya):
     assert [call["argv"][5:6] == ["--json"] for call in calls] == [True] * 6 + [False] + [True] * 5
     assert [words(call) for call in calls] == [
         ["mailbox", "list"],
-        ["envelope", "search", "-m", "INBOX", "-s", "7", "-p", "1",
+        ["envelope", "search", "-m", "INBOX", "-s", "7", "-p", "1", "--has-attachment",
          "subject", '"x"', "and", "not", "flag", "seen", "order", "by", "date", "desc"],
         ["imap", "status", "INBOX"],
         ["imap", "fetch", "-m", "INBOX", "6:*", "--internal-date"],
@@ -601,8 +601,29 @@ def test_search_returns_parsed_envelopes_newest_first(hub, ctx, fake_himalaya):
     assert [e.id for e in found] == ["5", "2", "1"]
     assert found[0] == Envelope(
         "5", "季度发票", "Carol", "carol@example.org",
-        datetime(2026, 10, 19, 10, 0, tzinfo=SHANGHAI), False, None)
+        datetime(2026, 10, 19, 10, 0, tzinfo=SHANGHAI), False, False)
     assert found[2].seen is True
+
+
+def test_search_asks_for_the_attachment_column(hub, ctx, fake_himalaya):
+    server = make_server()
+    server["qq"]["INBOX"]["messages"].append({
+        "uid": 6, "date": "Tue, 20 Oct 2026 08:00:00 +0800", "seen": False,
+        "raw": eml_with_attachment(
+            "receipt", "Shop <shop@example.org>", "Tue, 20 Oct 2026 08:00:00 +0800")})
+    fake = fake_himalaya(server)
+    hima = Himalaya(ctx)
+
+    found = hima.search("qq", "INBOX", [], 10)
+    attachments = {e.id: e.has_attachment for e in found}
+    assert attachments == {"6": True, "5": False, "2": False, "1": False}
+    # A flag, so it goes before the query words.
+    assert words(fake.calls()[0])[:9] == [
+        "envelope", "search", "-m", "INBOX", "-s", "10", "-p", "1", "--has-attachment"]
+
+    # The fake, like himalaya, fills the field only when asked: without the flag it is null.
+    plain = hima.run("qq", "envelope", "search", "-m", "INBOX", "-s", "10", "-p", "1")
+    assert {e.has_attachment for e in parse_envelopes(json.loads(plain))} == {None}
 
 
 def test_search_understands_the_query_words(hub, ctx, fake_himalaya):

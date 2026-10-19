@@ -203,7 +203,7 @@ class Envelope:
     from_addr: str
     date: datetime | None  # the Date header
     seen: bool
-    has_attachment: bool | None  # known only when asked for
+    has_attachment: bool | None  # filled by `search`, which asks for it
 
 
 @dataclass(frozen=True)
@@ -449,10 +449,11 @@ class Himalaya:
     def search(
         self, mailbox: str, folder: str, query: list[str], limit: int
     ) -> list[Envelope]:
-        """The newest `limit` envelopes of `folder` that the query words select."""
+        """The newest `limit` envelopes of `folder` that the query words select, with
+        `has_attachment` filled in (`--has-attachment` is a flag, so it comes before the query)."""
         return parse_envelopes(self._answer(
             mailbox, "envelope", "search", "-m", folder, "-s", str(limit), "-p", "1",
-            *query, "order", "by", "date", "desc"))
+            "--has-attachment", *query, "order", "by", "date", "desc"))
 
     def status(self, mailbox: str, folder: str) -> tuple[str, int]:
         """`(uid_validity, uid_next)` of `folder`."""

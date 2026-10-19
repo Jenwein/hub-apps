@@ -5,7 +5,8 @@ numbers them from 1. `save_listing` keeps the list in the state directory, and `
 of "the last list" back into a mail, so `mx show 3` means the third line of the last `mx list`.
 
 The subjects and sender names in a list are text from the mails and reach the agent: `clean` cuts
-them short and takes out control and bidi characters first. Nothing else of a mail is listed.
+them short and takes out control, bidi and invisible characters first. Nothing else of a mail is
+listed.
 """
 
 from __future__ import annotations
@@ -29,19 +30,29 @@ LOCAL_FACTOR = 5  # a search that is filtered here fetches this many times the l
 LOCAL_MAX = 200  # ... but never more than this
 OUTLOOK_BODY = "Outlook cannot search mail bodies for non-ASCII words"
 
-# The characters that reorder text: embeddings and overrides, then isolates.
-BIDI = frozenset(chr(c) for c in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+# Characters that reorder text or show nothing, and so can hide or disguise words in a subject:
+# the bidi controls and marks, the zero-width characters, and the Unicode tag block (a copy of
+# ASCII that no font draws). Not the whole category Cf: a soft hyphen is plain text.
+INVISIBLE = frozenset(chr(c) for c in (
+    *range(0x202A, 0x202F),  # embeddings and overrides
+    *range(0x2066, 0x206A),  # isolates
+    0x200E, 0x200F, 0x061C,  # direction marks
+    *range(0x200B, 0x200E),  # zero-width space, non-joiner and joiner
+    0x2060, 0xFEFF,  # word joiner, zero-width no-break space
+    *range(0xE0000, 0xE0080),  # tag characters
+))
 ORDER_BY = re.compile(r"order\s+by", re.IGNORECASE)
 ONE_DAY = timedelta(days=1)
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def clean(text: str, limit: int) -> str:
-    """`text` as one short line: control and bidi characters removed, every run of white space
-    (newlines included) one space, stripped, and cut to `limit` characters with a trailing `…`."""
+    """`text` as one short line: control, bidi and invisible characters removed (INVISIBLE), every
+    run of white space (newlines included) one space, stripped, and cut to `limit` characters
+    with a trailing `…`."""
     kept = []
     for char in text:
-        if char in BIDI:
+        if char in INVISIBLE:
             continue
         if char.isspace():
             kept.append(" ")
@@ -128,7 +139,7 @@ class Item:
     sender: str  # cleaned and cut to NAME_LIMIT
     subject: str  # cleaned and cut to SUBJECT_LIMIT
     seen: bool
-    attachment: bool  # true only when himalaya said so: a plain search does not ask
+    attachment: bool  # himalaya's word for it; Himalaya.search always asks
 
 
 @dataclass
