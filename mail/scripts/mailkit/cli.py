@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import context
+from . import context, tools
 from .settings import MailError
 
 
@@ -30,6 +30,13 @@ def load_ctx(args: argparse.Namespace) -> context.Ctx:
     return context.load(args.hub)
 
 
+def run_install_tool(args: argparse.Namespace) -> None:
+    """Needs no hub: the pinned tools are installed where there is none yet."""
+    dest = Path(args.dir).expanduser().absolute() if args.dir else Path.home() / ".local" / "bin"
+    path = tools.install_tool(args.tool, dest)
+    print_json({"installed": str(path), "version": tools.TOOLS[args.tool].version})
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -39,7 +46,15 @@ def build_parser() -> Parser:
     #     p = sub.add_parser("name", help="..."); p.set_defaults(func=run_name)
     # run_name(args) returns the exit status; None means 0. It calls load_ctx(args) if it needs
     # the hub.
-    parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+
+    p = sub.add_parser(
+        "install-tool", help="download a pinned tool from its official release and check it")
+    p.add_argument("tool", choices=list(tools.TOOLS))
+    p.add_argument(
+        "--dir", metavar="DIR",
+        help="where to put the binary (default: .local/bin in your home directory)")
+    p.set_defaults(func=run_install_tool)
     return parser
 
 

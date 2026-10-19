@@ -6,3 +6,26 @@ min_hub = "0.7.0"
 
 [data]
 dirs = ["mail"]
+
+[[requires]]
+name = "himalaya v2.2.1"
+bin = "himalaya"
+install = "uv run apps/mail/scripts/mx.py install-tool himalaya"
+
+[[requires]]
+name = "Claude Code (the tool-less mail reader)"
+bin = "claude"
+
+[requires.install]
+linux = "curl -fsSL https://claude.ai/install.sh | bash"
+macos = "curl -fsSL https://claude.ai/install.sh | bash"
+windows = "powershell -NoProfile -Command \"irm https://claude.ai/install.ps1 | iex\""
+
+[[requires]]
+name = "uv"
+bin = "uv"
+
+[requires.install]
+linux = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+macos = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+windows = "powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\""
