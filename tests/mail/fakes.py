@@ -930,3 +930,127 @@ class FakeClaude:
 
     def crashes(self) -> list[str]:
         return [entry["crashed"] for entry in self.entries() if "crashed" in entry]
+
+
+# The fake cc-connect 1.5.0: `cc-connect send [-p P] -s S (--stdin | --file F)`. It logs every call
+# and answers success unless $FAKE_CC_CONNECT_MODE says otherwise:
+# - `fail`: every call prints `boom: cc-connect is not connected` on stderr and exits 1;
+# - `echo`: every call prints what it read on stdin (or the file name) on stderr and exits 1;
+# - `loud`: every call prints 1000 `x` on stderr and exits 1;
+# - `sleep`: every call sleeps for a minute (for the timeout).
+# $FAKE_CC_CONNECT_FAIL_FROM=n makes call number n and every later one fail like `fail`.
+#
+# The call log has one JSON line per call, written before it answers: `argv` (the whole sys.argv:
+# argv[1:] is what mx passed), `stdin` (what `--stdin` read, UTF-8 text, else null), `files` (for
+# each `--file` path: the base64 of its content when the call was made, null when unreadable) and
+# `exit`. A crash adds a line {"crashed": "<error>"} and exits 97. Anything but `send` exits 2.
+FAKE_CC_CONNECT = r'''
+import base64
+import json
+import os
+import sys
+import time
+
+LOUD = "x" * 1000
+
+
+def log(entry):
+    with open(LOG, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry) + "\n")
+
+
+def previous_calls():
+    if not os.path.exists(LOG):
+        return 0
+    with open(LOG, encoding="utf-8") as stream:
+        return sum(1 for line in stream if "argv" in json.loads(line))
+
+
+def main():
+    args = sys.argv[1:]
+    entry = {"argv": sys.argv, "stdin": None, "files": {}}
+    number = previous_calls() + 1
+    if args[:1] != ["send"]:
+        entry["exit"] = 2
+        log(entry)
+        sys.stderr.write("fake cc-connect: only `send` is supported\n")
+        sys.exit(2)
+    if "--stdin" in args:
+        entry["stdin"] = sys.stdin.buffer.read().decode("utf-8")
+    for at, word in enumerate(args):
+        if word == "--file" and at + 1 < len(args):
+            path = args[at + 1]
+            try:
+                with open(path, "rb") as stream:
+                    entry["files"][path] = base64.b64encode(stream.read()).decode("ascii")
+            except OSError:
+                entry["files"][path] = None
+    mode = os.environ.get("FAKE_CC_CONNECT_MODE", "")
+    from_call = int(os.environ.get("FAKE_CC_CONNECT_FAIL_FROM", "0") or "0")
+    if mode == "sleep":
+        log({**entry, "exit": None})
+        time.sleep(60)
+    if mode == "echo":
+        entry["exit"] = 1
+        log(entry)
+        sys.stderr.write("cannot send: " + (entry["stdin"] or " ".join(entry["files"])) + "\n")
+        sys.exit(1)
+    if mode == "loud":
+        entry["exit"] = 1
+        log(entry)
+        sys.stderr.write(LOUD + "\n")
+        sys.exit(1)
+    if mode == "fail" or (from_call and number >= from_call):
+        entry["exit"] = 1
+        log(entry)
+        sys.stderr.write("boom: cc-connect is not connected\n")
+        sys.exit(1)
+    entry["exit"] = 0
+    log(entry)
+
+
+try:
+    main()
+except SystemExit:
+    raise
+except Exception as err:
+    log({"crashed": repr(err)})
+    sys.exit(97)
+'''
+
+
+def cc_connect_body(log: Path) -> str:
+    """The fake cc-connect for `make_exe`, bound to the call log."""
+    return f"LOG = {str(log)!r}\n{FAKE_CC_CONNECT}"
+
+
+@dataclass(frozen=True)
+class FakeChat:
+    exe: Path  # the executable `cc-connect`, first on PATH
+    log: Path  # the call log
+    env: Any  # the test's monkeypatch, for `mode` and `fail_from`
+
+    def mode(self, name: str) -> None:
+        """`fail`, `echo`, `loud`, `sleep`, or "" for none (see FAKE_CC_CONNECT)."""
+        self.env.setenv("FAKE_CC_CONNECT_MODE", name)
+
+    def fail_from(self, number: int) -> None:
+        """Call number `number` (from 1) and every later one fail."""
+        self.env.setenv("FAKE_CC_CONNECT_FAIL_FROM", str(number))
+
+    def entries(self) -> list[dict]:
+        if not self.log.exists():
+            return []
+        lines = self.log.read_text("utf-8").splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+
+    def calls(self) -> list[dict]:
+        """Every call so far, oldest first: argv, stdin, files and exit."""
+        return [entry for entry in self.entries() if "argv" in entry]
+
+    def messages(self) -> list[str]:
+        """The texts that were delivered: stdin of each `--stdin` call that exited 0."""
+        return [c["stdin"] for c in self.calls() if c["stdin"] is not None and c["exit"] == 0]
+
+    def crashes(self) -> list[str]:
+        return [entry["crashed"] for entry in self.entries() if "crashed" in entry]

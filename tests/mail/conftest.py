@@ -18,7 +18,7 @@ import pytest
 # Not left to pytest's import mode: mailtest, and later fakes, must import in any of them.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fakes import FakeClaude, FakeHimalaya, claude_body, himalaya_body
+from fakes import FakeChat, FakeClaude, FakeHimalaya, cc_connect_body, claude_body, himalaya_body
 from mailtest import (
     GREENMAIL_BOX,
     GREENMAIL_SECRET,
@@ -128,6 +128,27 @@ def fake_claude(tmp_path, make_exe, monkeypatch):
     crashed = fake.crashes()
     if crashed:
         pytest.fail(f"the fake claude crashed: {crashed}")
+
+
+@pytest.fixture
+def fake_chat(tmp_path, make_exe, monkeypatch):
+    """A fake `cc-connect` first on PATH (FAKE_CC_CONNECT in fakes.py): it takes every `send` and
+    logs the call. `fake_chat.mode(...)` and `.fail_from(...)` make it fail; `.messages()` are the
+    texts it delivered. It does not record a chat: `chat-set` does, or `record_chat(hub)` of
+    mailtest.
+
+    The test fails at teardown if the fake crashed.
+    """
+    folder = tmp_path / "fake-cc-connect"
+    folder.mkdir()
+    log = folder / "calls.jsonl"
+    monkeypatch.delenv("FAKE_CC_CONNECT_MODE", raising=False)
+    monkeypatch.delenv("FAKE_CC_CONNECT_FAIL_FROM", raising=False)
+    fake = FakeChat(make_exe("cc-connect", cc_connect_body(log)), log, monkeypatch)
+    yield fake
+    crashed = fake.crashes()
+    if crashed:
+        pytest.fail(f"the fake cc-connect crashed: {crashed}")
 
 
 GREENMAIL_FOLDERS = ("Sent", "Trash", "Archive")  # INBOX is there for every user

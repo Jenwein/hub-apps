@@ -16,6 +16,10 @@ SEED = ROOT / "mail" / "seed" / "mail"
 GREENMAIL_BOX = "test"
 GREENMAIL_SECRET = "x"
 
+# The private chat that `record_chat` records.
+CHAT_PROJECT = "proj"
+CHAT_SESSION = "feishu:abc"
+
 
 @dataclass(frozen=True)
 class Hub:
@@ -26,6 +30,15 @@ class Hub:
 
 def write_mailboxes(hub: Hub, text: str) -> None:
     (hub.data / "mailboxes.toml").write_text(text, "utf-8", newline="\n")
+
+
+def record_chat(hub: Hub, project: str | None = CHAT_PROJECT, session: str = CHAT_SESSION) -> None:
+    """Record a private chat the way `mx chat-set` does, without sending the greeting."""
+    from mailkit import chat
+    from mailkit.context import load
+
+    env = {"CC_SESSION_KEY": session, **({"CC_PROJECT": project} if project else {})}
+    chat.record(load(hub.root), env)
 
 
 def eml_with_attachment(subject: str, sender: str, when: str, body: str = "see the file") -> str:

@@ -14,7 +14,19 @@ from datetime import date
 from pathlib import Path
 from typing import NoReturn
 
-from . import configs, context, himalaya, query, reader, signin, tools, vault
+from . import (
+    chat,
+    configs,
+    context,
+    himalaya,
+    message,
+    query,
+    reader,
+    signin,
+    strings,
+    tools,
+    vault,
+)
 from .paths import locked
 from .settings import FOLDER_ROLES, Mailbox, MailError
 
@@ -248,6 +260,59 @@ def run_reader_check(args: argparse.Namespace) -> None:
     print_json(reader.check(reader.Reader(ctx.settings.reader_model), ctx.settings.language))
 
 
+def run_chat_set(args: argparse.Namespace) -> None:
+    """Record the chat this runs in as the private chat, and say so in it."""
+    ctx = load_ctx(args)
+    recorded = chat.record(ctx)
+    chat.send_text(recorded, strings.t("chat_hello", ctx.settings.language))
+    print_json({"chat": asdict(recorded)})
+
+
+def run_chat_show(args: argparse.Namespace) -> None:
+    found = chat.saved(load_ctx(args))
+    print_json({"chat": asdict(found) if found else None})
+
+
+def run_show(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.show(ctx, himalaya.Himalaya(ctx), args.n))
+
+
+def run_look(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.look(ctx, himalaya.Himalaya(ctx), args.n))
+
+
+def run_ask(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.ask(ctx, himalaya.Himalaya(ctx), args.n, args.question))
+
+
+def run_code(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.codes(ctx, himalaya.Himalaya(ctx), args.mailbox, args.minutes))
+
+
+def run_attachments(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.attachments(ctx, himalaya.Himalaya(ctx), args.n))
+
+
+def run_attachment_send(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.attachment_send(ctx, himalaya.Himalaya(ctx), args.n, args.index))
+
+
+def run_mark_read(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.mark_read(ctx, himalaya.Himalaya(ctx), args.n))
+
+
+def run_move(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(message.move(ctx, himalaya.Himalaya(ctx), args.n, args.to))
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -340,6 +405,63 @@ def build_parser() -> Parser:
     p = sub.add_parser(
         "reader-check", help="test the mail reader (claude -p with no tools) on a sample mail")
     p.set_defaults(func=run_reader_check)
+
+    p = sub.add_parser(
+        "chat-set", help="record this chat as the private chat: drafts, codes and alerts go "
+        "there (run it from the agent in that chat)")
+    p.set_defaults(func=run_chat_set)
+
+    p = sub.add_parser("chat-show", help="show the recorded private chat")
+    p.set_defaults(func=run_chat_show)
+
+    number = "the number of the mail in the last list"
+    p = sub.add_parser(
+        "show", help="send the original of a listed mail to the private chat (it is not printed)")
+    p.add_argument("n", type=positive_int, help=number)
+    p.set_defaults(func=run_show)
+
+    p = sub.add_parser(
+        "look", help="the reader's verdict on a listed mail: summary, code, amount, deadline, "
+        "tier, category, reason, phishing")
+    p.add_argument("n", type=positive_int, help=number)
+    p.set_defaults(func=run_look)
+
+    p = sub.add_parser(
+        "ask", help="ask the reader about a listed mail; the answer goes to the private chat")
+    p.add_argument("n", type=positive_int, help=number)
+    p.add_argument("--question", required=True, metavar="TEXT", help="the user's question")
+    p.set_defaults(func=run_ask)
+
+    p = sub.add_parser(
+        "code", help="verification codes in the inbox mail of the last few minutes")
+    p.add_argument(
+        "--mailbox", action="append", default=[], metavar="M",
+        help="look in this mailbox (repeat for several; default: all)")
+    p.add_argument(
+        "--minutes", type=positive_int, default=15, metavar="N",
+        help="mail of the last N minutes (default: 15)")
+    p.set_defaults(func=run_code)
+
+    p = sub.add_parser("attachments", help="the attachments of a listed mail")
+    p.add_argument("n", type=positive_int, help=number)
+    p.set_defaults(func=run_attachments)
+
+    p = sub.add_parser(
+        "attachment-send", help="send an attachment of a listed mail to the private chat")
+    p.add_argument("n", type=positive_int, help=number)
+    p.add_argument("index", type=positive_int, help="the number of the attachment (attachments)")
+    p.set_defaults(func=run_attachment_send)
+
+    p = sub.add_parser("mark-read", help="mark a listed mail, and no other, as read")
+    p.add_argument("n", type=positive_int, help=number)
+    p.set_defaults(func=run_mark_read)
+
+    p = sub.add_parser(
+        "move", help="move a listed mail to the archive or trash folder of its mailbox "
+        "(nothing is deleted)")
+    p.add_argument("n", type=positive_int, help=number)
+    p.add_argument("--to", required=True, choices=message.MOVE_TARGETS, help="where to")
+    p.set_defaults(func=run_move)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")

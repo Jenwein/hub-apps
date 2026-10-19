@@ -31,7 +31,7 @@ from mailkit.context import load
 from mailkit.himalaya import Himalaya, HimalayaError
 from mailkit.query import item
 from mailtest import GREENMAIL_BOX as BOX
-from mailtest import GREENMAIL_SECRET, SmtpProxy, fix_server_name
+from mailtest import GREENMAIL_SECRET, SmtpProxy, fix_server_name, record_chat
 
 
 @pytest.fixture
@@ -222,6 +222,42 @@ def test_list_finds_a_chinese_subject(greenmail_hub, ctx, hima, capsys):
     assert item(ctx, 1).subject == subject  # the number resolves to that mail
     assert listed("--subject", "账单")["items"] == []
     assert len(listed()["items"]) == 2
+
+
+@pytest.mark.greenmail
+def test_show_and_move_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, capsys):
+    """Show goes to the chat and leaves the mail unread; only `mark-read` sets \\Seen; `move`
+    puts the mail into the trash folder, whole, and leaves nothing in the inbox."""
+    record_chat(greenmail_hub)
+    address = ctx.mailbox(BOX).address
+    subject = f"gm-show-{uuid4().hex[:8]}"
+    append(ctx, make_mail(address, subject, "Shown in the chat, then moved to the trash."))
+    assert len(wait_for(hima, "INBOX", 1)) == 1
+
+    def run(*argv: str) -> dict:
+        code = main(["--hub", str(greenmail_hub.root), *argv])
+        out = capsys.readouterr()
+        assert code == 0, out.err
+        return json.loads(out.out)
+
+    assert [i["subject"] for i in run("list", "--mailbox", BOX)["items"]] == [subject]
+    uid = item(ctx, 1).id
+
+    assert run("show", "1") == {"n": 1, "shown_in_chat": True}
+    [text] = fake_chat.messages()
+    assert text.startswith(f"From: {address}\n") and f"\nSubject: {subject}\n" in text
+    assert text.endswith("\n\nShown in the chat, then moved to the trash.")
+    assert "\\Seen" not in flags_of(ctx, "INBOX", uid)
+
+    assert run("mark-read", "1") == {"marked_read": 1}
+    assert "\\Seen" in flags_of(ctx, "INBOX", uid)
+
+    original = hima.raw(BOX, "INBOX", uid)
+    assert run("move", "1", "--to", "trash") == {"moved": 1, "to": "Trash"}
+    assert hima.search(BOX, "INBOX", [], 10) == []
+    [trashed] = hima.search(BOX, "Trash", [], 10)
+    assert trashed.subject == subject
+    assert hima.raw(BOX, "Trash", trashed.id) == original
 
 
 # The proxy in front of GreenMail's SMTP port (see greenmail_hub in conftest.py). These two run
