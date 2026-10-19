@@ -8,17 +8,22 @@ addresses, never the code, and never a body the reader wrote: that is text made 
 nobody saw must not stay valid.
 
 `send` checks the code (drafts.check_code) and spends it before anything goes out, then hands the
-mail to himalaya and appends the sent copy separately (F-SAVE). `build` makes the mail 7-bit,
-which himalaya needs (F-SEND); himalaya takes the recipients from To, Cc and Bcc and strips Bcc.
+mail to himalaya and appends the sent copy separately (F-SAVE). A forward goes only with the very
+mail the user approved: its bytes are bound to the code. `build` makes the mail 7-bit, which
+himalaya needs (F-SEND); himalaya takes the recipients from To, Cc and Bcc and strips Bcc.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import mimetypes
 import re
+import unicodedata
 from contextlib import suppress
 from datetime import datetime
-from email import policy
+from email import message_from_bytes, policy
+from email.generator import BytesGenerator
 from email.headerregistry import Address
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -35,11 +40,19 @@ from .reader import CONTROLS, Reader
 from .settings import FOLDER_ROLES, Mailbox, MailError
 
 SEVEN_BIT = policy.SMTP.clone(cte_type="7bit")
+# The mail itself: headers set with set_raw (the message ids) are written as they are. Folded by
+# the 78-column policy, Python before 3.13 writes an id longer than about 76 characters (Outlook's
+# are 80 to 90) as an RFC 2047 encoded word, which RFC 2047 forbids in a msg-id.
+MAIL_POLICY = SEVEN_BIT.clone(refold_source="none")
+# A forwarded original with 8-bit parts, written again with those parts in base64 (a text part
+# with a charset) and its ASCII headers as they came.
+REWRITE_POLICY = policy.compat32.clone(cte_type="7bit", linesep="\r\n")
 SUBJECT_MAX = mailtext.HEADER_LIMIT
 QUOTE_LIMIT = 3000  # characters of the original that a reply quotes
 REFERENCES_KEPT = 20  # message ids a reply's References keeps, the last ones
 LINE_MAX = 998  # the longest line of a mail (RFC 5322)
 FORWARDED_NAME = "forwarded.eml"
+ATTACH_NAME_LIMIT = 200  # characters of a file name, in the chat and in the mail
 MESSAGE_ID = re.compile(r"<[!-;=?-~]+>")  # printable ASCII but <, > and space, in brackets
 REPLY_PREFIXES = ("re:", "re：", "回复:", "回复：")
 FORWARD_PREFIXES = ("fwd:", "fw:", "转发:", "转发：")
@@ -109,6 +122,7 @@ def _attachments(ctx: Ctx, given: list[str]) -> list[str]:
             raise MailError(f"not a file: {text}")
         if path.is_relative_to(state) and not path.is_relative_to(saved):
             raise MailError(f"{text} is a file of the mail state: it cannot be attached")
+        check_name(path.name)
         if str(path) in found:
             continue
         found.append(str(path))
@@ -118,6 +132,21 @@ def _attachments(ctx: Ctx, given: list[str]) -> list[str]:
             f"the attachments are {total / MB:.1f} MB together: at most "
             f"{MAX_ATTACH_BYTES // MB} MB")
     return found
+
+
+def check_name(name: str) -> None:
+    """A file name the mail can carry: no control characters (a line break would break the mail
+    after the code is spent), nothing that is no text, and something left to show."""
+    if any(unicodedata.category(char) in ("Cc", "Cs") for char in name):
+        raise MailError(f"the file name {name!r} has control characters: rename the file first")
+    if not attachment_name(name):
+        raise MailError(f"the file name {name!r} shows nothing: rename the file first")
+
+
+def attachment_name(name: str) -> str:
+    """A file name as the chat shows it and the mail carries it: without the characters that
+    reorder or hide text, cut to ATTACH_NAME_LIMIT."""
+    return clean(name, ATTACH_NAME_LIMIT)
 
 
 # --- replies and forwards ----------------------------------------------------------------------
@@ -220,7 +249,7 @@ def chat_text(d: Draft, mb: Mailbox, code: str, language: str) -> str:
     if d.bcc:
         lines.append(say("show_bcc", ", ".join(d.bcc)))
     lines.append(say("show_subject", d.subject))
-    names = [Path(path).name for path in d.attachments]
+    names = [attachment_name(Path(path).name) for path in d.attachments]
     if d.forward_key:
         names.append(strings.t("draft_forwarded", language))
     if names:
@@ -270,7 +299,7 @@ def _publish(ctx: Ctx, target: chat.Chat, d: Draft, mb: Mailbox, code: str) -> d
 def _create(ctx: Ctx, target: chat.Chat, d: Draft, mb: Mailbox) -> dict:
     with drafts.lock(ctx):
         d.id = drafts.unused_id(ctx)
-        code = drafts.issue_code(d, clock.now())
+        code = drafts.issue_code(d, clock.now(), mb)
         drafts.save(ctx, d)
     return _publish(ctx, target, d, mb, code)
 
@@ -337,9 +366,10 @@ def forward(ctx: Ctx, hima: Himalaya, n: int, to: list[str], note: str,
     found = query.item(ctx, n)
     mb = ctx.mailbox(mailbox or found.mailbox)
     target = chat.load(ctx)
-    parsed = mailtext.parse(hima.raw(found.mailbox, found.folder, found.id))  # its whole subject
+    raw = hima.raw(found.mailbox, found.folder, found.id)
+    parsed = mailtext.parse(raw)  # for its whole subject
     d = _draft(mb.name, addresses, _subject(forward_subject(parsed.subject)), _text(note),
-               forward_key=found.key)
+               forward_key=found.key, forward_sha256=hashlib.sha256(raw).hexdigest())
     return _create(ctx, target, d, mb)
 
 
@@ -366,7 +396,7 @@ def revise(ctx: Ctx, hima: Himalaya, id: str, instruction: str) -> dict:
         if current.body != d.body or current.written_by != "reader" or current.sent_at:
             raise MailError(f"draft {id} changed meanwhile: run mx revise again")
         current.body = _with_quote(text, quoted)
-        code = drafts.issue_code(current, clock.now())
+        code = drafts.issue_code(current, clock.now(), mb)
         drafts.save(ctx, current)
     return _publish(ctx, target, current, mb, code)
 
@@ -400,7 +430,7 @@ def update(ctx: Ctx, id: str, *, to: list[str] | None = None, cc: list[str] | No
         mb = ctx.mailbox(d.mailbox)
         for name, value in changes.items():
             setattr(d, name, value)
-        code = drafts.issue_code(d, clock.now())
+        code = drafts.issue_code(d, clock.now(), mb)
         drafts.save(ctx, d)
     return _publish(ctx, target, d, mb, code)
 
@@ -413,14 +443,15 @@ def confirm(ctx: Ctx, id: str) -> dict:
         d = drafts.load(ctx, id)
         _unsent(d)
         mb = ctx.mailbox(d.mailbox)
-        code = drafts.issue_code(d, clock.now())
+        code = drafts.issue_code(d, clock.now(), mb)
         drafts.save(ctx, d)
     return _publish(ctx, target, d, mb, code)
 
 
 def send(ctx: Ctx, hima: Himalaya, id: str, code: str) -> dict:
     """`mx send`: the draft goes out if `code` is its code. The code is spent before anything is
-    sent, so that no failure or crash leaves a used code valid."""
+    sent, so that no failure or crash leaves a used code valid. A forward goes only with the
+    original the draft was made from: its bytes must be the same on the server still."""
     first = drafts.load(ctx, id)
     ctx.mailbox(first.mailbox)  # a mailbox that is gone fails before a try is counted
     if first.sent_at:
@@ -433,13 +464,17 @@ def send(ctx: Ctx, hima: Himalaya, id: str, code: str) -> dict:
         mb = ctx.mailbox(d.mailbox)
         files = drafts.read_files(d)  # the bytes that are checked are the bytes that are sent
         try:
-            drafts.check_code(d, code, clock.now(), files)
+            drafts.check_code(d, code, clock.now(), mb, files)
         except CodeError:
             drafts.save(ctx, d)  # a wrong try counts
             raise
         if d.forward_key and (d.forward_key != first.forward_key or original is None):
             # It got its code, or another original, after `first` was read: the code holds.
             raise MailError(f"draft {id} changed meanwhile: run mx send again")
+        if d.forward_key and hashlib.sha256(original).hexdigest() != d.forward_sha256:
+            raise MailError(
+                f"the mail that draft {id} forwards changed on the server since the draft was "
+                "made: make a new forward")
         drafts.void(d)
         drafts.save(ctx, d)
         try:
@@ -505,19 +540,38 @@ def _message_id(raw: bytes) -> str:
     return str(head.get("Message-ID", "")).strip()
 
 
+def _seven_bit(text: bytes) -> bool:
+    return text.isascii() and all(len(line) <= LINE_MAX for line in text.split(b"\r\n"))
+
+
+def _rewritten(text: bytes) -> bytes | None:
+    """`text`, a mail with 8-bit parts, written again in 7 bits: each text part with a charset
+    in base64, the headers that are ASCII as they came. None when that fails."""
+    try:
+        out = io.BytesIO()
+        BytesGenerator(out, mangle_from_=False, policy=REWRITE_POLICY).flatten(
+            message_from_bytes(text, policy=policy.compat32))
+    except mailtext.PARSE_ERRORS:
+        return None
+    return out.getvalue()
+
+
 def _forwarded(original: bytes) -> EmailMessage:
-    """The original of a forward as a message/rfc822 part. As it is when it is 7-bit (RFC 2046
-    allows no other encoding there); base64 when it is not, as himalaya takes only 7-bit."""
+    """The original of a forward as an attachment. A message/rfc822 part in 7 bits, the only
+    encoding RFC 2046 allows there: as it is when it is 7-bit already, else written again with its
+    8-bit parts encoded. When that cannot be done, the exact bytes as a file `forwarded.eml`."""
     part = EmailMessage(policy=SEVEN_BIT)
     text = original.replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\n", b"\r\n")
-    if text.isascii() and all(len(line) <= LINE_MAX for line in text.split(b"\r\n")):
+    if not _seven_bit(text):
+        text = _rewritten(text) or b""
+    if text and _seven_bit(text):
         part["Content-Type"] = "message/rfc822"
         part["Content-Transfer-Encoding"] = "7bit"
         part["Content-Disposition"] = f'attachment; filename="{FORWARDED_NAME}"'
         part.set_payload(text.decode("ascii"))
     else:
         part.set_content(
-            original, maintype="message", subtype="rfc822", cte="base64",
+            original, maintype="application", subtype="octet-stream",
             disposition="attachment", filename=FORWARDED_NAME)
     return part
 
@@ -529,7 +583,7 @@ def build(d: Draft, mb: Mailbox, original: bytes | None,
     forward."""
     if files is None:
         files = drafts.read_files(d)
-    msg = EmailMessage(policy=SEVEN_BIT)
+    msg = EmailMessage(policy=MAIL_POLICY)
     msg["From"] = Address(display_name=mb.display_name, addr_spec=mb.address)
     msg["To"] = ", ".join(d.to)
     if d.cc:
@@ -538,14 +592,17 @@ def build(d: Draft, mb: Mailbox, original: bytes | None,
         msg["Bcc"] = ", ".join(d.bcc)  # himalaya sends to it and takes the line out (F-SEND)
     msg["Subject"] = d.subject
     msg["Date"] = format_datetime(clock.now())
-    msg["Message-ID"] = make_msgid(domain=_domain(mb.address))
-    if d.in_reply_to:
-        msg["In-Reply-To"] = d.in_reply_to
-    if d.references:
-        msg["References"] = d.references
+    # The message ids as they are (MAIL_POLICY), one per line; only well-formed ids get in.
+    msg.set_raw("Message-ID", make_msgid(domain=_domain(mb.address)))
+    replied = _ids(d.in_reply_to)[:1]
+    if replied:
+        msg.set_raw("In-Reply-To", replied[0])
+    chain = _ids(d.references)
+    if chain:
+        msg.set_raw("References", "\n ".join(chain))
     msg.set_content(d.body)
     for path, data in files:
-        name = Path(path).name
+        name = attachment_name(Path(path).name)
         kind, encoding = mimetypes.guess_type(name)
         if kind is None or encoding is not None or kind.startswith("multipart/"):
             kind = "application/octet-stream"

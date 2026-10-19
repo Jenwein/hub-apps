@@ -4,9 +4,11 @@ No mail leaves without the user's code. Every command that makes or changes a dr
 new code, which goes with the whole draft to the user's private chat and nowhere else: not to
 stdout, not to the state. The state keeps a salted scrypt hash of the code, made over the draft's
 id, the code, the digest of the draft's content (`content_digest`, attachment bytes included) and
-the time the code was issued. So a change of the draft or of an attached file voids the code, and
-so does an edit of those fields in the draft's file: the code no longer matches. A code is good
-for one send, for CODE_TTL, and for MAX_ATTEMPTS wrong tries.
+the time the code was issued. The digest also covers the mailbox's From line as the user saw it
+and, for a forward, the SHA-256 of the forwarded mail (`send` checks the server still has those
+bytes). So a change of the draft, of an attached file or of the sender voids the code, and so
+does an edit of those fields in the draft's file: the code no longer matches. A code is good for
+one send, for CODE_TTL, and for MAX_ATTEMPTS wrong tries.
 
 A draft is `state/drafts/<id>.json`. A sent draft stays, as the record that its code was used.
 Changes to drafts are made under `lock(ctx)`, the lock of the drafts folder.
@@ -28,7 +30,7 @@ from pathlib import Path
 
 from .context import Ctx
 from .paths import POSIX, locked, read_json, write_json
-from .settings import MailError
+from .settings import Mailbox, MailError
 
 CODE_DIGITS = 6
 CODE_TTL = timedelta(hours=24)
@@ -40,12 +42,16 @@ ID = re.compile(r"d[0-9a-f]{6}")
 SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 # What the digest covers, besides the attachments: everything that decides the mail sent.
 CONTENT = (
-    "mailbox", "to", "cc", "bcc", "subject", "body", "in_reply_to", "references", "forward_key")
+    "mailbox", "to", "cc", "bcc", "subject", "body", "in_reply_to", "references", "forward_key",
+    "forward_sha256")
 LISTS = frozenset({"to", "cc", "bcc", "attachments"})
 
 # An address as the commands take it: ASCII, one @, no white space, a dot in the domain, and none
-# of the characters that would make it more than one address (`,`, `;`, `<`, `"`, ...).
-LOCAL = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}")
+# of the characters that would make it more than one address (`,`, `;`, `<`, `"`, ...). The local
+# part is a dot-atom: no dot at either end, no two in a row.
+ATEXT = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+LOCAL = re.compile(rf"{ATEXT}(?:\.{ATEXT})*")
+LOCAL_MAX = 64
 DOMAIN = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z0-9-]*[A-Za-z0-9]")
 ADDRESS_MAX = 254
 
@@ -74,6 +80,7 @@ class Draft:
     message_id: str = ""
     reply_key: str = ""  # <mailbox>/<role>/<id> of the mail a reply answers, for `revise`
     intent: str = ""  # what the user wants a reply to say, for `revise`
+    forward_sha256: str = ""  # SHA-256 of the forwarded mail's bytes when the draft was made
 
 
 class CodeError(MailError):
@@ -85,11 +92,13 @@ class CodeError(MailError):
 
 def valid_address(text: str) -> bool:
     """Is `text` one plain address, such as `bob@example.org`? One `@`, no white space, a dot in
-    the domain; ASCII only, and no character that would make it a name or a list."""
-    if not text or len(text) > ADDRESS_MAX or not text.isascii():
+    the domain; ASCII only, a dot-atom before the `@`, and no character that would make it a name
+    or a list. Nothing that a mail client could read as an encoded word (`=?`)."""
+    if not text or len(text) > ADDRESS_MAX or not text.isascii() or "=?" in text:
         return False
     local, at, domain = text.partition("@")
-    return bool(at) and bool(LOCAL.fullmatch(local)) and bool(DOMAIN.fullmatch(domain))
+    return (bool(at) and len(local) <= LOCAL_MAX and bool(LOCAL.fullmatch(local))
+            and bool(DOMAIN.fullmatch(domain)))
 
 
 # --- the content and its digest ----------------------------------------------------------------
@@ -107,12 +116,14 @@ def read_files(d: Draft) -> list[tuple[str, bytes]]:
     return found
 
 
-def content_digest(d: Draft, files: list[tuple[str, bytes]] | None = None) -> str:
-    """SHA-256 of what the mail would be: the CONTENT fields and, for each attachment, its path
-    and the SHA-256 of its bytes (`files`, as `read_files` gives them; read now when None)."""
+def content_digest(d: Draft, mb: Mailbox, files: list[tuple[str, bytes]] | None = None) -> str:
+    """SHA-256 of what the mail would be: the CONTENT fields, the From line of `mb` (the draft's
+    mailbox as mailboxes.toml says now) and, for each attachment, its path and the SHA-256 of its
+    bytes (`files`, as `read_files` gives them; read now when None)."""
     if files is None:
         files = read_files(d)
     data: dict[str, object] = {name: getattr(d, name) for name in CONTENT}
+    data["from"] = [mb.address, mb.display_name]
     data["attachments"] = [[path, hashlib.sha256(blob).hexdigest()] for path, blob in files]
     text = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -128,11 +139,13 @@ def _hash(d: Draft, code: str, salt: bytes) -> str:
     return hashlib.scrypt(material, salt=salt, **SCRYPT).hex()
 
 
-def issue_code(d: Draft, now: datetime, files: list[tuple[str, bytes]] | None = None) -> str:
-    """Give `d` a new code and return it; only its hash is kept. Any code before it is void."""
+def issue_code(d: Draft, now: datetime, mb: Mailbox,
+               files: list[tuple[str, bytes]] | None = None) -> str:
+    """Give `d`, sent from `mb`, a new code and return it; only its hash is kept. Any code before
+    it is void."""
     code = f"{secrets.randbelow(10 ** CODE_DIGITS):0{CODE_DIGITS}d}"
     salt = secrets.token_bytes(16)
-    d.digest = content_digest(d, files)
+    d.digest = content_digest(d, mb, files)
     d.code_issued_at = now.isoformat()
     d.code_salt = salt.hex()
     d.code_hash = _hash(d, code, salt)
@@ -168,15 +181,15 @@ def _typed(code: str) -> str:
     return "".join(unicodedata.normalize("NFKC", code).split())
 
 
-def check_code(d: Draft, code: str, now: datetime,
+def check_code(d: Draft, code: str, now: datetime, mb: Mailbox,
                files: list[tuple[str, bytes]] | None = None) -> None:
-    """Does `code` let `d` go now? A CodeError says why not. A wrong code counts as a try, and
-    the MAX_ATTEMPTS-th voids the code; the caller saves `d` after a CodeError."""
+    """Does `code` let `d` go now from `mb`? A CodeError says why not. A wrong code counts as a
+    try, and the MAX_ATTEMPTS-th voids the code; the caller saves `d` after a CodeError."""
     if d.sent_at:
         raise CodeError("already sent")
     if not d.code_hash:
         raise CodeError(f"no code is waiting: run mx confirm {d.id}")
-    if content_digest(d, files) != d.digest:
+    if content_digest(d, mb, files) != d.digest:
         raise CodeError(f"the draft changed after its code was sent: run mx confirm {d.id}")
     if _expired(d, now):
         raise CodeError(f"the code expired: run mx confirm {d.id}")

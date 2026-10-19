@@ -5,7 +5,6 @@ The server is the fake himalaya, the reader the fake claude and the chat the fak
 (fakes.py); the two tests against a real server are in test_mail_imap.py.
 """
 
-import base64
 import contextlib
 import hashlib
 import io
@@ -15,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes, policy
+from types import SimpleNamespace
 
 import pytest
 from mailkit import clock, compose, drafts, strings
@@ -72,6 +72,9 @@ QUOTE_EN = (
     "On 2026-10-19 10:00, Carol <carol@example.org> wrote:\n"
     "> Please pay 25.00 USD by Friday.\n>\n> Second line.")
 T0 = datetime(2026, 10, 19, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+SENDER = SimpleNamespace(address="me@qq.com", display_name="张三")  # the From line of qq
+OUTLOOK_ID = (
+    "<TYZPR03MB6896A1B2C3D4E5F60718293A4B5C6D7E8F9@TYZPR03MB6896.apcprd03.prod.outlook.com>")
 
 
 def make_server(raw: str = ORIGINAL) -> dict:
@@ -362,7 +365,7 @@ def test_draft_file_edited_behind_the_script_voids_code(mailhub, chat, fake_chat
           f"the draft changed after its code was sent: run mx confirm {id}")
 
     # Editing the digest along with the body does not help: the code is bound to the digest.
-    edit(mailhub, id, digest=drafts.content_digest(Draft(**stored(mailhub, id))))
+    edit(mailhub, id, digest=drafts.content_digest(Draft(**stored(mailhub, id)), SENDER))
     fails(mx("send", id, "--code", code), "wrong code (2 tries left)")
 
     # Nor does a later issue time, which would make the code last longer.
@@ -634,7 +637,7 @@ def test_a_forward_never_goes_without_its_original(mailhub, chat, fake_chat, ser
         with real_lock(ctx):
             d = drafts.load(ctx, id)
             if not d.code_hash:
-                assert drafts.issue_code(d, clock.now()) == "333333"
+                assert drafts.issue_code(d, clock.now(), ctx.mailbox("qq")) == "333333"
                 drafts.save(ctx, d)
             yield
 
@@ -648,6 +651,27 @@ def test_a_forward_never_goes_without_its_original(mailhub, chat, fake_chat, ser
     ok(mx("send", id, "--code", "333333"))
     mail = message_from_bytes(sends(server)[0]["stdin"].encode(), policy=policy.default)
     assert [p.get_content_type() for p in mail.iter_attachments()] == ["message/rfc822"]
+
+
+def test_forward_refused_when_the_original_changed_on_the_server(mailhub, chat, fake_chat,
+                                                                 server, mx):
+    """The code approves the mail the user saw named: if the server holds other bytes under that
+    number when the forward goes, nothing is sent and the code is not spent."""
+    listed(mx)
+    id = ok(mx("forward", "1", "--to", "bob@example.org", stdin="FYI"))["draft"]
+    code = last_code(fake_chat)
+    data = server.server()
+    data["qq"]["INBOX"]["messages"][0]["raw"] = ORIGINAL.replace(
+        "Please pay 25.00 USD", "Please pay 2500.00 USD to account 6222 0000")
+    server.write(data)
+
+    for _ in range(2):
+        fails(mx("send", id, "--code", code),
+              f"the mail that draft {id} forwards changed on the server since the draft was made")
+    assert sends(server) == []
+    saved = stored(mailhub, id)
+    assert saved["code_hash"] and saved["attempts"] == 0 and saved["sent_at"] == ""
+    assert len(saved["forward_sha256"]) == 64
 
 
 def test_forward_without_a_note(mailhub, chat, fake_chat, server, mx):
@@ -679,6 +703,13 @@ def test_forward_without_a_note(mailhub, chat, fake_chat, server, mx):
     ("@example.org", False),
     ("bob@.org", False),
     ("", False),
+    ("=?utf-8?q?boss?=@example.org", False),
+    ("a=?b@example.org", False),
+    (".a@x.org", False),
+    ("a.@x.org", False),
+    ("a..b@x.org", False),
+    ("a.b+c@x.org", True),
+    ("x" * 65 + "@example.org", False),
 ])
 def test_valid_address(text, valid):
     assert drafts.valid_address(text) is valid
@@ -720,14 +751,54 @@ def test_attachments_must_be_files_within_the_limit(mailhub, chat, fake_chat, mx
     assert ok(draft("--attach", str(saved)))["attachments"] == [str(saved.resolve())]
 
 
-def rfc822_base64(raw: bytes) -> bytes:
-    """The bytes of the base64 message/rfc822 part of `raw` (the stdlib parser reads such a part
-    as a message and does not decode it)."""
-    _, found, rest = raw.partition(b"Content-Type: message/rfc822\r\n")
-    assert found, raw
-    headers, _, body = rest.partition(b"\r\n\r\n")
-    assert b"Content-Transfer-Encoding: base64" in headers
-    return base64.b64decode(body.split(b"\r\n--", 1)[0])
+def test_attachment_names_are_cleaned_in_the_chat_and_the_mail(mailhub, chat, fake_chat, server,
+                                                                mx, tmp_path):
+    """A right-to-left override makes `invoice\u202efdp.exe` look like `invoiceexe.pdf`: the chat
+    shows the name without it, and the mail carries that same name."""
+    trap = tmp_path / "invoice\u202efdp.exe"
+    trap.write_bytes(b"MZ")
+    id = new_draft(mx, "--attach", str(trap))
+    assert "Attachments: invoicefdp.exe\n" in fake_chat.messages()[-1]
+    ok(mx("send", id, "--code", last_code(fake_chat)))
+    mail = message_from_bytes(sends(server)[0]["stdin"].encode(), policy=policy.default)
+    assert [p.get_filename() for p in mail.iter_attachments()] == ["invoicefdp.exe"]
+
+
+@pytest.mark.parametrize("name", ["a\nb.pdf", "a\rb.pdf", "a\x00b.pdf", "a\x1bb.pdf", "\u202e"])
+def test_attachment_name_that_cannot_go_in_a_mail_is_refused(name):
+    with pytest.raises(MailError, match="rename the file first"):
+        compose.check_name(name)
+
+
+def test_attachment_name_that_shows_nothing_refused_before_any_code(mailhub, chat, fake_chat, mx,
+                                                                    tmp_path):
+    hidden = tmp_path / "\u200b\u202e"  # nothing but invisible characters: allowed on every OS
+    hidden.write_bytes(b"secret")
+    fails(mx("draft", "--mailbox", "qq", "--to", "bob@example.org", "--subject", "Hi",
+             "--attach", str(hidden), stdin=BODY), "shows nothing: rename the file first")
+    id = new_draft(mx)
+    fails(mx("draft-update", id, "--attach", str(hidden)), "shows nothing")
+    assert stored(mailhub, id)["attachments"] == [] and len(fake_chat.messages()) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows allows no line break in a file name")
+def test_attachment_name_with_a_line_break_refused_before_any_code(mailhub, chat, fake_chat, mx,
+                                                                   tmp_path):
+    bad = tmp_path / "report\nBcc: eve@example.org.pdf"
+    bad.write_bytes(b"%PDF-1.4\n")
+    fails(mx("draft", "--mailbox", "qq", "--to", "bob@example.org", "--subject", "Hi",
+             "--attach", str(bad), stdin=BODY), "has control characters: rename the file first")
+    assert fake_chat.calls() == []
+    id = new_draft(mx)
+    fails(mx("draft-update", id, "--attach", str(bad)), "has control characters")
+    assert stored(mailhub, id)["attachments"] == [] and len(fake_chat.messages()) == 1
+
+
+GB18030_HTML = (
+    "From: Li <li@example.cn>\r\nTo: me@qq.com\r\nSubject: =?gb18030?b?t6LGsQ==?=\r\n"
+    "Message-ID: <gb-1@example.cn>\r\nMIME-Version: 1.0\r\n"
+    "Content-Type: text/html; charset=gb18030\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+).encode("ascii") + "<p>你好，十月的发票在附件里。</p>\r\n".encode("gb18030")
 
 
 def test_built_mail_is_7bit(mailhub, tmp_path):
@@ -740,9 +811,8 @@ def test_built_mail_is_7bit(mailhub, tmp_path):
         body="你好，\n附件是发票。\n" + "长" * 300, attachments=[str(invoice)],
         in_reply_to="<a@b.c>", references="<r@b.c> <a@b.c>", forward_key="qq/inbox/5",
         written_by="agent", created_at=T0.isoformat())
-    original = "Subject: 8 位\n\n正文\n".encode("gb18030")
 
-    raw = compose.build(d, ctx.mailbox("qq"), original)
+    raw = compose.build(d, ctx.mailbox("qq"), GB18030_HTML)
 
     assert raw.isascii()
     mail = message_from_bytes(raw, policy=policy.default)
@@ -756,9 +826,65 @@ def test_built_mail_is_7bit(mailhub, tmp_path):
     pdf, forwarded = mail.iter_attachments()
     assert pdf.get_filename() == "发票 十月.pdf" and pdf.get_content_type() == "application/pdf"
     assert pdf.get_content() == invoice.read_bytes()
-    # An 8-bit original cannot go as it is: base64 keeps its exact bytes.
+    # The 8-bit original is written again in 7 bits: still a message the stdlib can read.
     assert forwarded.get_content_type() == "message/rfc822"
-    assert rfc822_base64(raw) == original
+    assert forwarded["Content-Transfer-Encoding"] == "7bit"
+    inner = forwarded.get_content()
+    assert inner["Message-ID"] == "<gb-1@example.cn>" and inner["Subject"] == "发票"
+    assert inner.get_content_type() == "text/html"
+    assert inner.get_content().replace("\r\n", "\n") == "<p>你好，十月的发票在附件里。</p>\n"
+
+
+def test_malformed_8bit_original_goes_as_forwarded_eml(mailhub):
+    """An 8-bit part without a charset cannot be written again in 7 bits: the original goes as a
+    file, its bytes exact."""
+    ctx = load(mailhub.root)
+    original = b"From: x@example.org\r\nSubject: odd\r\n\r\n\xd5\xfd\xce\xc4 \xff\r\n"
+    d = draft_of(forward_key="qq/inbox/5", body="FYI")
+
+    raw = compose.build(d, ctx.mailbox("qq"), original)
+
+    assert raw.isascii()
+    mail = message_from_bytes(raw, policy=policy.default)
+    [part] = list(mail.iter_attachments())
+    assert part.get_content_type() == "application/octet-stream"
+    assert part.get_filename() == "forwarded.eml"
+    assert part.get_content() == original
+
+
+def test_threading_ids_stay_verbatim(mailhub):
+    """Message ids are never encoded words (RFC 2047 forbids them there), however long: Outlook's
+    are 80 to 90 characters, and Python before 3.13 folds such an id into =?utf-8?q?...?=."""
+    ctx = load(mailhub.root)
+    assert len(OUTLOOK_ID) > 85
+    d = draft_of(in_reply_to=OUTLOOK_ID, references=f"<root@example.org> {OUTLOOK_ID}",
+                 subject="Re: " + "十月的发票 " * 6)
+
+    raw = compose.build(d, ctx.mailbox("qq"), None)
+
+    head = raw.split(b"\r\n\r\n", 1)[0].decode("ascii")
+    assert f"\r\nIn-Reply-To: {OUTLOOK_ID}\r\n" in head
+    assert f"\r\nReferences: <root@example.org>\r\n {OUTLOOK_ID}\r\n" in head
+    ids = re.findall(
+        r"^(?:Message-ID|In-Reply-To|References):.*(?:\r\n .*)*", head, re.MULTILINE)
+    assert len(ids) == 3 and all("=?" not in header for header in ids), ids
+    assert "Subject: Re: =?utf-8?b?" in head  # the subject is still encoded
+    mail = message_from_bytes(raw, policy=policy.default)
+    assert mail["In-Reply-To"] == OUTLOOK_ID
+    assert mail["References"].split() == ["<root@example.org>", OUTLOOK_ID]
+    assert mail["Message-ID"].endswith("@qq.com>")
+
+
+def test_reply_to_an_outlook_mail_threads_verbatim(mailhub, chat, fake_chat, fake_claude,
+                                                   fake_himalaya, mx):
+    raw = ORIGINAL.replace("<inv-1@example.org>", OUTLOOK_ID)
+    fake = fake_himalaya(make_server(raw))
+    listed(mx)
+    id = ok(mx("reply", "1", "--intent", "thanks"))["draft"]
+    ok(mx("send", id, "--code", last_code(fake_chat)))
+    sent = sends(fake)[0]["stdin"]
+    assert f"\r\nIn-Reply-To: {OUTLOOK_ID}\r\n" in sent
+    assert f" {OUTLOOK_ID}\r\n" in sent.split("\r\nReferences:", 1)[1]
 
 
 def test_failed_send_needs_a_new_code(mailhub, chat, fake_chat, fake_himalaya, mx):
@@ -797,6 +923,23 @@ def test_unknown_sent_folder_is_a_failed_copy(mailhub, chat, fake_chat, server, 
     data = ok(mx("send", id, "--code", last_code(fake_chat)))
     assert "sent folder of qq is not known" in data["copy_failed"]
     assert len(sends(server)) == 1 and adds(server) == []
+
+
+def test_mailbox_edit_after_the_code_voids_it(mailhub, chat, fake_chat, server, mx):
+    """The From line is part of what the user approved: a mailboxes.toml edit between the code
+    and the send changes it, and the send is refused."""
+    id = new_draft(mx)
+    code = last_code(fake_chat)
+
+    write_mailboxes(mailhub, BOXES.replace('display_name = "张三"', 'display_name = "IT Desk"'))
+    fails(mx("send", id, "--code", code), "the draft changed after its code was sent")
+    write_mailboxes(mailhub, BOXES.replace('address = "me@qq.com"', 'address = "boss@qq.com"'))
+    fails(mx("send", id, "--code", code), "the draft changed after its code was sent")
+    assert sends(server) == []
+
+    write_mailboxes(mailhub, BOXES)  # as it was when the code went out
+    ok(mx("send", id, "--code", code))
+    assert "From: =?utf-8?b?5byg5LiJ?= <me@qq.com>" in sends(server)[0]["stdin"]
 
 
 # --- the list of drafts ------------------------------------------------------------------------
@@ -845,51 +988,58 @@ def draft_of(**fields) -> Draft:
 def test_check_code_order():
     d = draft_of()
     with pytest.raises(CodeError, match="no code is waiting: run mx confirm d00000a"):
-        drafts.check_code(d, "000000", T0)
-    code = drafts.issue_code(d, T0)
+        drafts.check_code(d, "000000", T0, SENDER)
+    code = drafts.issue_code(d, T0, SENDER)
     d.body = "changed"
     late = T0 + CODE_TTL * 2
     with pytest.raises(CodeError, match="the draft changed after its code was sent"):
-        drafts.check_code(d, code, late)
+        drafts.check_code(d, code, late, SENDER)
     d.body = "Hello"
+    with pytest.raises(CodeError, match="the draft changed after its code was sent"):
+        drafts.check_code(d, code, late, SimpleNamespace(address="me@qq.com", display_name=""))
     with pytest.raises(CodeError, match="the code expired"):
-        drafts.check_code(d, code, late)
+        drafts.check_code(d, code, late, SENDER)
     d.sent_at = T0.isoformat()
     with pytest.raises(CodeError, match="already sent"):
-        drafts.check_code(d, code, T0)
+        drafts.check_code(d, code, T0, SENDER)
 
 
 def test_issue_code_stores_a_salted_hash_and_resets_the_tries():
     d = draft_of(attempts=2)
-    code = drafts.issue_code(d, T0)
+    code = drafts.issue_code(d, T0, SENDER)
     assert re.fullmatch(r"\d{6}", code) and code not in json.dumps(d.__dict__)
     assert d.attempts == 0 and d.code_issued_at == T0.isoformat()
-    assert d.digest == drafts.content_digest(d)
+    assert d.digest == drafts.content_digest(d, SENDER)
     again = draft_of()
-    drafts.issue_code(again, T0)
+    drafts.issue_code(again, T0, SENDER)
     assert again.code_salt != d.code_salt
-    drafts.check_code(d, code, T0 + CODE_TTL)  # right code, unchanged draft: no error
+    drafts.check_code(d, code, T0 + CODE_TTL, SENDER)  # right code, unchanged draft: no error
 
 
 def test_content_digest_covers_the_content_and_the_attachment_bytes(tmp_path):
     path = tmp_path / "a.txt"
     path.write_bytes(b"one")
     d = draft_of(attachments=[str(path)])
-    first = drafts.content_digest(d)
-    assert drafts.content_digest(draft_of(attachments=[str(path)], attempts=1)) == first
+    first = drafts.content_digest(d, SENDER)
+    unsent = draft_of(attachments=[str(path)], attempts=1, intent="x", reply_key="qq/inbox/1")
+    assert drafts.content_digest(unsent, SENDER) == first
     for change in ({"to": ["eve@example.org"]}, {"cc": ["c@example.org"]},
                    {"bcc": ["b@example.org"]}, {"subject": "Ho"}, {"body": "Hello!"},
                    {"mailbox": "gmail"}, {"in_reply_to": "<x@y.z>"}, {"references": "<x@y.z>"},
-                   {"forward_key": "qq/inbox/5"}):
-        assert drafts.content_digest(draft_of(attachments=[str(path)], **change)) != first
+                   {"forward_key": "qq/inbox/5"}, {"forward_sha256": "ab"}):
+        assert drafts.content_digest(draft_of(attachments=[str(path)], **change), SENDER) != first
+    for sender in (SimpleNamespace(address="me@qq.com", display_name="IT Desk"),
+                   SimpleNamespace(address="boss@qq.com", display_name="张三")):
+        assert drafts.content_digest(d, sender) != first
     path.write_bytes(b"two")
-    assert drafts.content_digest(d) != first
+    assert drafts.content_digest(d, SENDER) != first
     expected = hashlib.sha256(json.dumps({
         "mailbox": "qq", "to": ["bob@example.org"], "cc": [], "bcc": [], "subject": "Hi",
         "body": "Hello", "in_reply_to": "", "references": "", "forward_key": "",
+        "forward_sha256": "", "from": ["me@qq.com", "张三"],
         "attachments": [[str(path), hashlib.sha256(b"two").hexdigest()]]},
         sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    assert drafts.content_digest(d) == expected
+    assert drafts.content_digest(d, SENDER) == expected
 
 
 def test_load_refuses_a_damaged_draft(mailhub):
