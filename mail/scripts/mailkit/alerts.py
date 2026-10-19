@@ -9,8 +9,9 @@ server was down) make one message with a line per mail, not a storm of messages.
 `state/alerts.json` holds the messages that wait for the chat (`pending`, in the order they came)
 and a record of the ones that went out later (`sent`: their mail and times, not their text, kept
 for KEEP). The watcher queues a message that the chat did not take and sends the queue when the
-chat is back; the daily report counts the alerts that went out late, `alerts-status` what still
-waits. Reads and writes take the state lock, which is never held while a message is sent.
+chat is back, more than COMBINE_OVER waiting alerts as one message; the daily report counts the
+alerts that went out late, `alerts-status` what still waits. Reads and writes take the state
+lock, which is never held while a message is sent.
 """
 
 from __future__ import annotations
@@ -133,26 +134,41 @@ class AlertQueue:
 
     def drain(self, send: Callable[[str], None], at: datetime) -> int:
         """Send the waiting messages with `send`, oldest first, until one fails with a ChatError
-        (it and the ones after it wait on); how many went out. Each is taken off the queue once
-        it went out, so a failure or a crash halfway loses none."""
+        (it and the ones after it wait on); how many queued messages went out.
+
+        When more than COMBINE_OVER alerts wait (a chat that was down for a while), they go out
+        as one message, at the place of the first of them: under a header, the text of each, in
+        their order. Notices name no mail; they are not alerts and go out on their own, in their
+        order. Messages are taken off the queue once they went out, all the alerts of a backlog
+        message together, so a failure or a crash halfway loses none."""
         count = 0
         while True:
             waiting = self.pending()
             if not waiting:
                 return count
-            first = waiting[0]
+            alerts = [entry for entry in waiting if entry["keys"]]
+            if waiting[0]["keys"] and len(alerts) > COMBINE_OVER:
+                batch, text = alerts, self._backlog(alerts)
+            else:
+                batch, text = waiting[:1], waiting[0]["text"]
             try:
-                send(first["text"])
+                send(text)
             except ChatError:
                 return count
+            gone = {entry["id"] for entry in batch}
             with locked(self.ctx.state):
                 data = self._load()
-                data["pending"] = [e for e in data["pending"] if e["id"] != first["id"]]
-                data["sent"].append({
-                    "id": first["id"], "keys": first["keys"], "queued": first["queued"],
-                    "sent": _iso(at)})
+                data["pending"] = [e for e in data["pending"] if e["id"] not in gone]
+                data["sent"] += [
+                    {"id": e["id"], "keys": e["keys"], "queued": e["queued"], "sent": _iso(at)}
+                    for e in batch]
                 self._write(data)
-            count += 1
+            count += len(batch)
+
+    def _backlog(self, alerts: list[dict]) -> str:
+        language = self.ctx.settings.language
+        return "\n\n".join(
+            [t("alert_backlog", language, count=len(alerts)), *(e["text"] for e in alerts)])
 
     def late(self, since: datetime, until: datetime) -> list[dict]:
         """The alerts that went out later than they were queued, in [since, until) by the time

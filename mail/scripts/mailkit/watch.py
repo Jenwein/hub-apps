@@ -73,6 +73,8 @@ DRAIN_RETRY_SECONDS = 60  # a chat that failed is asked again after this long, n
 STOP_SECONDS = 30  # how long carillon has to stop on SIGTERM before it is killed
 DETAIL_LIMIT = 300  # characters of an error in a notice and in the log
 LOG_LIMIT = 1_000_000  # bytes: a longer watch.log is moved to watch.log.1 when the watcher starts
+# The failures that a mailbox which answered has shown to be over: it says nothing of the reader.
+LOGIN_KINDS = ("auth", "connect")
 
 POKES = "pokes"  # in the state directory: one empty file per mailbox with news
 LOG = "watch.log"  # in the state directory: carillon's output and the watcher's own lines
@@ -332,11 +334,11 @@ class Watcher:
         except MailError as err:
             self._failed(mb, "auth" if isinstance(err, AuthError) else "connect", err, at)
             return None
-        self.health.mailbox_ok(mb.name, at, kinds=("auth", "connect"))
         if skipped:
             self.log(f"{mb.name}: {skipped} new mails were not sorted, more than "
                      f"{MAX_CATCH_UP} came")
         if not uids:
+            self.health.mailbox_ok(mb.name, at, kinds=LOGIN_KINDS)
             return [], (new if new != mark else None)
         folder = inbox_folder(mb)
         items = [(verdict_key(mb.name, new.uidvalidity, str(uid)), mb.name, folder, uid)
@@ -346,9 +348,12 @@ class Watcher:
         except ReaderError as err:  # the reader did not answer: the old mark stays
             self._failed(mb, "reader", err, at)
             return None
-        except MailError as err:
+        except MailError as err:  # the bodies could not be fetched: the spell of fresh goes on
             self._failed(mb, "auth" if isinstance(err, AuthError) else "connect", err, at)
             return None
+        # Only now has the mailbox answered everything it was asked: a failure while fetching the
+        # mail must not end the spell that the same failure goes on with at the next sweep.
+        self.health.mailbox_ok(mb.name, at, kinds=LOGIN_KINDS)
         if result.verdicts:
             if {v.key for v in result.verdicts} <= set(result.fallbacks):
                 self._unsorted(mb, len(result.verdicts), at)

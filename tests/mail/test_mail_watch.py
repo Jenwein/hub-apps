@@ -25,7 +25,7 @@ from mailkit.cli import main
 from mailkit.configs import write_configs
 from mailkit.context import load
 from mailkit.health import GRACE, STALE, Health, sign_in_command
-from mailkit.himalaya import Himalaya
+from mailkit.himalaya import AuthError, ConnectError, Himalaya
 from mailkit.marks import Mark, load_marks, save_marks, verdict_key
 from mailkit.reader import Reader, Verdict
 from mailkit.settings import MailError
@@ -245,7 +245,7 @@ def test_combined_text_has_one_line_per_mail():
 def test_notices_are_in_both_languages():
     keys = ("login_failed", "cannot_connect", "reader_down", "reader_unsorted", "carillon_down",
             "alert_head", "alert_reason", "alert_amount", "alert_deadline", "alert_phishing",
-            "alert_phishing_short", "alert_many")
+            "alert_phishing_short", "alert_many", "alert_backlog")
     for key in keys:
         assert key in strings.STRINGS["en"] and key in strings.STRINGS["zh"]
     assert set(strings.STRINGS["en"]) == set(strings.STRINGS["zh"])
@@ -363,6 +363,65 @@ def test_queue_drains_in_order_and_stops_at_the_first_failure(ctx):
         ["qq/7/3", "qq/7/4"]]
     # What went out is not kept: only that it went.
     assert "one" not in (ctx.state / "alerts.json").read_text("utf-8")
+
+
+def backlog(texts: list[str], language: str = "") -> str:
+    """The one message of a drained backlog of alerts."""
+    head = strings.t("alert_backlog", language, count=len(texts))
+    return "\n\n".join([head, *texts])
+
+
+def test_a_backlog_of_more_than_three_alerts_drains_as_one_message(ctx):
+    queue = AlertQueue(ctx)
+    for n in range(1, 6):
+        queue.add(f"alert {n}", [f"qq/7/{n}"], T0 + n * MINUTE)
+    sent: list[str] = []
+
+    assert queue.drain(sent.append, T0 + 10 * MINUTE) == 5
+
+    assert sent == [backlog([f"alert {n}" for n in range(1, 6)])]
+    assert sent[0].startswith("5 alerts that could not be sent when they came:\n\nalert 1\n\n")
+    assert queue.pending() == []
+    assert [entry["keys"] for entry in queue.late(T0, T0 + 60 * MINUTE)] == [
+        [f"qq/7/{n}"] for n in range(1, 6)]
+
+
+def test_up_to_three_queued_alerts_drain_one_by_one(ctx):
+    queue = AlertQueue(ctx)
+    for n in range(1, COMBINE_OVER + 1):
+        queue.add(f"alert {n}", [f"qq/7/{n}"], T0)
+    sent: list[str] = []
+    assert queue.drain(sent.append, T0 + MINUTE) == COMBINE_OVER
+    assert sent == [f"alert {n}" for n in range(1, COMBINE_OVER + 1)]
+
+
+def test_notices_in_a_backlog_go_out_on_their_own_and_in_order(hub, ctx):
+    (hub.data / "config.toml").write_text('[chat]\nlanguage = "zh-CN"\n', "utf-8")
+    queue = AlertQueue(load(hub.root))
+    queue.add("notice 1", [], T0)
+    for n, text in enumerate(["alert 1", "alert 2", "notice 2", "alert 3", "alert 4"], 1):
+        queue.add(text, [] if text.startswith("notice") else [f"qq/7/{n}"], T0 + n * MINUTE)
+    sent: list[str] = []
+
+    assert queue.drain(sent.append, T0 + 10 * MINUTE) == 6
+
+    # The backlog goes out where its first alert waited; a notice is never part of it.
+    assert sent == [
+        "notice 1", backlog(["alert 1", "alert 2", "alert 3", "alert 4"], "zh"), "notice 2"]
+    assert sent[1].startswith("4 条当时未能发出的提醒：\n\nalert 1")
+
+
+def test_a_backlog_message_that_fails_keeps_every_alert(ctx):
+    queue = AlertQueue(ctx)
+    for n in range(1, 6):
+        queue.add(f"alert {n}", [f"qq/7/{n}"], T0)
+
+    def down(text: str) -> None:
+        raise ChatError("down")
+
+    assert queue.drain(down, T0 + MINUTE) == 0
+    assert [entry["text"] for entry in queue.pending()] == [f"alert {n}" for n in range(1, 6)]
+    assert queue.late(T0, T0 + 60 * MINUTE) == []
 
 
 # --- ticks: pokes, sweeps, heartbeat -----------------------------------------------------------
@@ -566,6 +625,30 @@ def test_alert_queued_when_chat_down_and_sent_later(ctx, clock, fake_himalaya, f
     assert len(chat.sent) == 1
 
 
+def test_alerts_queued_during_an_outage_drain_as_one_message(
+        ctx, clock, fake_himalaya, fake_claude):
+    fake = fake_himalaya(server())
+    fake_claude.by_subject({"declined": URGENT})
+    watcher, chat, _ = rig(ctx, clock)
+    watcher.tick()
+
+    chat.down = True
+    mails: list[dict] = []
+    for n in range(1, 6):  # an urgent mail at each of five sweeps
+        mails.append(message(n, f"Card declined {n}"))
+        fake.write(server(mails))
+        clock.advance(SWEEP_SECONDS)
+        watcher.tick()
+    assert chat.sent == [] and len(AlertQueue(ctx).pending()) == 5
+
+    chat.down = False
+    clock.advance(60)
+    watcher.tick()
+
+    assert chat.sent == [backlog([alert_of(f"Card declined {n}") for n in range(1, 6)])]
+    assert AlertQueue(ctx).pending() == []
+
+
 def test_a_new_alert_waits_behind_the_queued_ones(ctx, clock, fake_himalaya, fake_claude):
     fake = fake_himalaya(server())
     fake_claude.by_subject({"declined": URGENT})
@@ -628,6 +711,50 @@ def test_connect_failure_notified_after_30_minutes_once(ctx, clock, fake_himalay
     clock.advance(SWEEP_SECONDS)
     watcher.tick()
     assert len(chat.sent) == 1
+
+
+@pytest.mark.parametrize("error, kind", [
+    (ConnectError("himalaya did not answer within 90 s"), "connect"),
+    (AuthError("authentication failed"), "auth"),
+])
+def test_a_failure_while_sorting_is_one_spell_and_one_notice(
+        ctx, clock, fake_himalaya, fake_claude, monkeypatch, error, kind):
+    # `fresh` gets through, then fetching the bodies fails, at every sweep.
+    fake = fake_himalaya(server())
+    fake_claude.by_subject({"declined": URGENT})
+    watcher, chat, _ = rig(ctx, clock)
+    watcher.tick()
+    fake.write(server([message(1, "Card declined")]))
+    real = watch.triage
+
+    def failing(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(watch, "triage", failing)
+    if kind == "connect":
+        notice = strings.t("cannot_connect", "", mailbox="qq", minutes=30, why=str(error))
+    else:
+        notice = strings.t(
+            "login_failed", "", mailbox="qq", fix="uv run apps/mail/scripts/mx.py secret-set qq")
+    start = clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+    assert chat.sent == ([notice] if kind == "auth" else [])  # connect: not before GRACE
+    for _ in range(6):  # two hours of sweeps in all
+        clock.advance(SWEEP_SECONDS)
+        watcher.tick()
+
+    assert chat.sent == [notice]
+    assert Health(ctx).problems(T0, clock.at) == [
+        {"mailbox": "qq", "kind": kind, "since": start.isoformat(), "until": None}]
+    assert load_marks(ctx)["qq"].last_uid == 0  # the mail waits until it can be sorted
+
+    monkeypatch.setattr(watch, "triage", real)
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+    assert chat.sent == [notice, alert_of("Card declined")]  # the recovery itself says nothing
+    assert Health(ctx).problems(T0, clock.at)[0]["until"] == clock.at.isoformat()
 
 
 def test_a_notice_waits_for_the_chat_like_an_alert(ctx, clock, fake_himalaya):

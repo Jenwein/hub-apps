@@ -37,6 +37,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "not reply to it."),
         "alert_phishing_short": "may be phishing",
         "alert_many": "{count} urgent mails:",
+        "alert_backlog": "{count} alerts that could not be sent when they came:",
         "login_failed": (
             "Mail: {mailbox} cannot sign in any more (the server refused the login), so its mail "
             "is not checked and urgent mail there is not alerted. To sign in again, type this in "
@@ -83,6 +84,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "alert_phishing": "警告：这封邮件可能是钓鱼邮件。不要打开其中的链接或附件，也不要回复。",
         "alert_phishing_short": "可能是钓鱼邮件",
         "alert_many": "{count} 封紧急邮件：",
+        "alert_backlog": "{count} 条当时未能发出的提醒：",
         "login_failed": (
             "邮件：{mailbox} 无法再登录（服务器拒绝了登录），所以不再检查它的邮件，其中的紧急邮件"
             "也不会提醒。要重新登录，请在服务器的终端里、总站的目录下输入：{fix}"),
