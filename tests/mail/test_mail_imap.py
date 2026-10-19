@@ -3,7 +3,8 @@
 The fixture `greenmail_hub` (conftest.py) skips these unless MAIL_TEST_IMAP=host:port is set; CI
 starts GreenMail in Docker on Linux, and the step "Check the greenmail tests ran" fails if any of
 them skipped there. To run them locally, start GreenMail as the "Start GreenMail" step of
-.github/workflows/ci.yml does, put himalaya on PATH (mx install-tool himalaya) and run
+.github/workflows/ci.yml does, put himalaya and carillon on PATH (mx install-tool himalaya,
+mx install-tool carillon) and run
 
     MAIL_TEST_IMAP=localhost:3143 uv run pytest -m greenmail
 
@@ -15,8 +16,10 @@ import imaplib
 import io
 import json
 import re
+import shutil
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -32,6 +35,7 @@ from mailkit.cli import main
 from mailkit.context import load
 from mailkit.himalaya import Himalaya, HimalayaError
 from mailkit.query import item
+from mailkit.watch import spawn_carillon
 from mailtest import GREENMAIL_BOX as BOX
 from mailtest import GREENMAIL_SECRET, SmtpProxy, fix_server_name, record_chat
 
@@ -357,6 +361,42 @@ def test_bcc_is_stripped_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, c
     assert hidden.encode() not in to_copy
     [copy] = hima.search(BOX, "Sent", [], 10)
     assert re.search(rb"(?im)^bcc: " + re.escape(hidden.encode()), hima.raw(BOX, "Sent", copy.id))
+
+
+def watch_log(ctx) -> str:
+    path = ctx.state / "watch.log"
+    return path.read_text("utf-8", "replace") if path.exists() else "(no watch.log)"
+
+
+@pytest.mark.greenmail
+def test_carillon_hook_fires_on_new_mail(greenmail_hub, ctx):
+    """The real carillon (CI installs it), started as `mx watch` starts it, with the carillon.toml
+    that `configure` wrote (IMAP without TLS, the password sent by LOGIN): a new mail in the inbox
+    runs `mx hook test`, which touches state/pokes/test; carillon stops on terminate()."""
+    if shutil.which("carillon") is None:
+        pytest.skip("carillon is not on PATH: mx install-tool carillon")
+    address = ctx.mailbox(BOX).address
+    poke = ctx.state / "pokes" / BOX
+    proc = spawn_carillon(ctx)
+    try:
+        deadline = time.monotonic() + 30
+        while not poke.exists():
+            assert proc.poll() is None, f"carillon exited: {watch_log(ctx)}"
+            assert time.monotonic() < deadline, f"no poke within 30 s: {watch_log(ctx)}"
+            # Mail that came before carillon's IDLE began is no news to it: send until it sees one.
+            append(ctx, make_mail(address, f"gm-carillon-{uuid4().hex[:8]}"))
+            wait = time.monotonic() + 3
+            while not poke.exists() and time.monotonic() < wait:
+                time.sleep(0.1)
+    finally:
+        proc.terminate()
+        try:
+            code = proc.wait(timeout=40)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail(f"carillon did not stop on SIGTERM: {watch_log(ctx)}")
+    assert code == 0, watch_log(ctx)
+    assert poke.is_file()
 
 
 # The proxy in front of GreenMail's SMTP port (see greenmail_hub in conftest.py). These two run

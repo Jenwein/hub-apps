@@ -36,6 +36,32 @@ def append_log(path, text):
         _os.rmdir(lock)
 '''
 
+# How the fakes of himalaya and carillon tell that their stdin is the null device (or closed), as
+# mx promises: a pipe, a file or a console is not.
+STDIN_NULL = r'''
+import os as _os
+import stat as _stat
+import sys as _sys
+
+
+def stdin_is_null():
+    try:
+        if not _stat.S_ISCHR(_os.fstat(0).st_mode):
+            return False
+        if _sys.platform != "win32":
+            return not _os.isatty(0)
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        get_mode = ctypes.WinDLL("kernel32", use_last_error=True).GetConsoleMode
+        get_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_mode.restype = wintypes.BOOL
+        return not get_mode(msvcrt.get_osfhandle(0), ctypes.byref(wintypes.DWORD()))
+    except (OSError, ValueError):
+        return True  # no stdin at all
+'''
+
 
 # The fake himalaya (v2.2.1) answers from a JSON "server" file and logs every call.
 #
@@ -74,7 +100,6 @@ import base64
 import json
 import os
 import re
-import stat
 import sys
 from datetime import date, datetime, timezone
 from email import message_from_bytes, policy
@@ -125,24 +150,6 @@ def check_failure(server, backend):
     entry = failure(server, backend)
     if entry:
         refuse(entry)
-
-
-def stdin_is_null():
-    try:
-        if not stat.S_ISCHR(os.fstat(0).st_mode):
-            return False
-        if sys.platform != "win32":
-            return not os.isatty(0)
-        import ctypes
-        import msvcrt
-        from ctypes import wintypes
-
-        get_mode = ctypes.WinDLL("kernel32", use_last_error=True).GetConsoleMode
-        get_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        get_mode.restype = wintypes.BOOL
-        return not get_mode(msvcrt.get_osfhandle(0), ctypes.byref(wintypes.DWORD()))
-    except (OSError, ValueError):
-        return True  # no stdin at all
 
 
 # --- the server file ---------------------------------------------------------------------------
@@ -774,7 +781,7 @@ except Exception as err:
 
 def himalaya_body(server: Path, log: Path) -> str:
     """The fake himalaya for `make_exe`, bound to the server file and the call log."""
-    return f"SERVER = {str(server)!r}\nLOG = {str(log)!r}\n{LOG_APPEND}\n{FAKE_HIMALAYA}"
+    return f"SERVER = {str(server)!r}\nLOG = {str(log)!r}\n{LOG_APPEND}\n{STDIN_NULL}\n{FAKE_HIMALAYA}"
 
 
 @dataclass(frozen=True)
@@ -1095,3 +1102,95 @@ class FakeChat:
 
     def crashes(self) -> list[str]:
         return [entry["crashed"] for entry in self.entries() if "crashed" in entry]
+
+
+# The fake carillon v0.2.0: `carillon -c <config> --log-level <level> watch`. It logs its call as
+# one JSON line (`argv`: the whole sys.argv, so argv[1:] is what mx passed; `cwd`; `stdin_closed`),
+# prints `fake carillon: out` on stdout and `fake carillon: err` on stderr, and then, by
+# $FAKE_CARILLON_MODE:
+# - "" (the default): reads the config named by `-c` (relative to its working directory, as
+#   carillon does), runs the `imap.hook.on-message-added.cmd` of every account once, as carillon
+#   does for a new mail (with the environment variables `id`, `mailbox` and `subject`, and stdin,
+#   stdout and stderr its own), logs {"hook": <account>, "exit": <status>} for each, and waits to
+#   be stopped. SIGTERM logs {"stopped": "SIGTERM"} and exits 0, as carillon does.
+# - "exit": exits 1 at once, as carillon does when it rejects its config.
+# A crash adds {"crashed": "<error>"} and exits 97.
+FAKE_CARILLON = r'''
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import tomllib
+
+
+def log(entry):
+    append_log(LOG, json.dumps(entry) + "\n")
+
+
+def stop(signum, frame):
+    log({"stopped": "SIGTERM"})
+    sys.exit(0)
+
+
+def main():
+    args = sys.argv[1:]
+    log({"argv": sys.argv, "cwd": os.getcwd(), "stdin_closed": stdin_is_null()})
+    print("fake carillon: out", flush=True)
+    print("fake carillon: err", file=sys.stderr, flush=True)
+    if os.environ.get("FAKE_CARILLON_MODE") == "exit":
+        sys.exit(1)
+    signal.signal(signal.SIGTERM, stop)
+    with open(args[args.index("-c") + 1], "rb") as stream:
+        config = tomllib.load(stream)
+    for name, account in config["accounts"].items():
+        imap = account["imap"]
+        env = {**os.environ, "id": "1", "mailbox": imap["mailbox"], "subject": "Hello"}
+        done = subprocess.run(imap["hook"]["on-message-added"]["cmd"], env=env)
+        log({"hook": name, "exit": done.returncode})
+    while True:
+        time.sleep(0.1)
+
+
+try:
+    main()
+except SystemExit:
+    raise
+except Exception as err:
+    log({"crashed": repr(err)})
+    sys.exit(97)
+'''
+
+
+def carillon_body(log: Path) -> str:
+    """The fake carillon for `make_exe`, bound to the call log."""
+    return f"LOG = {str(log)!r}\n{LOG_APPEND}\n{STDIN_NULL}\n{FAKE_CARILLON}"
+
+
+@dataclass(frozen=True)
+class FakeCarillon:
+    exe: Path  # the executable `carillon`, first on PATH
+    log: Path  # the call log
+
+    def entries(self) -> list[dict]:
+        """Every line of the log so far: calls, hooks run, stops and crashes."""
+        if not self.log.exists():
+            return []
+        lines = self.log.read_text("utf-8").splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+
+
+# A fake `uv` for the hook command of the generated carillon config: `uv run <script> <args>`
+# runs the script with the Python of the tests, so mx's `hook` runs as carillon starts it, but
+# without uv making an environment for the script (which could download).
+FAKE_UV = r'''
+import subprocess
+import sys
+
+args = sys.argv[1:]
+if args[:1] != ["run"] or len(args) < 2:
+    sys.stderr.write("fake uv: only `uv run <script> ...` is supported\n")
+    sys.exit(2)
+sys.exit(subprocess.call([sys.executable, *args[1:]]))
+'''

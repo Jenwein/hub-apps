@@ -28,6 +28,7 @@ from . import (
     strings,
     tools,
     vault,
+    watch,
 )
 from .paths import locked
 from .settings import FOLDER_ROLES, Mailbox, MailError
@@ -377,6 +378,17 @@ def run_discard(args: argparse.Namespace) -> None:
     print_json(compose.discard(load_ctx(args), args.draft))
 
 
+def run_watch(args: argparse.Namespace) -> None:
+    """The alert watcher, which the alert service runs: until it is stopped."""
+    watch.serve(load_ctx(args))
+
+
+def run_hook(args: argparse.Namespace) -> None:
+    """What carillon runs for each new mail: it notes the mailbox for the watcher, and nothing
+    more. Whatever carillon passes after the mailbox is ignored."""
+    watch.poke(load_ctx(args).state, args.mailbox)
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -603,6 +615,17 @@ def build_parser() -> Parser:
     p = sub.add_parser("discard", help="throw a draft away")
     p.add_argument("draft", help=draft_id)
     p.set_defaults(func=run_discard)
+
+    p = sub.add_parser(
+        "watch", help="watch the inboxes and alert on urgent mail in the private chat (the alert "
+        "service runs it; it runs until it is stopped)")
+    p.set_defaults(func=run_watch)
+
+    # No help text, like secret-fetch: only carillon calls it.
+    p = sub.add_parser("hook")
+    p.add_argument("mailbox")
+    p.add_argument("ignored", nargs=argparse.REMAINDER)
+    p.set_defaults(func=run_hook)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")
