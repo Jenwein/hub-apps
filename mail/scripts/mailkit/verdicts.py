@@ -4,7 +4,7 @@
 stored and the time its alert went out. The watcher and the daily report share it: what one sorted,
 the other reuses. Every read and every write takes the state lock (`paths.locked`), and a write
 replaces the file whole: two writers, in threads or processes, never lose each other's entries,
-and on Windows no reader holds the file open while a writer replaces it (R37). The lock is not
+and on Windows no reader holds the file open while a writer replaces it. The lock is not
 reentrant: do not call any method of the store while holding it.
 
 An entry is dropped on a write once its mail is older than KEEP: by the mail's date, which counts

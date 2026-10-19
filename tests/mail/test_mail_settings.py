@@ -276,7 +276,7 @@ def test_write_private_leaves_the_old_file_and_no_temp_when_the_replace_fails(
 
 def test_write_private_retries_a_replace_refused_for_a_moment(tmp_path, monkeypatch):
     # On Windows the target can be open in another process for a moment (the watcher and the
-    # report run apart): the replace is denied, then works (R37).
+    # report run apart): the replace is denied, then works.
     target = tmp_path / "data.json"
     paths.write_private(target, b"old")
     real, calls = os.replace, []

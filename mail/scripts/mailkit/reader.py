@@ -83,17 +83,18 @@ class ReaderError(MailError):
 
 
 class ReaderDown(ReaderError):
-    """The reader did not answer: claude is missing or refused, could not start, did not finish
-    in time, printed something that is not its result, or said that it failed (not logged in, a
-    usage limit, an API error other than a refusal: see REFUSED). Unlike an answer that does not
-    fit the mails, this says nothing about the mails it was given: it fails for any mail."""
+    """The reader did not answer: claude is missing or is an npm launcher mx does not run, could
+    not start, did not finish in time, printed something that is not its result, or said that it
+    failed (not logged in, a usage limit, an API error other than a refusal of the model's
+    safeguards, which is an answer error: see REFUSED). Unlike an answer that does not fit the
+    mails, this says nothing about the mails it was given: it fails for any mail."""
 
 
 # The result of claude that is an error about the answer, not about claude: the model gave no
 # output that fits the schema, which a mail can bring about.
 ANSWER_ERRORS = frozenset({"error_max_structured_output_retries"})
 # A refusal of the model's safeguards (`stop_reason` "refusal"): claude reports it as an API error,
-# but what set it off is what the mails say, which their senders chose (ruling R34).
+# but what set it off is what the mails say, which their senders chose: an answer error.
 REFUSED = "the reader refused to read the mail: the model's safeguards flagged it"
 
 

@@ -73,8 +73,8 @@ def _moved_on(mark: Mark, uidvalidity: str, last_uid: int,
     """The UIDs of `found` to hand on, oldest first, the new mark and how many were skipped.
 
     The new mark has `last_uid`, the highest UID that the fetch or the search showed, never one
-    taken from UIDNEXT (R36): a fetch session that lags behind the status cannot make the mark
-    pass mail it did not see. Its time is the latest arrival of the mark and the found mail (the
+    taken from UIDNEXT: a fetch session that lags behind the status cannot make the mark pass mail
+    it did not see. Its time is the latest arrival of the mark and the found mail (the
     newest handled mail; a server's clock can be wrong, but the mark never goes back)."""
     chosen = sorted(found)
     skipped = max(0, len(chosen) - MAX_CATCH_UP)

@@ -1,4 +1,4 @@
-"""Sorting new mail with the reader, a batch at a time, and keeping every verdict.
+"""Sorting new mail with the reader, a batch at a time, and keeping the verdicts.
 
 `triage` takes mail by verdict key and UID. Verdicts already in the store are reused; the other
 mails go in batches of BATCH mails of one mailbox and folder: one `fetch_raw` per batch (one login;
@@ -6,12 +6,13 @@ it never marks a mail as read), one reader call, up to WORKERS batches at once. 
 are stored as soon as it is done, by the calling thread only, so a run that ends early keeps what
 it sorted. A batch that has not started when the budget is spent is left for the next run.
 
-One mail must not keep a mailbox from being sorted (ruling R23). A batch the reader fails on is
-sorted again mail by mail, each mail alone in its own call, and how a mail fails alone decides:
+One mail must not keep a mailbox from being sorted. A batch the reader fails on is sorted again
+mail by mail, each mail alone in its own call, and how a mail fails alone decides:
 
 - The reader answered, but not with a verdict that fits the mail (a mail number missing or
-  repeated, a tier that is not one of TIERS, no answer in the schema): that is about the mail,
-  which gets the fallback verdict (tier daily, category other, reason FALLBACK_REASON), stored like
+  repeated, a tier that is not one of TIERS, no answer in the schema, or a refusal of the model's
+  safeguards, which the sender's words set off): that is about the mail, which gets the fallback
+  verdict (tier daily, category other, reason FALLBACK_REASON), stored like
   any other, and reused like any other: the mail is not sent to the reader again. This
   holds when every mail of a batch fails so, too: what a mail makes the reader answer is up to
   its sender, and ten crafted mails must not hold a mailbox's alerts back for good.
@@ -22,20 +23,21 @@ sorted again mail by mail, each mail alone in its own call, and how a mail fails
   reader that fails for every mail of the batch never turns them into fallbacks: the caller keeps
   its old mark and tries again later.
 
-A refusal of the model's safeguards counts as an answer that does not fit (R34): the sender
-chose what set it off. A batch of one mail is its own retry. A retry starts only within the
-budget: past it, the batch's mails are left, unless the batch failed with ReaderDown and no mail
-of it got an answer, which raises.
+A batch of one mail is its own retry. A retry starts only within the budget: past it, the
+batch's mails are left, unless the batch failed with ReaderDown and no mail of it got an answer,
+which raises.
 
-Fetching works the same way (R35). When the fetch of a batch fails with a HimalayaError that is
-not an AuthError or a ConnectError, each mail of it is fetched alone. A mail whose own fetch
-fails gets the fallback verdict FETCH_FALLBACK_REASON (sender and subject "", the date it arrived
-when `fetch_dates` can tell it), stored like any other; the fetched ones are sorted together. An
-AuthError or a ConnectError is about the mailbox and is raised. A mail the server no longer has
-(moved or deleted since) gets no verdict and is not left.
+Fetching works the same way. When the fetch of a batch fails with a HimalayaError that is not an
+AuthError or a ConnectError, each mail of it is fetched alone, and the fetched ones are sorted
+together. A mail whose own fetch fails gets the fallback verdict FETCH_FALLBACK_REASON (sender and
+subject "", the date it arrived when `fetch_dates` can tell it). That verdict is returned but not
+stored: the failure may pass (a server that refuses one more connection for a while), so a later
+run, such as the daily report, fetches and sorts the mail again. An AuthError or a ConnectError
+is about the mailbox and is raised. A mail the server no longer has (moved or deleted since) gets
+no verdict and is not left.
 
-`TriageResult.fallbacks` names the mails that got a fallback in this call (R38), so the caller
-can tell when a whole run fell back.
+`TriageResult.fallbacks` names the mails that got a fallback in this call, so the caller can tell
+when a whole run fell back.
 
 An error that is raised (ReaderDown, an AuthError or ConnectError of a fetch, any other
 MailError) stops new batches from starting; the running ones finish and are stored, then the
@@ -84,11 +86,14 @@ class _Done:
     verdicts: list[Verdict] = field(default_factory=list)
     left: list[str] = field(default_factory=list)
     fallbacks: list[str] = field(default_factory=list)
+    unstored: set[str] = field(default_factory=set)  # verdicts returned but not stored
     error: MailError | None = None
 
-    def fall_back(self, verdict: Verdict) -> None:
+    def fall_back(self, verdict: Verdict, store: bool = True) -> None:
         self.verdicts.append(verdict)
         self.fallbacks.append(verdict.key)
+        if not store:
+            self.unstored.add(verdict.key)
 
 
 def _fallback_verdict(key: str, mailbox: str, sender: str, subject: str, when: str,
@@ -149,8 +154,8 @@ class _Sorter:
         return done
 
     def _fetch(self, batch: list[Item], done: _Done) -> list[Mail]:
-        """The mails of `batch`, parsed: one fetch for all, else one for each (R35). A mail that
-        cannot be fetched alone gets its fallback in `done`."""
+        """The mails of `batch`, parsed: one fetch for all, else one for each. A mail that
+        cannot be fetched alone gets its fallback in `done`, not to be stored."""
         mailbox, folder = batch[0][1], batch[0][2]
         try:
             raws = self.hima.fetch_raw(mailbox, folder, [uid for _, _, _, uid in batch])
@@ -182,7 +187,7 @@ class _Sorter:
             dates = {}  # the time is a help to the report, not a need
         for key, _, _, uid in failed:
             when = dates.get(uid)
-            done.fall_back(unfetched(key, mailbox, when.isoformat() if when else ""))
+            done.fall_back(unfetched(key, mailbox, when.isoformat() if when else ""), store=False)
 
     def _sort(self, mails: list[Mail], done: _Done) -> None:
         if not mails:
@@ -234,7 +239,7 @@ def triage(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], *, budge
                 futures = [pool.submit(sorter.batch, batch) for batch in _batches(todo)]
                 for future in as_completed(futures):
                     done = future.result()
-                    store.put_many(done.verdicts)
+                    store.put_many(v for v in done.verdicts if v.key not in done.unstored)
                     found.update((v.key, v) for v in done.verdicts)
                     left.update(done.left)
                     made.update(done.fallbacks)
