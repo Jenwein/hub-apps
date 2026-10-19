@@ -7,6 +7,7 @@ works on every platform. More fakes arrive with the tasks that need them.
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # The fake himalaya (v2.2.1) answers from a JSON "server" file and logs every call.
 #
@@ -765,3 +766,167 @@ class FakeHimalaya:
             return []
         lines = self.log.read_text("utf-8").splitlines()
         return [json.loads(line) for line in lines if line.strip()]
+
+
+# The fake Claude Code CLI: `claude -p`, the isolated reader. It logs every call and answers from
+# the reply file named by $FAKE_CLAUDE_REPLY:
+# - no file: the default for the schema of `--json-schema`: with `mails`, DEFAULT_ITEM for every
+#   wrapped mail on stdin; with `answer` or `body`, a fixed text; else an empty object.
+# - {"by_subject": {"<keyword>": {<item fields>}, ...}}: for every wrapped mail on stdin, the fields
+#   of the first keyword found in its `Subject:` line (case-insensitive; "" matches every mail)
+#   over DEFAULT_ITEM, with `index` the mail's number unless the fields set one. A mail that no
+#   keyword matches gets DEFAULT_ITEM.
+# - anything else: a fixed result object, printed as it is: the whole JSON that claude prints
+#   (`envelope` below builds one).
+# What it prints otherwise is claude's result object with `structured_output` and, in `result`,
+# the same as JSON text. A wrapped mail is `<<<MAIL-<token> <n>>>` ... `<<<END MAIL-<token> <n>>>`.
+# $FAKE_CLAUDE_MODE: `error` prints claude's answer when it is not logged in (`is_error`, exit 1);
+# `garbage` prints text that is not JSON; `sleep` sleeps for a minute (for the timeout).
+#
+# The call log has one JSON line per call, written before it answers: `argv` (the whole sys.argv:
+# argv[1:] is what the reader passed), `cwd`, `cwd_names` (what the working directory holds),
+# `stdin`, and `env` (CC_SESSION_KEY and CC_PROJECT, when they are set). A crash adds a line
+# {"crashed": "<error>"} and exits 97.
+FAKE_CLAUDE = r'''
+import json
+import os
+import re
+import sys
+import time
+
+DEFAULT_ITEM = {
+    "summary": "A mail.", "code": "", "amount": "", "deadline": "", "tier": "ignore",
+    "category": "other", "reason": "Nothing to do.", "phishing": False}
+TEXTS = {"answer": "The fake answer.", "body": "The fake reply."}
+MAIL = re.compile(r"<<<MAIL-([0-9a-f]{16}) (\d+)>>>\n(.*?)\n<<<END MAIL-\1 \2>>>", re.S)
+NOT_LOGGED_IN = "Not logged in · Please run /login"
+
+
+def log(entry):
+    with open(LOG, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry) + "\n")
+
+
+def emit(data):
+    sys.stdout.write(json.dumps(data))
+    sys.stdout.flush()
+
+
+def option(name):
+    args = sys.argv[1:]
+    if name in args and args.index(name) + 1 < len(args):
+        return args[args.index(name) + 1]
+    return None
+
+
+def subject_of(text):
+    found = re.search(r"^Subject: (.*)$", text, re.M)
+    return found.group(1) if found else ""
+
+
+def items(stdin, by_subject):
+    out = []
+    for _token, n, text in MAIL.findall(stdin):
+        subject = subject_of(text).lower()
+        fields = next(
+            (chosen for keyword, chosen in by_subject.items() if keyword.lower() in subject), {})
+        out.append({"index": int(n), **DEFAULT_ITEM, **fields})
+    return out
+
+
+def main():
+    stdin = sys.stdin.buffer.read().decode("utf-8")
+    log({
+        "argv": sys.argv, "cwd": os.getcwd(), "cwd_names": sorted(os.listdir(".")),
+        "stdin": stdin,
+        "env": {k: os.environ[k] for k in ("CC_SESSION_KEY", "CC_PROJECT") if k in os.environ}})
+    mode = os.environ.get("FAKE_CLAUDE_MODE", "")
+    if mode == "sleep":
+        time.sleep(60)
+    elif mode == "error":
+        emit({"type": "result", "subtype": "success", "is_error": True, "result": NOT_LOGGED_IN})
+        sys.exit(1)
+    elif mode == "garbage":
+        sys.stdout.write("this is not JSON\n")
+        return
+    path = os.environ.get("FAKE_CLAUDE_REPLY", "")
+    reply = None
+    if path and os.path.exists(path):
+        with open(path, encoding="utf-8") as stream:
+            reply = json.load(stream)
+    if isinstance(reply, dict) and "by_subject" not in reply:
+        emit(reply)
+        return
+    by_subject = (reply or {}).get("by_subject") or {}
+    properties = json.loads(option("--json-schema") or "{}").get("properties") or {}
+    if "mails" in properties:
+        structured = {"mails": items(stdin, by_subject)}
+    else:
+        structured = {key: text for key, text in TEXTS.items() if key in properties}
+    emit({
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": json.dumps(structured), "structured_output": structured})
+
+
+try:
+    main()
+except Exception as err:
+    log({"crashed": repr(err)})
+    sys.exit(97)
+'''
+
+
+def claude_body(log: Path) -> str:
+    """The fake claude for `make_exe`, bound to the call log."""
+    return f"LOG = {str(log)!r}\n{FAKE_CLAUDE}"
+
+
+def envelope(structured: dict | None, *, result: str | None = None,
+             is_error: bool = False) -> dict:
+    """What `claude -p --output-format json` prints: `structured_output` (left out when None) and
+    `result` (by default the structured output as JSON text)."""
+    answer = {"type": "result", "subtype": "success", "is_error": is_error}
+    if result is None and structured is not None:
+        result = json.dumps(structured)
+    if result is not None:
+        answer["result"] = result
+    if structured is not None:
+        answer["structured_output"] = structured
+    return answer
+
+
+@dataclass(frozen=True)
+class FakeClaude:
+    exe: Path  # the executable `claude`, first on PATH
+    reply_path: Path  # the file $FAKE_CLAUDE_REPLY names (see FAKE_CLAUDE)
+    log: Path  # the call log
+    env: Any  # the test's monkeypatch, for `mode`
+
+    def reply(self, structured: dict) -> None:
+        """Answer every call with this structured output."""
+        self.reply_raw(envelope(structured))
+
+    def reply_raw(self, answer: dict) -> None:
+        """Answer every call with exactly this result object."""
+        self.reply_path.write_text(json.dumps(answer), "utf-8")
+
+    def by_subject(self, items: dict[str, dict]) -> None:
+        """Answer each wrapped mail with the fields of the first keyword in its subject."""
+        self.reply_raw({"by_subject": items})
+
+    def mode(self, name: str) -> None:
+        """`error`, `garbage`, `sleep`, or "" for none (see FAKE_CLAUDE)."""
+        self.env.setenv("FAKE_CLAUDE_MODE", name)
+
+    def entries(self) -> list[dict]:
+        if not self.log.exists():
+            return []
+        lines = self.log.read_text("utf-8").splitlines()
+        return [json.loads(line) for line in lines if line.strip()]
+
+    def calls(self) -> list[dict]:
+        """Every call so far, oldest first: argv, cwd, cwd_names, stdin and env."""
+        return [entry for entry in self.entries() if "argv" in entry]
+
+    def crashes(self) -> list[str]:
+        return [entry["crashed"] for entry in self.entries() if "crashed" in entry]

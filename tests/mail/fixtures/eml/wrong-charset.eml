@@ -1,0 +1,10 @@
+From: Bank <notice@bank.example.cn>
+To: me@example.org
+Subject: Statement
+Date: Mon, 19 Oct 2026 12:00:00 +0800
+Message-ID: <wrong-1@bank.example.cn>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+本月账单金额：1,234.50 元，请于 2026-11-05 前还款。

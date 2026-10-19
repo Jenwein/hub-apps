@@ -15,10 +15,8 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import unicodedata
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import pairwise
@@ -27,7 +25,7 @@ from typing import NoReturn
 from .configs import HIMALAYA_CONFIG
 from .context import Ctx
 from .settings import MailError
-from .tools import NO_WINDOW
+from .tools import NO_WINDOW, kill_tree
 
 # --- errors ------------------------------------------------------------------------------------
 
@@ -328,25 +326,6 @@ def guess_folders(folders: list[Folder]) -> dict[str, str | None]:
 # --- running himalaya --------------------------------------------------------------------------
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    """Kill himalaya and what it started (the password command): a child that lives on would keep
-    our pipes open. POSIX: the process group, since himalaya runs in its own session. Windows:
-    taskkill walks the tree."""
-    if os.name == "posix":
-        with suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-    else:
-        with suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False,
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
-                creationflags=NO_WINDOW)
-    with suppress(OSError):
-        proc.kill()
-    with suppress(OSError, subprocess.SubprocessError):
-        proc.communicate(timeout=10)
-
-
 # F-NODEL: what mx never runs, in every spelling himalaya knows. Deleting for good (inside the
 # trash too), expunging (CLOSE expunges as well), `imap raw` (it could send any of them), and
 # `--seen`, which marks a mail as read (as a filter of `imap search` it only selects).
@@ -422,10 +401,10 @@ class Himalaya:
         try:
             out, err = proc.communicate(input, timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            _kill_tree(proc)
+            kill_tree(proc)
             raise ConnectError(f"himalaya did not answer within {self.timeout:g} s") from None
         except BaseException:  # Ctrl+C: do not leave himalaya running
-            _kill_tree(proc)
+            kill_tree(proc)
             raise
         if proc.returncode != 0:
             shown, logged = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")

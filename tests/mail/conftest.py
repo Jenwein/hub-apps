@@ -18,7 +18,7 @@ import pytest
 # Not left to pytest's import mode: mailtest, and later fakes, must import in any of them.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fakes import FakeHimalaya, himalaya_body
+from fakes import FakeClaude, FakeHimalaya, claude_body, himalaya_body
 from mailtest import (
     GREENMAIL_BOX,
     GREENMAIL_SECRET,
@@ -108,6 +108,26 @@ def fake_himalaya(hub, tmp_path, make_exe):
     crashed = [call["argv"][1:] for call in calls if call["exit"] == 97]
     if crashed:
         pytest.fail(f"the fake himalaya crashed on: {crashed}")
+
+
+@pytest.fixture
+def fake_claude(tmp_path, make_exe, monkeypatch):
+    """A fake `claude` first on PATH (FAKE_CLAUDE in fakes.py): it answers every reader call from
+    its reply file (by default: tier ignore, category other for every mail) and logs the call.
+    `fake_claude.reply(...)`, `.by_subject(...)` and `.mode(...)` change the answers.
+
+    The test fails at teardown if the fake crashed.
+    """
+    folder = tmp_path / "fake-claude"
+    folder.mkdir()
+    reply, log = folder / "reply.json", folder / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_REPLY", str(reply))
+    monkeypatch.delenv("FAKE_CLAUDE_MODE", raising=False)
+    fake = FakeClaude(make_exe("claude", claude_body(log)), reply, log, monkeypatch)
+    yield fake
+    crashed = fake.crashes()
+    if crashed:
+        pytest.fail(f"the fake claude crashed: {crashed}")
 
 
 GREENMAIL_FOLDERS = ("Sent", "Trash", "Archive")  # INBOX is there for every user

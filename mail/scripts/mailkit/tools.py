@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -38,6 +39,25 @@ PLATFORMS = {
 # Every mailkit module that spawns a subprocess whose output it captures passes
 # `creationflags=NO_WINDOW`: a hidden console on Windows, 0 elsewhere.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a program mx started and what it started in turn (himalaya's password command): a
+    child that lives on would keep our pipes open. POSIX: the process group, so the program must
+    run in its own session (`start_new_session=True`). Windows: taskkill walks the tree."""
+    if os.name == "posix":
+        with suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False,
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                creationflags=NO_WINDOW)
+    with suppress(OSError):
+        proc.kill()
+    with suppress(OSError, subprocess.SubprocessError):
+        proc.communicate(timeout=10)
 
 
 @dataclass(frozen=True)

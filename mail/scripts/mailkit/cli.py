@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import NoReturn
 
-from . import configs, context, himalaya, query, signin, tools, vault
+from . import configs, context, himalaya, query, reader, signin, tools, vault
 from .paths import locked
 from .settings import FOLDER_ROLES, Mailbox, MailError
 
@@ -241,6 +241,13 @@ def run_list(args: argparse.Namespace) -> None:
         "note": query.NOTE})
 
 
+def run_reader_check(args: argparse.Namespace) -> None:
+    """Does the reader work? It reads a built-in sample mail with the configured model. Exit 0
+    whatever the answer is: a reader that cannot run is the answer `{"ok": false, ...}`."""
+    ctx = load_ctx(args)
+    print_json(reader.check(reader.Reader(ctx.settings.reader_model), ctx.settings.language))
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -329,6 +336,10 @@ def build_parser() -> Parser:
         "--limit", type=positive_int, default=20, metavar="N",
         help="at most N mails in all (default: 20)")
     p.set_defaults(func=run_list)
+
+    p = sub.add_parser(
+        "reader-check", help="test the mail reader (claude -p with no tools) on a sample mail")
+    p.set_defaults(func=run_reader_check)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")
