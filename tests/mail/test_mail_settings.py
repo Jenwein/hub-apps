@@ -274,6 +274,45 @@ def test_write_private_leaves_the_old_file_and_no_temp_when_the_replace_fails(
     assert target.read_bytes() == b"old" and list(tmp_path.iterdir()) == [target]
 
 
+def test_write_private_retries_a_replace_refused_for_a_moment(tmp_path, monkeypatch):
+    # On Windows the target can be open in another process for a moment (the watcher and the
+    # report run apart): the replace is denied, then works (R37).
+    target = tmp_path / "data.json"
+    paths.write_private(target, b"old")
+    real, calls = os.replace, []
+
+    def busy_twice(src, dst):
+        calls.append(dst)
+        if len(calls) <= 2:
+            raise PermissionError(13, "the file is open in another process")
+        real(src, dst)
+
+    monkeypatch.setattr(os, "replace", busy_twice)
+    paths.write_private(target, b"new")
+
+    assert len(calls) == 3 and paths.REPLACE_RETRY_SECONDS == 2.0
+    assert target.read_bytes() == b"new" and list(tmp_path.iterdir()) == [target]
+
+
+def test_write_private_gives_up_on_a_replace_refused_for_good(tmp_path, monkeypatch):
+    target = tmp_path / "data.json"
+    paths.write_private(target, b"old")
+    calls = []
+
+    def busy(src, dst):
+        calls.append(dst)
+        raise PermissionError(13, "the file is open in another process")
+
+    monkeypatch.setattr(os, "replace", busy)
+    monkeypatch.setattr(paths, "REPLACE_RETRY_SECONDS", 0.3)
+    started = time.monotonic()
+    with pytest.raises(PermissionError):
+        paths.write_private(target, b"new")
+
+    assert 0.3 <= time.monotonic() - started < 5 and len(calls) > 1
+    assert target.read_bytes() == b"old" and list(tmp_path.iterdir()) == [target]
+
+
 def test_json_round_trip(tmp_path):
     target = tmp_path / "data.json"
     assert paths.read_json(target, {"none": True}) == {"none": True}

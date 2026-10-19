@@ -22,14 +22,25 @@ sorted again mail by mail, each mail alone in its own call, and how a mail fails
   reader that fails for every mail of the batch never turns them into fallbacks: the caller keeps
   its old mark and tries again later.
 
-A batch of one mail is its own retry. A retry starts only within the budget: past it, the batch's
-mails are left, unless the batch failed with ReaderDown and no mail of it got an answer, which
-raises. A mail the server no longer has (moved or deleted since) gets no verdict and is not left.
+A refusal of the model's safeguards counts as an answer that does not fit (R34): the sender
+chose what set it off. A batch of one mail is its own retry. A retry starts only within the
+budget: past it, the batch's mails are left, unless the batch failed with ReaderDown and no mail
+of it got an answer, which raises.
 
-Any error (ReaderDown, or a HimalayaError of a fetch) stops new batches from starting; the
-running ones finish and are stored, then the first error is raised. Call `triage` per mailbox to
-keep one mailbox's failure from the others. Do not hold the state lock while calling it: storing
-takes it.
+Fetching works the same way (R35). When the fetch of a batch fails with a HimalayaError that is
+not an AuthError or a ConnectError, each mail of it is fetched alone. A mail whose own fetch
+fails gets the fallback verdict FETCH_FALLBACK_REASON (sender and subject "", the date it arrived
+when `fetch_dates` can tell it), stored like any other; the fetched ones are sorted together. An
+AuthError or a ConnectError is about the mailbox and is raised. A mail the server no longer has
+(moved or deleted since) gets no verdict and is not left.
+
+`TriageResult.fallbacks` names the mails that got a fallback in this call (R38), so the caller
+can tell when a whole run fell back.
+
+An error that is raised (ReaderDown, an AuthError or ConnectError of a fetch, any other
+MailError) stops new batches from starting; the running ones finish and are stored, then the
+first error is raised. Call `triage` per mailbox to keep one mailbox's failure from the others. Do
+not hold the state lock while calling it: reading and storing verdicts take it.
 """
 
 from __future__ import annotations
@@ -42,8 +53,9 @@ from dataclasses import dataclass, field
 
 from . import mailtext, rules
 from .context import Ctx
-from .himalaya import Himalaya
+from .himalaya import AuthError, ConnectError, Himalaya, HimalayaError
 from .mailtext import Parsed
+from .marks import uid_set
 from .reader import Reader, ReaderDown, ReaderError, Verdict, from_headers
 from .settings import MailError
 from .verdicts import VerdictStore
@@ -51,6 +63,7 @@ from .verdicts import VerdictStore
 BATCH = 10
 WORKERS = 3
 FALLBACK_REASON = "could not be sorted"  # English: the report and the alerts say it in theirs
+FETCH_FALLBACK_REASON = "could not be fetched"
 
 Item = tuple[str, str, str, int]  # verdict key, mailbox, folder, UID
 Mail = tuple[str, str, Parsed]  # verdict key, mailbox, parsed: what the reader takes
@@ -60,6 +73,8 @@ Mail = tuple[str, str, Parsed]  # verdict key, mailbox, parsed: what the reader 
 class TriageResult:
     verdicts: list[Verdict]  # in the order of the items: reused, new and fallback verdicts
     left: list[str]  # keys of the mail not sorted in time, in the order of the items
+    # keys of the mail that got a fallback verdict in this call (not reused ones), in that order
+    fallbacks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -68,17 +83,32 @@ class _Done:
 
     verdicts: list[Verdict] = field(default_factory=list)
     left: list[str] = field(default_factory=list)
+    fallbacks: list[str] = field(default_factory=list)
     error: MailError | None = None
+
+    def fall_back(self, verdict: Verdict) -> None:
+        self.verdicts.append(verdict)
+        self.fallbacks.append(verdict.key)
+
+
+def _fallback_verdict(key: str, mailbox: str, sender: str, subject: str, when: str,
+                      reason: str) -> Verdict:
+    return Verdict(
+        key=key, mailbox=mailbox, sender=sender, subject=subject, date=when, summary="",
+        code=None, amount=None, deadline=None, tier="daily", category="other", reason=reason,
+        phishing=False)
 
 
 def fallback(key: str, mailbox: str, parsed: Parsed) -> Verdict:
     """The verdict of a mail the reader could not sort alone: for the daily report, with the
     sender, subject and date from its headers and nothing from the reader."""
-    sender, subject, when = from_headers(parsed)
-    return Verdict(
-        key=key, mailbox=mailbox, sender=sender, subject=subject, date=when, summary="",
-        code=None, amount=None, deadline=None, tier="daily", category="other",
-        reason=FALLBACK_REASON, phishing=False)
+    return _fallback_verdict(key, mailbox, *from_headers(parsed), FALLBACK_REASON)
+
+
+def unfetched(key: str, mailbox: str, when: str) -> Verdict:
+    """The verdict of a mail whose bytes could not be fetched: for the daily report, with no
+    sender or subject (they are in the bytes) and the time it arrived, or ""."""
+    return _fallback_verdict(key, mailbox, "", "", when, FETCH_FALLBACK_REASON)
 
 
 def _batches(items: list[Item]) -> list[list[Item]]:
@@ -112,16 +142,47 @@ class _Sorter:
         if self._over():
             done.left = [key for key, _, _, _ in batch]
             return done
-        mailbox, folder = batch[0][1], batch[0][2]
         try:
-            raws = self.hima.fetch_raw(mailbox, folder, [uid for _, _, _, uid in batch])
-            mails = [
-                (key, mailbox, mailtext.parse(raws[uid]))
-                for key, _, _, uid in batch if uid in raws]
-            self._sort(mails, done)
+            self._sort(self._fetch(batch, done), done)
         except MailError as err:
             done.error = err
         return done
+
+    def _fetch(self, batch: list[Item], done: _Done) -> list[Mail]:
+        """The mails of `batch`, parsed: one fetch for all, else one for each (R35). A mail that
+        cannot be fetched alone gets its fallback in `done`."""
+        mailbox, folder = batch[0][1], batch[0][2]
+        try:
+            raws = self.hima.fetch_raw(mailbox, folder, [uid for _, _, _, uid in batch])
+        except (AuthError, ConnectError):
+            raise  # about the mailbox, not about a mail
+        except HimalayaError:
+            raws, failed = {}, []
+            if len(batch) == 1:  # the fetch was the mail alone
+                failed = batch
+            else:
+                for item in batch:
+                    try:
+                        raws.update(self.hima.fetch_raw(mailbox, folder, [item[3]]))
+                    except (AuthError, ConnectError):
+                        raise
+                    except HimalayaError:
+                        failed.append(item)
+            self._unfetched(failed, done)
+        return [
+            (key, mailbox, mailtext.parse(raws[uid])) for key, _, _, uid in batch if uid in raws]
+
+    def _unfetched(self, failed: list[Item], done: _Done) -> None:
+        if not failed:
+            return
+        mailbox, folder = failed[0][1], failed[0][2]
+        try:
+            dates = self.hima.fetch_dates(mailbox, folder, uid_set(uid for *_, uid in failed))
+        except HimalayaError:
+            dates = {}  # the time is a help to the report, not a need
+        for key, _, _, uid in failed:
+            when = dates.get(uid)
+            done.fall_back(unfetched(key, mailbox, when.isoformat() if when else ""))
 
     def _sort(self, mails: list[Mail], done: _Done) -> None:
         if not mails:
@@ -134,7 +195,7 @@ class _Sorter:
         if len(mails) == 1:  # the call was the mail alone
             if isinstance(failed, ReaderDown):
                 raise failed
-            done.verdicts.append(fallback(*mails[0]))
+            done.fall_back(fallback(*mails[0]))
             return
         for at, mail in enumerate(mails):
             if self._over():
@@ -147,7 +208,7 @@ class _Sorter:
             except ReaderDown:
                 raise  # the reader's failure, not this mail's: it would fail for every mail
             except ReaderError:
-                done.verdicts.append(fallback(*mail))
+                done.fall_back(fallback(*mail))
 
 
 def triage(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], *, budget: float,
@@ -162,6 +223,7 @@ def triage(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], *, budge
     found = store.get_many(unique)
     todo = [item for key, item in unique.items() if key not in found]
     left: set[str] = set()
+    made: set[str] = set()  # the keys that got a fallback now
     if todo:
         sorter = _Sorter(
             hima, reader, rules.combined(ctx), ctx.settings.language,
@@ -175,6 +237,7 @@ def triage(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], *, budge
                     store.put_many(done.verdicts)
                     found.update((v.key, v) for v in done.verdicts)
                     left.update(done.left)
+                    made.update(done.fallbacks)
                     if done.error is not None and error is None:
                         error = done.error
                         sorter.stop.set()
@@ -183,4 +246,5 @@ def triage(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], *, budge
         if error is not None:
             raise error
     return TriageResult(
-        [found[key] for key in unique if key in found], [key for key in unique if key in left])
+        [found[key] for key in unique if key in found], [key for key in unique if key in left],
+        [key for key in unique if key in made])

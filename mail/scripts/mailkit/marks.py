@@ -68,15 +68,14 @@ def _mark_time(mark: Mark) -> datetime:
     return _aware(datetime.fromisoformat(mark.last_date))
 
 
-def _moved_on(mark: Mark, uidvalidity: str, top: int,
+def _moved_on(mark: Mark, uidvalidity: str, last_uid: int,
               found: dict[int, datetime | None]) -> tuple[list[int], Mark, int]:
     """The UIDs of `found` to hand on, oldest first, the new mark and how many were skipped.
 
-    Every UID up to `top` (UIDNEXT - 1 when the status was read) has been looked at: what is not
-    in `found` is gone or is older than the mark, and no new mail gets a UID that low. So the new
-    mark has the highest of `top` and the found UIDs, and the latest arrival of the mark and the
-    found mail (the time of the newest handled mail; a server's clock can be wrong, but the mark
-    never goes back)."""
+    The new mark has `last_uid`, the highest UID that the fetch or the search showed, never one
+    taken from UIDNEXT (R36): a fetch session that lags behind the status cannot make the mark
+    pass mail it did not see. Its time is the latest arrival of the mark and the found mail (the
+    newest handled mail; a server's clock can be wrong, but the mark never goes back)."""
     chosen = sorted(found)
     skipped = max(0, len(chosen) - MAX_CATCH_UP)
     chosen = chosen[skipped:]
@@ -84,7 +83,7 @@ def _moved_on(mark: Mark, uidvalidity: str, top: int,
     last_date = mark.last_date
     if times and max(times) > _mark_time(mark):
         last_date = max(times).isoformat()
-    return chosen, Mark(uidvalidity, max([top, *found]), last_date), skipped
+    return chosen, Mark(uidvalidity, last_uid, last_date), skipped
 
 
 def fresh(hima: Himalaya, mb: Mailbox, mark: Mark | None,
@@ -95,8 +94,12 @@ def fresh(hima: Himalaya, mb: Mailbox, mark: Mark | None,
     - No mark: nothing; the mark is UIDNEXT - 1 and `now`.
     - The same UIDVALIDITY and nothing above the mark: nothing, after the one status call.
     - The same UIDVALIDITY: the UIDs above the mark (`<last + 1>:*` always answers the highest
-      mail, even when nothing is newer, so only UIDs above the mark count).
-    - Another UIDVALIDITY: the mail that arrived after the mark's time.
+      mail, even when nothing is newer, so only UIDs above the mark count). When there are none
+      (the newest mail was moved out), the mark stays, and the next sweep fetches again.
+    - Another UIDVALIDITY: the mail that arrived after the mark's time. The new mark has the
+      highest UID the search showed (mail older than the mark was handled before the
+      renumbering); when it showed none, the old mark stays and the next sweep looks by date
+      again, since a mark of the new numbering without a UID seen would make every mail new.
     """
     folder = inbox_folder(mb)
     uidvalidity, uid_next = hima.status(mb.name, folder)
@@ -107,15 +110,19 @@ def fresh(hima: Himalaya, mb: Mailbox, mark: Mark | None,
         if top <= mark.last_uid:
             return [], mark, 0
         dates = hima.fetch_dates(mb.name, folder, f"{mark.last_uid + 1}:*")
-        return _moved_on(mark, uidvalidity, top, {
-            uid: when for uid, when in dates.items() if uid > mark.last_uid})
+        found = {uid: when for uid, when in dates.items() if uid > mark.last_uid}
+        if not found:
+            return [], mark, 0
+        return _moved_on(mark, uidvalidity, max(found), found)
     since = _mark_time(mark)
     uids = hima.uids_since(mb.name, folder, since.astimezone(LAST_ZONE).date())
     dates = hima.fetch_dates(mb.name, folder, uid_set(uids)) if uids else {}
     asked = set(uids)
-    return _moved_on(mark, uidvalidity, top, {
-        uid: when for uid, when in dates.items()
-        if uid in asked and when is not None and _aware(when) > since})
+    seen = {uid: when for uid, when in dates.items() if uid in asked}
+    if not seen:
+        return [], mark, 0
+    return _moved_on(mark, uidvalidity, max(seen), {
+        uid: when for uid, when in seen.items() if when is not None and _aware(when) > since})
 
 
 # --- the marks file ----------------------------------------------------------------------------

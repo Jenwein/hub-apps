@@ -18,7 +18,7 @@ from fakes import envelope
 from mailkit import clock
 from mailkit.cli import main
 from mailkit.context import load
-from mailkit.himalaya import AuthError, Himalaya
+from mailkit.himalaya import AuthError, ConnectError, Himalaya
 from mailkit.mailtext import parse
 from mailkit.marks import (
     MAX_CATCH_UP,
@@ -29,9 +29,10 @@ from mailkit.marks import (
     uid_set,
     verdict_key,
 )
+from mailkit.paths import locked
 from mailkit.reader import Reader, ReaderDown, ReaderError, Verdict
 from mailkit.rules import combined, default_rules, user_rules
-from mailkit.triage import BATCH, FALLBACK_REASON, WORKERS, triage
+from mailkit.triage import BATCH, FALLBACK_REASON, FETCH_FALLBACK_REASON, WORKERS, triage
 from mailkit.verdicts import KEEP, VerdictStore
 from mailtest import write_mailboxes
 
@@ -234,12 +235,13 @@ def test_nothing_newer_ignores_the_highest_uid_quirk(ctx, fake_himalaya):
     uids, mark, skipped = fresh(Himalaya(ctx), ctx.mailbox("qq"), old, T0)
 
     assert (uids, skipped) == ([], 0)
-    # No UID up to 6 is left to come, so the mark moves past the gap: the next quiet sweep is
-    # one call again.
-    assert mark == Mark("7", 6, old.last_date)
-    assert fresh(Himalaya(ctx), ctx.mailbox("qq"), mark, T0) == ([], mark, 0)
+    # Nothing was handled, so the mark stays (R36): a fetch session that lagged behind the status
+    # cannot make the mark pass mail it never saw. The cost is the fetch on every sweep while the
+    # newest UID is gone.
+    assert mark == old
+    assert fresh(Himalaya(ctx), ctx.mailbox("qq"), mark, T0) == ([], old, 0)
     assert [words(c)[:2] for c in fake.calls()] == [
-        ["imap", "status"], ["imap", "fetch"], ["imap", "status"]]
+        ["imap", "status"], ["imap", "fetch"], ["imap", "status"], ["imap", "fetch"]]
 
 
 def test_uidvalidity_change_falls_back_to_date(ctx, fake_himalaya):
@@ -269,14 +271,29 @@ def test_uidvalidity_change_falls_back_to_date(ctx, fake_himalaya):
         ["imap", "fetch", "-m", "INBOX", "41:44", "--internal-date"]]
 
 
-def test_uidvalidity_change_with_nothing_newer_takes_the_new_numbers(ctx, fake_himalaya):
-    fake_himalaya(server(inbox(numbered(range(1, 11)), uidvalidity="8")))
+def test_uidvalidity_change_with_only_older_mail_takes_the_new_numbers(ctx, fake_himalaya):
+    # Mail 9 and 10 arrived the day of the mark, before it: seen, and older than the mark.
+    fake_himalaya(server(inbox([
+        *numbered(range(1, 9), T0 - timedelta(days=5)),
+        message(9, T0 - timedelta(hours=2)), message(10, T0 - timedelta(hours=1))],
+        uidvalidity="8")))
     old = Mark("7", 900, T0.isoformat())
 
     uids, mark, skipped = fresh(Himalaya(ctx), ctx.mailbox("qq"), old, T0)
 
     assert (uids, skipped) == ([], 0)
-    assert mark == Mark("8", 10, T0.isoformat())
+    assert mark == Mark("8", 10, T0.isoformat())  # the highest UID the search showed
+
+
+def test_uidvalidity_change_with_nothing_seen_keeps_the_old_mark(ctx, fake_himalaya):
+    fake = fake_himalaya(server(inbox(
+        numbered(range(1, 11), T0 - timedelta(days=5)), uidvalidity="8")))
+    old = Mark("7", 900, T0.isoformat())
+
+    # No UID of the new numbering was seen: keep the old mark and look by date again next time,
+    # never a mark of 0 (which would make every mail of the inbox new).
+    assert fresh(Himalaya(ctx), ctx.mailbox("qq"), old, T0) == ([], old, 0)
+    assert [words(c)[:2] for c in fake.calls()] == [["imap", "status"], ["imap", "search"]]
 
 
 def test_catch_up_is_capped(ctx, fake_himalaya):
@@ -377,6 +394,31 @@ def test_old_verdicts_are_dropped(ctx, monkeypatch):
     assert set(data) == {"qq/7/9", "qq/7/10"}  # the alert, the undated and the future mail too
 
 
+def test_store_reads_wait_for_the_lock(ctx):
+    store = VerdictStore(ctx)
+    stored = verdict("qq/7/1")
+    store.put(stored)
+    store.mark_alerted(stored.key, T0)
+    reads = {
+        "get": lambda: store.get(stored.key),
+        "alerted": lambda: store.alerted(stored.key),
+        "between": lambda: store.between(T0, T0 + timedelta(hours=1))}
+    got: dict = {}
+    threads = [
+        threading.Thread(target=lambda n=name, f=read: got.update({n: f()}))
+        for name, read in reads.items()]
+
+    with locked(ctx.state):  # as a writer in another process would hold it (R37)
+        for thread in threads:
+            thread.start()
+        time.sleep(0.6)
+        assert got == {} and all(t.is_alive() for t in threads)
+    for thread in threads:
+        thread.join(10)
+
+    assert got == {"get": stored, "alerted": True, "between": [stored]}
+
+
 def test_the_store_takes_writes_from_many_threads(ctx):
     store = VerdictStore(ctx)
     many = [verdict(f"qq/7/{n}") for n in range(12)]
@@ -419,6 +461,7 @@ def test_triage_runs_batches_of_10(ctx, fake_himalaya, fake_claude):
         ["imap", "fetch", "-m", "INBOX", ",".join(str(u) for u in uids), "--body"]
         for uids in (range(1, 11), range(11, 21), range(21, 26)))
     assert [v.key for v in result.verdicts] == keys_of(rows) and result.left == []
+    assert result.fallbacks == []
     assert all(v.summary == "A mail." for v in result.verdicts)  # the fake reader's answer
     stored = VerdictStore(ctx).get_many(keys_of(rows))
     assert stored == {v.key: v for v in result.verdicts}
@@ -518,9 +561,15 @@ def test_one_bad_mail_gets_a_fallback_and_the_rest_real_verdicts(ctx, fake_himal
     assert FALLBACK_REASON == "could not be sorted"
     others = result.verdicts[:3] + result.verdicts[4:]
     assert all((v.tier, v.summary) == ("now", URGENT["summary"]) for v in others)
+    assert result.fallbacks == [rows[3][0]]
     # The batch, then each mail alone.
     assert [len(mails_in(c)) for c in fake_claude.calls()] == [10] + [1] * 10
     assert VerdictStore(ctx).get_many(keys_of(rows)) == {v.key: v for v in result.verdicts}
+
+    # The next run reuses all ten, the fallback too: no reader call, and no fallback made now.
+    again = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=600)
+    assert again.verdicts == result.verdicts and again.fallbacks == []
+    assert len(fake_claude.calls()) == 11
 
 
 def test_mails_that_all_get_unfitting_answers_all_get_fallbacks(ctx, fake_himalaya, fake_claude):
@@ -534,6 +583,7 @@ def test_mails_that_all_get_unfitting_answers_all_get_fallbacks(ctx, fake_himala
 
     assert [(v.key, v.reason) for v in result.verdicts] == [
         (key, FALLBACK_REASON) for key in keys_of(rows)]
+    assert result.fallbacks == keys_of(rows)  # the caller can tell the whole run fell back
     assert [len(mails_in(c)) for c in fake_claude.calls()] == [3, 1, 1, 1]
 
 
@@ -545,8 +595,79 @@ def test_a_bad_mail_alone_gets_its_fallback_from_one_call(ctx, fake_himalaya, fa
     result = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=60)
 
     assert [(v.tier, v.reason) for v in result.verdicts] == [("daily", FALLBACK_REASON)]
+    assert result.fallbacks == keys_of(rows)
     assert len(fake_claude.calls()) == 1
     assert VerdictStore(ctx).get(rows[0][0]) == result.verdicts[0]
+
+
+def test_a_refused_mail_gets_a_fallback_and_nothing_is_raised(ctx, fake_himalaya, fake_claude):
+    # The model's safeguards refuse the whole call when one mail sets them off (R34). The sender
+    # chooses what sets them off, so that is about the mail, not the reader.
+    poison = message(2, T0 - timedelta(minutes=30), "poison pill")
+    fake_himalaya(server(inbox([*numbered([1]), poison, *numbered([3, 4])])))
+    fake_claude.by_subject({"poison": {"refuse": True}, "": URGENT})
+    rows = items([1, 2, 3, 4])
+
+    result = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=600)
+
+    assert result.left == [] and result.fallbacks == [rows[1][0]]
+    assert [(v.key, v.tier, v.reason) for v in result.verdicts] == [
+        (rows[0][0], "now", URGENT["reason"]), (rows[1][0], "daily", FALLBACK_REASON),
+        (rows[2][0], "now", URGENT["reason"]), (rows[3][0], "now", URGENT["reason"])]
+    assert [len(mails_in(c)) for c in fake_claude.calls()] == [4, 1, 1, 1, 1]
+
+
+def test_a_mail_that_cannot_be_fetched_gets_a_fallback(ctx, fake_himalaya, fake_claude):
+    broken = {**message(4, T0 - timedelta(minutes=50), "broken"),
+              "fail_fetch": "imap: cannot parse the FETCH response"}
+    fake = fake_himalaya(server(inbox([*numbered([1, 2, 3]), broken, *numbered(range(5, 11))])))
+    rows = items(range(1, 11))
+
+    result = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=600)
+
+    assert result.left == [] and result.fallbacks == [rows[3][0]]
+    assert FETCH_FALLBACK_REASON == "could not be fetched"
+    assert result.verdicts[3] == Verdict(
+        key=rows[3][0], mailbox="qq", sender="", subject="",
+        date=(T0 - timedelta(minutes=50)).isoformat(), summary="", code=None, amount=None,
+        deadline=None, tier="daily", category="other", reason=FETCH_FALLBACK_REASON,
+        phishing=False)
+    others = result.verdicts[:3] + result.verdicts[4:]
+    assert [v.summary for v in others] == ["A mail."] * 9  # the fake reader's verdicts
+    # The batch's fetch, then each mail alone, then the date of the one that failed; the nine
+    # fetched go to the reader together.
+    assert [words(c)[4:] for c in fake.calls()] == [
+        [",".join(str(u) for u in range(1, 11)), "--body"],
+        *[[str(u), "--body"] for u in range(1, 11)],
+        ["4", "--internal-date"]]
+    assert [len(mails_in(c)) for c in fake_claude.calls()] == [9]
+    assert VerdictStore(ctx).get_many(keys_of(rows)) == {v.key: v for v in result.verdicts}
+
+
+def test_a_lone_mail_that_cannot_be_fetched_gets_its_fallback_from_one_fetch(
+        ctx, fake_himalaya, fake_claude):
+    fake = fake_himalaya(server(inbox([
+        {**message(1, T0, "broken"), "fail_fetch": "imap: cannot parse the FETCH response"}])))
+    rows = items([1])
+
+    result = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=60)
+
+    assert [(v.reason, v.date) for v in result.verdicts] == [
+        (FETCH_FALLBACK_REASON, T0.isoformat())]
+    assert result.fallbacks == keys_of(rows)
+    assert [words(c)[4:] for c in fake.calls()] == [["1", "--body"], ["1", "--internal-date"]]
+    assert fake_claude.calls() == []
+
+
+def test_a_fetch_that_cannot_connect_is_no_fallback(ctx, fake_himalaya, fake_claude):
+    fake_himalaya(server(inbox([
+        *numbered([1]), {**message(2, T0, "broken"), "fail_fetch": "connection refused"}])))
+    rows = items([1, 2])
+
+    with pytest.raises(ConnectError):
+        triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=60)
+
+    assert VerdictStore(ctx).get_many(keys_of(rows)) == {}
 
 
 @pytest.mark.parametrize("mode, exe", [("error", None), ("garbage", None), ("", "no-claude-6f0e")])
@@ -586,6 +707,15 @@ def test_reader_down_is_a_reader_that_did_not_answer(fake_claude):
     assert not isinstance(failure(), ReaderDown)
     fake_claude.reply_raw({
         "type": "result", "subtype": "error_max_structured_output_retries", "is_error": True})
+    assert not isinstance(failure(), ReaderDown)
+    # A refusal of the model's safeguards (R34): what the sender wrote set it off.
+    fake_claude.reply_raw({
+        "type": "result", "subtype": "success", "is_error": True, "stop_reason": "refusal",
+        "result": "API Error: Claude's safeguards flagged this message."})
+    assert not isinstance(failure(), ReaderDown)
+    fake_claude.reply_raw({
+        "type": "result", "subtype": "success", "is_error": True, "stop_reason": None,
+        "result": "API Error: can't help with this", "message": {"stop_reason": "refusal"}})
     assert not isinstance(failure(), ReaderDown)
 
 

@@ -85,13 +85,16 @@ class ReaderError(MailError):
 class ReaderDown(ReaderError):
     """The reader did not answer: claude is missing or refused, could not start, did not finish
     in time, printed something that is not its result, or said that it failed (not logged in, a
-    usage limit, an API error). Unlike an answer that does not fit the mails, this says nothing
-    about the mails it was given: it fails for any mail."""
+    usage limit, an API error other than a refusal: see REFUSED). Unlike an answer that does not
+    fit the mails, this says nothing about the mails it was given: it fails for any mail."""
 
 
 # The result of claude that is an error about the answer, not about claude: the model gave no
 # output that fits the schema, which a mail can bring about.
 ANSWER_ERRORS = frozenset({"error_max_structured_output_retries"})
+# A refusal of the model's safeguards (`stop_reason` "refusal"): claude reports it as an API error,
+# but what set it off is what the mails say, which their senders chose (ruling R34).
+REFUSED = "the reader refused to read the mail: the model's safeguards flagged it"
 
 
 # --- the prompts -------------------------------------------------------------------------------
@@ -350,10 +353,20 @@ def _verdict(item: dict, key: str, mailbox: str, parsed: Parsed, evidence: str) 
     )
 
 
+def _refused(data: dict) -> bool:
+    """Did the model's safeguards refuse? The result's own `stop_reason`, or that of a message in
+    it, is "refusal"."""
+    found = [data.get("stop_reason")]
+    message = data.get("message")
+    if isinstance(message, dict):
+        found.append(message.get("stop_reason"))
+    return "refusal" in found
+
+
 def _result(out: bytes, err: bytes, status: int) -> dict:
     """The answer in what claude printed (`--output-format json`). Output that is not claude's
-    result, or a result that says claude failed, is ReaderDown; a result without a usable answer
-    is a plain ReaderError (see ReaderDown)."""
+    result, or a result that says claude failed, is ReaderDown; a refusal, or a result without a
+    usable answer, is a plain ReaderError (see ReaderDown)."""
     try:
         data = json.loads(out)
     except ValueError:  # not JSON, or not UTF-8
@@ -365,6 +378,8 @@ def _result(out: bytes, err: bytes, status: int) -> dict:
             raise ReaderDown(
                 f"{UNREADABLE} (claude exited with status {status}: {clean(first, 200)})")
         raise ReaderDown(UNREADABLE)
+    if _refused(data):
+        raise ReaderError(REFUSED)
     if data.get("is_error"):
         detail = data.get("result") or data.get("subtype") or "the reader failed"
         error = ReaderError if data.get("subtype") in ANSWER_ERRORS else ReaderDown

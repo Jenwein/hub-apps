@@ -51,6 +51,8 @@ def append_log(path, text):
 # - `raw` is the mail as UTF-8 text; for bytes that are not UTF-8 use `raw_b64` (base64 of the
 #   exact bytes) or a `raw` with lone surrogates `\udcXX` (surrogateescape), which round-trip.
 # - `flags` (optional, a list such as ["answered"]) holds the flags other than seen.
+# - `fail_fetch` (optional) is a <failure> (see `fail` below) of every `imap fetch --body` that
+#   names the message: a mail whose bytes cannot be fetched.
 # - `fail`: a <failure> is an error text, or [error, source, ...] for an error with causes. It
 #   makes every command of that account exit 1 with it on stdout: the F-CLI JSON with `--json`,
 #   else the layout of the real binary (`Error: ...`, `Caused by:` with ` - ...` items,
@@ -542,6 +544,8 @@ def imap_fetch(opts, positional):
         number = position if by_seq else m["uid"]
         if not any(low <= number <= high for low, high in ranges):
             continue
+        if "body" in chosen and m.get("fail_fetch"):
+            refuse(m["fail_fetch"])
         item = {"seq": position, "uid": m["uid"]}
         if "internal_date" in chosen:
             item["internal_date"] = iso(received(m))
@@ -802,7 +806,9 @@ class FakeHimalaya:
 # - {"by_subject": {"<keyword>": {<item fields>}, ...}}: for every wrapped mail on stdin, the fields
 #   of the first keyword found in its `Subject:` line (case-insensitive; "" matches every mail)
 #   over DEFAULT_ITEM, with `index` the mail's number unless the fields set one. A mail that no
-#   keyword matches gets DEFAULT_ITEM.
+#   keyword matches gets DEFAULT_ITEM. Fields with `"refuse": true` make the model's safeguards
+#   refuse the whole call, as claude prints it: REFUSAL (`is_error`, `stop_reason` "refusal"),
+#   exit 1.
 # - anything else: a fixed result object, printed as it is: the whole JSON that claude prints
 #   (`envelope` below builds one).
 # What it prints otherwise is claude's result object with `structured_output` and, in `result`,
@@ -827,6 +833,10 @@ DEFAULT_ITEM = {
 TEXTS = {"answer": "The fake answer.", "body": "The fake reply."}
 MAIL = re.compile(r"<<<MAIL-([0-9a-f]{16}) (\d+)>>>\n(.*?)\n<<<END MAIL-\1 \2>>>", re.S)
 NOT_LOGGED_IN = "Not logged in · Please run /login"
+REFUSAL = {
+    "type": "result", "subtype": "success", "is_error": True, "stop_reason": "refusal",
+    "result": "API Error: Claude Sonnet's safeguards flagged this message "
+              "(https://www.anthropic.com/legal/aup)."}
 
 
 def log(entry):
@@ -886,7 +896,12 @@ def main():
     by_subject = (reply or {}).get("by_subject") or {}
     properties = json.loads(option("--json-schema") or "{}").get("properties") or {}
     if "mails" in properties:
-        structured = {"mails": items(stdin, by_subject)}
+        found = items(stdin, by_subject)
+        refused = [item.pop("refuse", False) for item in found]
+        if any(refused):
+            emit(REFUSAL)
+            sys.exit(1)
+        structured = {"mails": found}
     else:
         structured = {key: text for key, text in TEXTS.items() if key in properties}
     emit({

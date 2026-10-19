@@ -24,6 +24,8 @@ POSIX = os.name == "posix"  # permission bits mean something only here
 
 LOCK_POLL_SECONDS = 0.2
 LOCK_STALE_SECONDS = 120.0
+REPLACE_RETRY_SECONDS = 2.0  # how long a replace that Windows denies is tried again
+REPLACE_POLL_SECONDS = 0.05
 
 
 def _state_base() -> Path:
@@ -59,6 +61,21 @@ def state_dir(hub: Path) -> Path:
     return path
 
 
+def _replace(temp: str, path: Path) -> None:
+    """os.replace, tried again for up to REPLACE_RETRY_SECONDS while it is denied: on Windows a
+    file that another process has open cannot be replaced (the watcher and the report run apart,
+    and a virus scanner may look at a new file)."""
+    deadline = time.monotonic() + REPLACE_RETRY_SECONDS
+    while True:
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(REPLACE_POLL_SECONDS)
+
+
 def write_private(path: Path, data: bytes) -> None:
     """Write `data` to `path` so that readers see the old file or the whole new one.
 
@@ -72,7 +89,7 @@ def write_private(path: Path, data: bytes) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        _replace(temp, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(temp)

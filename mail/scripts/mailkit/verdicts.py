@@ -2,9 +2,10 @@
 
 `state/verdicts.json` maps a verdict key (`marks.verdict_key`) to the verdict, the time it was
 stored and the time its alert went out. The watcher and the daily report share it: what one sorted,
-the other reuses. Every write takes the state lock (`paths.locked`) and replaces the file whole, so
-a reader sees the old file or the new one and two writers, in threads or processes, never lose
-each other's entries. The lock is not reentrant: do not call a writing method while holding it.
+the other reuses. Every read and every write takes the state lock (`paths.locked`), and a write
+replaces the file whole: two writers, in threads or processes, never lose each other's entries,
+and on Windows no reader holds the file open while a writer replaces it (R37). The lock is not
+reentrant: do not call any method of the store while holding it.
 
 An entry is dropped on a write once its mail is older than KEEP: by the mail's date, which counts
 as no later than the time it was stored (a Date header far ahead cannot keep an entry for ever),
@@ -69,8 +70,14 @@ class VerdictStore:
         self.path = ctx.state / VERDICTS
 
     def _entries(self) -> dict:
+        """The entries as the file has them. Only under the lock."""
         data = read_json(self.path, {})
         return data if isinstance(data, dict) else {}
+
+    def _read(self) -> dict:
+        """The entries, read under the lock."""
+        with locked(self.ctx.state):
+            return self._entries()
 
     def _write(self, entries: dict) -> None:
         """Write the entries that are kept (see the module's docstring). Under the lock."""
@@ -82,7 +89,7 @@ class VerdictStore:
 
     def get_many(self, keys: Iterable[str]) -> dict[str, Verdict]:
         """The stored verdicts of these keys, read at once."""
-        entries = self._entries()
+        entries = self._read()
         found = {}
         for key in keys:
             verdict = _verdict(entries.get(key))
@@ -122,7 +129,7 @@ class VerdictStore:
             self._write(entries)
 
     def alerted(self, key: str) -> bool:
-        entry = self._entries().get(key)
+        entry = self._read().get(key)
         return isinstance(entry, dict) and _time(entry.get("alerted")) is not None
 
     def between(self, since: datetime, until: datetime) -> list[Verdict]:
@@ -130,7 +137,7 @@ class VerdictStore:
         is in no window."""
         start, end = (t if t.tzinfo else t.replace(tzinfo=UTC) for t in (since, until))
         found = []
-        for entry in self._entries().values():
+        for entry in self._read().values():
             verdict = _verdict(entry)
             dated = _time(verdict.date) if verdict else None
             if dated is not None and start <= dated < end:
