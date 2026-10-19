@@ -35,8 +35,9 @@ PLATFORMS = {
     "windows-x86_64": "x86_64-windows",
 }
 
-# A hidden console for the child on Windows (see the plan's global constraints); 0 elsewhere.
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Every mailkit module that spawns a subprocess whose output it captures passes
+# `creationflags=NO_WINDOW`: a hidden console on Windows, 0 elsewhere.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass(frozen=True)
@@ -205,7 +206,7 @@ def installed_version(name: str) -> str | None:
     try:
         done = subprocess.run(
             [exe, "--version"], check=False, stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=30, creationflags=_NO_WINDOW)
+            text=True, encoding="utf-8", errors="replace", timeout=30, creationflags=NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired):
         return None
     found = _VERSION_RE.search(f"{done.stdout}\n{done.stderr}")

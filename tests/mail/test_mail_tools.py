@@ -279,6 +279,20 @@ def test_not_installed_or_no_version(make_exe, tmp_path, monkeypatch):
     assert tools.installed_version("ortie") is None
 
 
+def test_installed_version_runs_without_a_console_window(make_exe, monkeypatch):
+    make_exe("himalaya", "print('himalaya 2.2.1')")
+    seen = {}
+    real_run = tools.subprocess.run
+
+    def run(*args, **kwargs):
+        seen.update(kwargs)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(tools.subprocess, "run", run)
+    assert tools.installed_version("himalaya") == "2.2.1"
+    assert seen["creationflags"] == tools.NO_WINDOW
+
+
 def test_installed_version_of_an_unknown_tool():
     with pytest.raises(MailError, match="unknown tool"):
         tools.installed_version("curl")
@@ -342,6 +356,8 @@ def test_app_toml_installs_through_mx():
 def test_app_toml_requires_match_the_hub_rules():
     data = tomllib.loads(APP_TOML.read_text("utf-8"))
     reqs = {r["bin"]: r for r in data["requires"]}
+    # himalaya's install line is `uv run ...`, so uv comes first
+    assert list(reqs) == ["uv", "himalaya", "claude"]
     assert reqs["himalaya"]["name"] == "himalaya v2.2.1"
     assert set(reqs["claude"]["install"]) == {"linux", "macos", "windows"}
     assert "claude.ai/install" in reqs["claude"]["install"]["linux"]
