@@ -319,3 +319,44 @@ def test_a_long_list_is_cut_between_addresses():
     found = parse(bulk_mail(names))
     assert 100 < len(found.to) < 200
     assert found.to == [f"user{n:06d}@example.org" for n in range(len(found.to))]
+
+
+@pytest.mark.parametrize("length", [100, 113, 121, 127, 131, 140])
+def test_quoted_names_with_commas_never_leave_a_piece_of_a_name(length):
+    # Exchange writes "Last, First" names: the commas inside the quotes are no list separators,
+    # wherever the cut falls.
+    names = [
+        f'"Doe{n:03d}, John {"x" * length}" <user{n:06d}@example.org>' for n in range(300)]
+    found = parse(bulk_mail(names))
+    assert 0 < len(found.to) < 200
+    assert found.to == [f"user{n:06d}@example.org" for n in range(len(found.to))]
+    assert found.cc == found.to
+
+
+def repeated_header(value: str, times: int = 20) -> bytes:
+    return (
+        "From: Mallory <mallory@example.org>\n" + f"To: {value}\n" * times
+        + "Subject: many headers\n\nthe body\n").encode()
+
+
+@pytest.mark.parametrize("value", [
+    chr(92) * 19_000, "," * 19_000, '"' + "a, " * 6_300, "(" * 19_000, "<" * 19_000,
+    ('"' + chr(92) * 10) * 1_700, "x@example.org, " * 1_260],
+    ids=["backslashes", "commas", "open-quote", "parens", "angles", "quoted-backslashes",
+         "addresses"])
+def test_repeated_address_headers_share_one_budget(value):
+    start = time.monotonic()
+    found = parse(repeated_header(value))
+    assert time.monotonic() - start < 3
+    assert (found.sender_name, found.subject, found.body) == ("Mallory", "many headers", "the body\n")
+    assert len(found.to) <= 200
+    assert all("@" in address for address in found.to)
+
+
+def test_two_short_to_headers_are_both_read():
+    raw = (
+        b"From: a@example.org\nTo: b@example.org, C <c@example.org>\nTo: d@example.org\n"
+        b"Cc: undisclosed-recipients:;\nSubject: x\n\nbody\n")
+    found = parse(raw)
+    assert found.to == ["b@example.org", "c@example.org", "d@example.org"]
+    assert found.cc == []

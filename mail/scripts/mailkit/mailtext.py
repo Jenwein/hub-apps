@@ -34,7 +34,9 @@ from .settings import MailError
 FILENAME_LIMIT = 100
 HEADER_LIMIT = 998  # a header value, as one line (the line length of RFC 5322)
 ADDRESS_LIMIT = 200  # addresses read per header name (To, Cc, ...): a mail may list thousands
-ADDRESS_CHARS = 20_000  # of each raw address header, before the stdlib parser sees it
+ADDRESS_CHARS = 20_000  # read of all the headers of one name together (To: one budget for all)
+ENTRY_CHARS = 1_000  # a longer entry of an address list is no address anyone writes
+CHUNK_CHARS = 2_000  # what the stdlib address parser gets at once
 PDF_PAGES = 10  # the pages of a PDF that are read
 PDF_MAX_BYTES = 5 * 1024 * 1024  # a bigger PDF is not read at all: slow, and a likely trap
 
@@ -143,32 +145,93 @@ def _header(msg: Message, name: str) -> str:
         return _line(raw[0])
 
 
-def _cut_list(value: str) -> str:
-    """A raw address list cut to ADDRESS_CHARS characters, at the last comma before the cut so no
-    address is split. The stdlib address parser gets slower than linear with the length."""
-    if len(value) <= ADDRESS_CHARS:
-        return value
-    head = value[:ADDRESS_CHARS]
-    comma = head.rfind(",")
-    return head[:comma] if comma > 0 else head
+def _entries(value: str, budget: int) -> tuple[list[str], int]:
+    """The entries of a raw address list that end within its first `budget` characters, and how
+    many characters were read. Entries are split at the commas outside quotes (with backslash
+    escapes), angle brackets and comments: `"Doe, Jo" <jo@x>` is one entry. An entry the budget
+    cuts off is left out whole, so no piece of a name or an address is ever parsed."""
+    end = min(len(value), budget)
+    entries: list[str] = []
+    start, quoted, escaped, angles, comments = 0, False, False, 0, 0
+    for at in range(end):
+        char = value[at]
+        if escaped:
+            escaped = False
+        elif quoted or comments:
+            if char == "\\":
+                escaped = True
+            elif quoted and char == '"':
+                quoted = False
+            elif comments and char == "(":
+                comments += 1
+            elif comments and char == ")":
+                comments -= 1
+        elif char == '"':
+            quoted = True
+        elif char == "(":
+            comments = 1
+        elif char == "<":
+            angles += 1
+        elif char == ">":
+            angles = max(0, angles - 1)
+        elif char == "," and not angles:
+            entries.append(value[start:at])
+            start = at + 1
+    if end == len(value):
+        entries.append(value[start:])
+    return entries, end
+
+
+def _chunks(entries: list[str]) -> Iterator[str]:
+    """The entries joined again in pieces of at most CHUNK_CHARS characters. The stdlib address
+    parser is slower than linear with the length of what it gets (19,000 backslashes take over a
+    second), so it only ever gets short pieces; an entry longer than ENTRY_CHARS is no address
+    anyone writes and is left out."""
+    chunk: list[str] = []
+    size = 0
+    for entry in entries:
+        if len(entry) > ENTRY_CHARS or not entry.strip():
+            continue
+        if chunk and size + len(entry) > CHUNK_CHARS:
+            yield ",".join(chunk)
+            chunk, size = [], 0
+        chunk.append(entry)
+        size += len(entry) + 1
+    if chunk:
+        yield ",".join(chunk)
+
+
+def _is_address(text: str) -> bool:
+    local, at, domain = text.rpartition("@")
+    return bool(at and local and domain)
 
 
 def _addresses(msg: Message, name: str) -> list[tuple[str, str]]:
     """(display name, address) of the first ADDRESS_LIMIT addresses in the `name` headers. A mail
-    can list hundreds of thousands: each header is cut (`_cut_list`) before it is parsed, and no
-    further header is parsed once the limit is reached."""
+    can list hundreds of thousands, or repeat the header: all the `name` headers together are
+    read for ADDRESS_CHARS characters at most (`_entries`), in short pieces (`_chunks`), and
+    nothing more is parsed once ADDRESS_LIMIT addresses are found."""
     found: list[tuple[str, str]] = []
+    budget = ADDRESS_CHARS
     for value in _raw_values(msg, name):
-        if len(found) >= ADDRESS_LIMIT:
+        if len(found) >= ADDRESS_LIMIT or budget <= 0:
             break
-        value = _cut_list(value)
-        try:
-            header = msg.policy.header_fetch_parse(name, value)
-            pairs = [(a.display_name, a.addr_spec) for a in header.addresses]
-        except PARSE_ERRORS:  # a header the parser cannot make sense of
-            pairs = getaddresses([_unescape(value)])
-        # A name the parser left encoded (it gives up on a word that holds a line break).
-        found += [(_line(_words(n)), _line(a)) for n, a in pairs if _line(a)]
+        entries, read = _entries(value, budget)
+        budget -= read
+        pairs: list[tuple[str, str]] = []
+        for chunk in _chunks(entries):
+            if len(found) + len(pairs) >= ADDRESS_LIMIT:
+                break
+            try:
+                header = msg.policy.header_fetch_parse(name, chunk)
+                parsed = [(a.display_name, a.addr_spec) for a in header.addresses]
+            except PARSE_ERRORS:  # a piece the parser cannot make sense of
+                parsed = getaddresses([_unescape(chunk)])
+            # A name the parser left encoded (it gives up on a word that holds a line break).
+            pairs += [(_line(_words(n)), _line(a)) for n, a in parsed if _line(a)]
+        if read < len(value) and pairs and not _is_address(pairs[-1][1]):
+            pairs.pop()  # the header was cut: never keep what may be a piece of an entry
+        found += pairs
     return found[:ADDRESS_LIMIT]
 
 
