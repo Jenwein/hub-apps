@@ -10,7 +10,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import ROOT, SEED, write_mailboxes
 from mailkit import cli, context, paths
 from mailkit.cli import main
 from mailkit.settings import (
@@ -24,6 +23,7 @@ from mailkit.settings import (
     load_mailboxes,
     load_settings,
 )
+from mailtest import ROOT, SEED, write_mailboxes
 
 POSIX = os.name == "posix"
 
@@ -337,6 +337,91 @@ def test_lock_is_released_when_the_body_fails(tmp_path):
     with pytest.raises(RuntimeError), paths.locked(tmp_path):
         raise RuntimeError("boom")
     assert not (tmp_path / "lock").exists()
+
+
+def watch_open(patched, error=None, limit=100):
+    """Patch os.open to count its calls, and to raise `error("refused")` if one is given.
+
+    More than `limit` calls fail the test: a lock that spins is a failure, not a hang.
+    """
+    calls = []
+    real = os.open
+
+    def counted(*args, **kwargs):
+        calls.append(args)
+        if len(calls) > limit:
+            raise AssertionError("locked() retries without waiting")
+        if error is not None:
+            raise error("refused")
+        return real(*args, **kwargs)
+
+    patched.setattr(os, "open", counted)
+    return calls
+
+
+@pytest.mark.parametrize("error, busy", [
+    (FileExistsError, True),
+    # POSIX: EACCES is a refusal, not a held lock. Windows reports a lock that is being
+    # deleted as a PermissionError, so there it is retried.
+    (PermissionError, sys.platform == "win32"),
+])
+def test_lock_that_keeps_failing_to_open_ends_at_the_timeout(tmp_path, monkeypatch, error, busy):
+    started = time.monotonic()
+    with monkeypatch.context() as patched:
+        calls = watch_open(patched, error)
+        with pytest.raises(MailError) as caught, paths.locked(tmp_path, timeout=0.5):
+            pytest.fail("the lock was taken")
+    assert time.monotonic() - started < 3 and len(calls) <= 6
+    if busy:
+        assert str(caught.value) == "the mail state is busy"
+    else:
+        assert str(caught.value) == "cannot lock the mail state: refused"
+
+
+def test_stale_lock_that_cannot_be_removed_ends_at_the_timeout(tmp_path):
+    lock = tmp_path / "lock"
+    lock.mkdir()  # taken, and no unlink removes a directory
+    old = time.time() - 200
+    os.utime(lock, (old, old))
+    started = time.monotonic()
+    with (
+        pytest.MonkeyPatch.context() as patched,
+        pytest.raises(MailError, match="the mail state is busy"),
+    ):
+        calls = watch_open(patched)
+        with paths.locked(tmp_path, timeout=0.5):
+            pytest.fail("the lock was taken")
+    assert time.monotonic() - started < 3 and len(calls) <= 6
+    assert lock.is_dir()
+
+
+def test_stale_lock_whose_unlink_fails_ends_at_the_timeout(tmp_path, monkeypatch):
+    lock = tmp_path / "lock"
+    lock.write_text("someone", "utf-8")
+    old = time.time() - 200
+    os.utime(lock, (old, old))
+
+    def refuse(self, *args, **kwargs):
+        raise PermissionError("a scanner holds the file")
+
+    started = time.monotonic()
+    with monkeypatch.context() as patched:
+        calls = watch_open(patched)
+        patched.setattr(Path, "unlink", refuse)
+        with pytest.raises(MailError, match="the mail state is busy"),                 paths.locked(tmp_path, timeout=0.5):
+            pytest.fail("the lock was taken")
+    assert time.monotonic() - started < 3 and len(calls) <= 6
+    assert lock.read_text("utf-8") == "someone"
+
+
+def test_unexpected_oserror_from_open_is_a_mail_error(tmp_path, monkeypatch):
+    with monkeypatch.context() as patched:
+        watch_open(patched, OSError)
+        with pytest.raises(MailError, match="^cannot lock the mail state: refused$"),                 paths.locked(tmp_path):
+            pytest.fail("the lock was taken")
+    # the state directory is gone
+    with pytest.raises(MailError, match="^cannot lock the mail state: "),             paths.locked(tmp_path / "gone"):
+        pytest.fail("the lock was taken")
 
 
 # --- context ---

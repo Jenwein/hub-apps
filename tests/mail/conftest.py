@@ -1,23 +1,21 @@
-"""Fixtures of the mail tests: a hub with the seed mail directory, and fake executables."""
+"""Fixtures of the mail tests: a hub with the seed mail directory, and fake executables.
+
+Helpers that tests import by name are in mailtest.py: nothing imports from conftest.
+"""
 
 import os
 import shutil
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).parents[2]
-SEED = ROOT / "mail" / "seed" / "mail"
+# Not left to pytest's import mode: mailtest, and later fakes, must import in any of them.
+sys.path.insert(0, str(Path(__file__).parent))
+
+from mailtest import ROOT, SEED, Hub
+
 sys.path.insert(0, str(ROOT / "mail" / "scripts"))
-
-
-@dataclass(frozen=True)
-class Hub:
-    root: Path  # the hub; the working directory of the test
-    data: Path  # root/mail, a copy of the seed mail directory
-    state: Path  # the per-machine state directory (created by the first use)
 
 
 @pytest.fixture
@@ -30,10 +28,6 @@ def hub(tmp_path, monkeypatch) -> Hub:
     monkeypatch.setenv("CC_HUB_MAIL_STATE", str(state))
     monkeypatch.chdir(root)
     return Hub(root, data, state)
-
-
-def write_mailboxes(hub: Hub, text: str) -> None:
-    (hub.data / "mailboxes.toml").write_text(text, "utf-8", newline="\n")
 
 
 @pytest.fixture

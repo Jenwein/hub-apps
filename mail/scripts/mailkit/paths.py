@@ -99,11 +99,15 @@ def write_json(path: Path, data) -> None:
 _HELD = (FileExistsError, PermissionError) if sys.platform == "win32" else (FileExistsError,)
 
 
-def _stale(lock: Path) -> bool:
+def _take_over(lock: Path) -> bool:
+    """Remove the lock of a process that died. True only if a lock was there and is now gone."""
     try:
-        return time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS
-    except FileNotFoundError:
-        return True  # released meanwhile: try again at once
+        if time.time() - lock.stat().st_mtime <= LOCK_STALE_SECONDS:
+            return False
+        lock.unlink()
+    except OSError:  # gone already, or it cannot be removed (a directory, a scanner's handle)
+        return False
+    return True
 
 
 @contextlib.contextmanager
@@ -112,7 +116,7 @@ def locked(state: Path, timeout: float = 30.0) -> Iterator[None]:
 
     The lock is the file `state/lock`, made with O_EXCL. A caller that finds it taken tries again
     every 0.2 s for `timeout` seconds, then fails with a MailError. A lock older than 120 s
-    belongs to a process that died, and is taken over.
+    belongs to a process that died, and is taken over; one that cannot be removed counts as held.
     """
     lock = Path(state) / "lock"
     token = f"{os.getpid()}-{uuid.uuid4().hex}"  # tells our lock from the one that replaced it
@@ -121,13 +125,13 @@ def locked(state: Path, timeout: float = 30.0) -> Iterator[None]:
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except _HELD:
-            if _stale(lock):
-                with contextlib.suppress(OSError):
-                    lock.unlink()
-                continue
+            if _take_over(lock):
+                continue  # only after a lock was really removed: otherwise wait, then give up
             if time.monotonic() >= deadline:
                 raise MailError("the mail state is busy") from None
             time.sleep(LOCK_POLL_SECONDS)
+        except OSError as err:  # the state directory is gone or not writable
+            raise MailError(f"cannot lock the mail state: {err}") from err
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(token)
