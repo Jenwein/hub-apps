@@ -13,6 +13,7 @@ import pytest
 # Not left to pytest's import mode: mailtest, and later fakes, must import in any of them.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from fakes import FakeHimalaya, himalaya_body
 from mailtest import ROOT, SEED, Hub
 
 sys.path.insert(0, str(ROOT / "mail" / "scripts"))
@@ -54,3 +55,30 @@ def make_exe(tmp_path, monkeypatch):
         return exe
 
     return make
+
+
+@pytest.fixture
+def fake_himalaya(tmp_path, make_exe):
+    """Return make(server) -> FakeHimalaya: a fake `himalaya` first on PATH that answers from the
+    `server` dict (the format is described at FAKE_HIMALAYA in fakes.py) and logs its calls.
+
+    One fake per test. The test fails at teardown if a call exited 99: the wrapper asked for
+    something F-NODEL forbids.
+    """
+    made: list[FakeHimalaya] = []
+
+    def make(server: dict) -> FakeHimalaya:
+        if made:
+            raise RuntimeError("one fake himalaya per test")
+        folder = tmp_path / "fake-himalaya"
+        folder.mkdir()
+        path, log = folder / "server.json", folder / "calls.jsonl"
+        fake = FakeHimalaya(make_exe("himalaya", himalaya_body(path, log)), path, log)
+        fake.write(server)
+        made.append(fake)
+        return fake
+
+    yield make
+    forbidden = [call["argv"][1:] for fake in made for call in fake.calls() if call["exit"] == 99]
+    if forbidden:
+        pytest.fail(f"the fake himalaya was asked for what F-NODEL forbids: {forbidden}")

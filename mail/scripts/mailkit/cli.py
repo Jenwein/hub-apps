@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from . import configs, context, signin, tools, vault
+from . import configs, context, himalaya, signin, tools, vault
 from .paths import locked
 from .settings import Mailbox, MailError
 
@@ -173,6 +173,41 @@ def run_forget(args: argparse.Namespace) -> None:
     print_json({"removed": removed, "secrets_kept": (ctx.state / "secrets").exists()})
 
 
+def run_folders(args: argparse.Namespace) -> None:
+    """The folders of a mailbox as the server names them, and the ones that look like its sent,
+    trash and archive folders (what to put under `[mailbox.folders]`)."""
+    ctx = load_ctx(args)
+    box = ctx.mailbox(args.mailbox)
+    found = himalaya.Himalaya(ctx).folders(box.name)
+    print_json({
+        "folders": [{"name": f.name, "shown": f.shown} for f in found],
+        "guess": himalaya.guess_folders(found)})
+
+
+def check_mailbox(hima: himalaya.Himalaya, box: Mailbox) -> dict:
+    """Does the mailbox sign in and answer? Both backends open, then one mail of the inbox is
+    listed. A failure is the answer, with its kind (auth, connect or other)."""
+    try:
+        for backend, ok, error in hima.check(box.name):
+            if not ok:
+                text = f"{backend}: {error or 'failed'}"
+                return {
+                    "ok": False, "kind": himalaya.kind(himalaya.classify(error or "")),
+                    "error": text[:300]}
+        hima.search(box.name, box.folders.get("inbox") or "INBOX", [], 1)
+    except himalaya.HimalayaError as err:
+        return {"ok": False, "kind": himalaya.kind(type(err)), "error": str(err)}
+    return {"ok": True}
+
+
+def run_check(args: argparse.Namespace) -> None:
+    """Test the mailboxes (the named one, else all). Exit 0 whatever the answers are."""
+    ctx = load_ctx(args)
+    boxes = [ctx.mailbox(args.mailbox)] if args.mailbox else list(ctx.mailboxes.values())
+    hima = himalaya.Himalaya(ctx)
+    print_json({box.name: check_mailbox(hima, box) for box in boxes})
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -228,6 +263,16 @@ def build_parser() -> Parser:
     p.add_argument("action", choices=["read", "write"])
     p.add_argument("mailbox")
     p.set_defaults(func=run_token_store)
+
+    p = sub.add_parser(
+        "folders", help="list the folders of a mailbox and guess its sent, trash and archive")
+    p.add_argument("mailbox")
+    p.set_defaults(func=run_folders)
+
+    p = sub.add_parser(
+        "check", help="test that each mailbox signs in and answers (one mailbox, or all)")
+    p.add_argument("mailbox", nargs="?")
+    p.set_defaults(func=run_check)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")

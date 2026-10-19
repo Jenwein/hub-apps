@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "Mailbox": {
+      "description": "A mailbox, also known as a folder.\n\nStrictly least-common-denominator: what is not first-class in every\nprotocol, an IMAP delimiter, a Maildir path, is reached through the\nprotocol-specific subcommands instead. The role is optional, so a\nbackend without one still fits.",
+      "properties": {
+        "id": {
+          "description": "The identifier a follow-up command names the mailbox by.\n\nJMAP exposes an opaque id of its own, where IMAP, Maildir and\nm2dir repeat [`Self::name`].",
+          "type": "string"
+        },
+        "name": {
+          "description": "The human-readable name.",
+          "type": "string"
+        },
+        "role": {
+          "default": null,
+          "description": "The special-use role, from the backend or a `mailbox.alias.<role>`\nentry, `None` when neither names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total": {
+          "default": null,
+          "description": "Total message count, `None` when counts were not asked for or the\nbackend cannot answer cheaply.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unread": {
+          "default": null,
+          "description": "Unread message count, `None` on the same terms as [`Self::total`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `mailbox list` output, a table of mailboxes.",
+  "properties": {
+    "mailboxes": {
+      "description": "The mailboxes, in the order the backend returned them.",
+      "items": {
+        "$ref": "#/$defs/Mailbox"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mailboxes"
+  ],
+  "title": "Mailboxes",
+  "type": "object"
+}

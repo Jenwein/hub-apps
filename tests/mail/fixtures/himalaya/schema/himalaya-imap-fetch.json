@@ -1,0 +1,222 @@
+{
+  "$defs": {
+    "BodyPart": {
+      "description": "One node of a fetched MIME body structure tree.",
+      "properties": {
+        "content_type": {
+          "description": "The part's `Content-Type`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Its filename, when it names one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parts": {
+          "description": "Its children, empty for a leaf.",
+          "items": {
+            "$ref": "#/$defs/BodyPart"
+          },
+          "type": "array"
+        },
+        "size": {
+          "description": "Its size, in octets.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "content_type",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "EnvelopeView": {
+      "description": "A fetched envelope, its addresses already formatted for display.",
+      "properties": {
+        "bcc": {
+          "description": "The `Bcc:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cc": {
+          "description": "The `Cc:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "date": {
+          "description": "The `Date:` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "description": "The `From:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "in_reply_to": {
+          "description": "The `In-Reply-To:` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "description": "The `Message-ID:` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reply_to": {
+          "description": "The `Reply-To:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sender": {
+          "description": "The `Sender:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "subject": {
+          "description": "The `Subject:` header, RFC 2047 decoded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "The `To:` addresses.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "from",
+        "sender",
+        "reply_to",
+        "to",
+        "cc",
+        "bcc"
+      ],
+      "type": "object"
+    },
+    "FetchedMessage": {
+      "description": "The data items fetched for one message, each `None` when it was not\nasked for.",
+      "properties": {
+        "body": {
+          "contentEncoding": "base64",
+          "contentMediaType": "message/rfc822",
+          "description": "The whole message, `BODY[]`, as the standard Base64 of its octets.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "envelope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvelopeView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The envelope: date, subject and addresses."
+        },
+        "flags": {
+          "description": "The flags set on the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "internal_date": {
+          "description": "The internal date, the received-at, as RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "description": "The message number in the selected mailbox.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "description": "The size, in octets.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "structure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyPart"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The MIME body structure tree."
+        },
+        "uid": {
+          "description": "The UID.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "seq"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `imap fetch` output, one block per message.",
+  "properties": {
+    "messages": {
+      "description": "The messages, in the order the server returned them.",
+      "items": {
+        "$ref": "#/$defs/FetchedMessage"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "messages"
+  ],
+  "title": "FetchedMessages",
+  "type": "object"
+}

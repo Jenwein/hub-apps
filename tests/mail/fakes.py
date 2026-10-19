@@ -1,0 +1,750 @@
+"""Bodies of the fake executables of the mail tests, and the objects that wrap them.
+
+A body is the text of a Python script that the `make_exe` fixture runs behind a shim, so it
+works on every platform. More fakes arrive with the tasks that need them.
+"""
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+# The fake himalaya (v2.2.1) answers from a JSON "server" file and logs every call.
+#
+# The server file:
+#     {"<mailbox>": {"<folder>": {"uidvalidity": "1", "uidnext": 40,
+#                                 "messages": [{"uid": 1, "date": "...", "internal_date": "...",
+#                                               "seen": false, "raw": "<eml text>"}]}},
+#      "fail": {"<mailbox>": "<error text>" | {"imap": "<text>", "smtp": "<text>"}}}
+# - `<mailbox>` is the account name (`-a`), `<folder>` the folder name as the server gives it
+#   (modified UTF-7 included). `uidnext` is optional (default: highest UID + 1).
+# - `date` is the Date header and `internal_date` the received time, RFC 3339 or RFC 2822; each
+#   falls back to the other, and `date` to the header of `raw`.
+# - `raw` is the mail as UTF-8 text; for bytes that are not UTF-8 use `raw_b64` (base64 of the
+#   exact bytes) or a `raw` with lone surrogates `\udcXX` (surrogateescape), which round-trip.
+# - `flags` (optional, a list such as ["answered"]) holds the flags other than seen.
+# - `fail`: a text makes every command of that account exit 1 with it as the F-CLI error on
+#   stdout, except `account check`, which reports both backends failing (exit 0). A dict fails
+#   one backend: "imap" for every command but `message send`, "smtp" for `message send`.
+# - `message send` appends {"mailbox", "raw"} to the top-level list "_sent" (what a send would
+#   deliver, cut at the first line that is not UTF-8, as himalaya does); `message add` and
+#   `message move` change the folders.
+#
+# The call log has one JSON line per call: `argv` (the whole sys.argv: argv[0] is this script, so
+# argv[1:5] is `-c himalaya.toml -a <mailbox>`), `cwd`, `stdin_closed` (stdin is the null device
+# or closed), `stdin` (what `message send` and `message add` read, else null) and `exit`.
+#
+# Exit 99 with `F-NODEL` on stdout: `message delete`, `imap expunge` and `--seen` (except as the
+# filter of `imap search`). A command or option the fake does not know exits 2.
+FAKE_HIMALAYA = r'''
+import base64
+import json
+import os
+import re
+import stat
+import sys
+from datetime import date, datetime, timezone
+from email import message_from_bytes, policy
+from email.utils import parsedate_to_datetime
+
+UTC = timezone.utc
+RESERVED = ("fail", "_sent")
+CALL = {"argv": sys.argv, "cwd": os.getcwd(), "stdin_closed": None, "stdin": None}
+STATE = {"json": False, "account": None}
+
+
+# --- output and the call log -------------------------------------------------------------------
+
+
+def finish(code):
+    CALL["exit"] = code
+    with open(LOG, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(CALL) + "\n")
+    sys.stdout.flush()
+    sys.stdout.buffer.flush()
+    sys.exit(code)
+
+
+def emit(data):
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.buffer.write(text.encode("utf-8"))
+
+
+def fail(message, sources=(), code=1):
+    if STATE["json"]:
+        emit({"error": message, "sources": list(sources), "backtrace": None})
+    else:
+        sys.stdout.buffer.write(("\n".join([message, *sources]) + "\n").encode("utf-8"))
+    finish(code)
+
+
+def stdin_is_null():
+    try:
+        if not stat.S_ISCHR(os.fstat(0).st_mode):
+            return False
+        if sys.platform != "win32":
+            return not os.isatty(0)
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        get_mode = ctypes.WinDLL("kernel32", use_last_error=True).GetConsoleMode
+        get_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_mode.restype = wintypes.BOOL
+        return not get_mode(msvcrt.get_osfhandle(0), ctypes.byref(wintypes.DWORD()))
+    except (OSError, ValueError):
+        return True  # no stdin at all
+
+
+# --- the server file ---------------------------------------------------------------------------
+
+
+def load():
+    with open(SERVER, encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def save(server):
+    temp = SERVER + ".tmp"
+    with open(temp, "w", encoding="utf-8", newline="\n") as stream:
+        json.dump(server, stream, indent=1)  # ASCII only, so lone surrogates survive
+    os.replace(temp, SERVER)
+
+
+def failure(server, backend):
+    entry = (server.get("fail") or {}).get(STATE["account"])
+    return entry.get(backend) if isinstance(entry, dict) else entry
+
+
+def folders_of(server):
+    account = STATE["account"]
+    known = [name for name in server if name not in RESERVED]
+    if account in RESERVED or (account not in known and account not in (server.get("fail") or {})):
+        fail(f"Account `{account}` not found, the configuration holds: {', '.join(known)}")
+    return server.get(account) or {}
+
+
+def folder_of(server, name, missing="NONEXISTENT"):
+    folders = folders_of(server)
+    if name not in folders:
+        fail(f"imap: NO [{missing}] Mailbox does not exist: {name}")
+    return folders[name]
+
+
+def uids(folder):
+    return [m["uid"] for m in folder["messages"]]
+
+
+def next_uid(folder):
+    return max(int(folder.get("uidnext", 1)), max(uids(folder), default=0) + 1)
+
+
+def put(folder, message):
+    message["uid"] = next_uid(folder)
+    folder["messages"].append(message)
+    if "uidnext" in folder:
+        folder["uidnext"] = message["uid"] + 1
+    return message["uid"]
+
+
+# --- messages ----------------------------------------------------------------------------------
+
+
+def raw_bytes(m):
+    if "raw_b64" in m:
+        return base64.b64decode(m["raw_b64"])
+    return m.get("raw", "").encode("utf-8", "surrogateescape")
+
+
+def parsed(m):
+    return message_from_bytes(raw_bytes(m), policy=policy.default)
+
+
+def to_dt(text):
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def header_date(m):
+    return to_dt(m.get("date")) or to_dt(str(parsed(m)["Date"] or ""))
+
+
+def received(m):
+    return to_dt(m.get("internal_date")) or header_date(m)
+
+
+def iso(when):
+    return when.isoformat() if when else None
+
+
+def utc_key(when):
+    if when is None:
+        return datetime.min.replace(tzinfo=UTC)
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
+
+
+def header_text(msg, name):
+    value = msg[name]
+    return "" if value is None else str(value)
+
+
+def addresses(msg, name):
+    return [
+        {"name": a.display_name or None, "email": a.addr_spec}
+        for a in getattr(msg[name], "addresses", ())]
+
+
+def body_text(msg):
+    texts = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "text":
+            try:
+                texts.append(part.get_content())
+            except Exception:
+                texts.append((part.get_payload(decode=True) or b"").decode("utf-8", "replace"))
+    return "\n".join(texts)
+
+
+def flag_names(m):
+    return (["seen"] if m.get("seen") else []) + list(m.get("flags") or [])
+
+
+def ids_of(header):
+    return [i.strip("<>") for i in str(header or "").split()]
+
+
+def envelope_json(m, with_attachment):
+    msg = parsed(m)
+    message_id = str(msg["Message-ID"] or "").strip().strip("<>") or None
+    return {
+        "id": str(m["uid"]),
+        "message-id": message_id,
+        "in-reply-to": ids_of(msg["In-Reply-To"]),
+        "flags": [{"raw": "\\" + f.capitalize(), "iana": f} for f in flag_names(m)],
+        "subject": header_text(msg, "Subject"),
+        "from": addresses(msg, "From"),
+        "to": addresses(msg, "To"),
+        "date": iso(header_date(m)),
+        "size": len(raw_bytes(m)),
+        "has-attachment": any(True for _ in msg.iter_attachments()) if with_attachment else None,
+    }
+
+
+def envelope_view(m):
+    msg = parsed(m)
+
+    def shown(name):
+        return [str(a) for a in getattr(msg[name], "addresses", ())]
+
+    return {
+        "date": str(msg["Date"] or "") or None, "subject": header_text(msg, "Subject") or None,
+        "from": shown("From"), "sender": shown("Sender"), "reply_to": shown("Reply-To"),
+        "to": shown("To"), "cc": shown("Cc"), "bcc": shown("Bcc"),
+        "message_id": str(msg["Message-ID"] or "") or None,
+        "in_reply_to": str(msg["In-Reply-To"] or "") or None}
+
+
+# --- the query language of `envelope search` ---------------------------------------------------
+
+TOKEN = re.compile(r'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))')
+KEYWORDS = ("date", "after", "from", "to", "subject", "body", "flag")
+FLAGS = ("seen", "answered", "flagged", "draft")
+
+
+def tokenize(text):
+    tokens = []
+    text = text.rstrip()
+    pos = 0
+    while pos < len(text):
+        found = TOKEN.match(text, pos)
+        if not found:
+            fail("invalid query near: " + text[pos:pos + 20])
+        if found.group(1):
+            tokens.append(("(", "("))
+        elif found.group(2):
+            tokens.append((")", ")"))
+        elif found.group(3) is not None:
+            tokens.append(("str", re.sub(r"\\(.)", r"\1", found.group(3))))
+        else:
+            tokens.append(("word", found.group(4)))
+        pos = found.end()
+    return tokens
+
+
+def day_of(text):
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        fail(f"invalid query: {text} is not a date (yyyy-mm-dd)")
+
+
+class Query:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.at = 0
+
+    def peek(self):
+        return self.tokens[self.at] if self.at < len(self.tokens) else None
+
+    def is_word(self, name):
+        token = self.peek()
+        return token is not None and token[0] == "word" and token[1].lower() == name
+
+    def parse(self):
+        node = self.disjunction()
+        if self.at != len(self.tokens):
+            fail("invalid query: unexpected " + self.tokens[self.at][1])
+        return node
+
+    def disjunction(self):
+        node = self.conjunction()
+        while self.is_word("or"):
+            self.at += 1
+            node = ("or", node, self.conjunction())
+        return node
+
+    def conjunction(self):
+        node = self.negation()
+        while self.is_word("and"):
+            self.at += 1
+            node = ("and", node, self.negation())
+        return node
+
+    def negation(self):
+        if self.is_word("not"):
+            self.at += 1
+            return ("not", self.negation())
+        return self.atom()
+
+    def atom(self):
+        token = self.peek()
+        if token is None:
+            fail("invalid query: it ends too early")
+        if token[0] == "(":
+            self.at += 1
+            node = self.disjunction()
+            if self.peek() is None or self.peek()[0] != ")":
+                fail("invalid query: a ) is missing")
+            self.at += 1
+            return node
+        if token[0] != "word" or token[1].lower() not in KEYWORDS:
+            fail(f"invalid query: unknown keyword {token[1]}")
+        kind = token[1].lower()
+        self.at += 1
+        value = self.peek()
+        if value is None or value[0] not in ("str", "word"):
+            fail(f"invalid query: {kind} needs a value")
+        self.at += 1
+        if kind in ("date", "after"):
+            return (kind, day_of(value[1]))
+        if kind == "flag" and value[1].lower() not in FLAGS:
+            fail(f"invalid query: unknown flag {value[1]}")
+        return (kind, value[1])
+
+
+HEADERS = {"from": "From", "to": "To", "subject": "Subject"}
+
+
+def matches(node, m):
+    kind = node[0]
+    if kind == "and":
+        return matches(node[1], m) and matches(node[2], m)
+    if kind == "or":
+        return matches(node[1], m) or matches(node[2], m)
+    if kind == "not":
+        return not matches(node[1], m)
+    if kind in ("date", "after"):
+        when = header_date(m)
+        if when is None:
+            return False
+        return when.date() == node[1] if kind == "date" else when.date() > node[1]
+    if kind == "flag":
+        return node[1].lower() in flag_names(m)
+    needle = node[1].lower()
+    if kind == "body":
+        return needle in body_text(parsed(m)).lower()
+    return needle in header_text(parsed(m), HEADERS[kind]).lower()
+
+
+# --- the commands ------------------------------------------------------------------------------
+
+VALUED = {"-c": None, "--config": None, "-b": None, "--backend": None, "--log-level": None,
+          "--log-file": None, "-a": "account", "--account": "account"}
+
+
+def parse_options(rest, valued, flags, query=False):
+    found = {}
+    positional = []
+    at = 0
+    while at < len(rest):
+        word = rest[at]
+        if query and positional:
+            positional.append(word)
+        elif word == "--json":
+            STATE["json"] = True
+        elif word in VALUED or word in valued:
+            if at + 1 >= len(rest):
+                fail(f"fake himalaya: {word} needs a value", code=2)
+            name = VALUED[word] if word in VALUED else valued[word]
+            value = rest[at + 1]
+            at += 1
+            if name == "account":
+                STATE["account"] = value
+            elif name == "flag":
+                found.setdefault("flag", []).append(value)
+            elif name:
+                found[name] = value
+        elif word in flags:
+            found[flags[word]] = True
+        elif word.startswith("-") and len(word) > 1:
+            fail(f"fake himalaya does not know the option {word}", code=2)
+        else:
+            positional.append(word)
+        at += 1
+    return found, positional
+
+
+def mailbox_list(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    out = []
+    for name, folder in folders_of(server).items():
+        messages = folder["messages"]
+        counts = opts.get("counts")
+        out.append({
+            "id": name, "name": name, "role": "inbox" if name.upper() == "INBOX" else None,
+            "total": len(messages) if counts else None,
+            "unread": sum(1 for m in messages if not m.get("seen")) if counts else None})
+    emit({"mailboxes": out})
+
+
+def envelope_search(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    folder = folder_of(server, opts.get("mailbox", "INBOX"))
+    tokens = tokenize(" ".join(positional))
+    order = None
+    for at in range(len(tokens) - 1):
+        first, second = tokens[at], tokens[at + 1]
+        if first[0] == "word" and first[1].lower() == "order" and second[1].lower() == "by":
+            tokens, order = tokens[:at], tokens[at + 2:]
+            break
+    node = Query(tokens).parse() if tokens else None
+    found = [m for m in folder["messages"] if node is None or matches(node, m)]
+    found.sort(key=lambda m: m["uid"])
+    if order:
+        key = order[0][1].lower()
+        keys = {
+            "date": lambda m: utc_key(header_date(m)),
+            "from": lambda m: header_text(parsed(m), "From").lower(),
+            "to": lambda m: header_text(parsed(m), "To").lower(),
+            "subject": lambda m: header_text(parsed(m), "Subject").lower()}
+        if key not in keys:
+            fail(f"invalid query: cannot order by {key}")
+        found.sort(key=keys[key], reverse=len(order) > 1 and order[1][1].lower() == "desc")
+    size, page = int(opts.get("size", 25)), int(opts.get("page", 1))
+    window = found[(page - 1) * size:page * size]
+    emit({"queued": 0, "envelopes": [envelope_json(m, opts.get("attachment")) for m in window]})
+
+
+def imap_status(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    folder = folder_of(server, positional[0])
+    messages = folder["messages"]
+    emit({
+        "messages": len(messages), "recent": 0, "uid_next": next_uid(folder),
+        "uid_validity": int(folder.get("uidvalidity", "1")),
+        "unseen": sum(1 for m in messages if not m.get("seen"))})
+
+
+def sequence_set(text, top):
+    ranges = []
+    for part in text.split(","):
+        low, _, high = part.partition(":")
+        try:
+            ends = [top if x == "*" else int(x) for x in (low, high or low)]
+        except ValueError:
+            fail(f"invalid sequence set: {text}")
+        ranges.append((min(ends), max(ends)))
+    return ranges
+
+
+def imap_fetch(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    folder = folder_of(server, opts.get("mailbox", "INBOX"))
+    if len(positional) != 1:
+        fail("fake himalaya: imap fetch wants one sequence set", code=2)
+    messages = folder["messages"]
+    by_seq = bool(opts.get("seq"))
+    top = len(messages) if by_seq else max(uids(folder), default=0)
+    ranges = sequence_set(positional[0], top)
+    chosen = [name for name in ("envelope", "structure", "flags", "internal_date", "size", "body")
+              if opts.get(name)] or ["envelope"]
+    out = []
+    for position, m in enumerate(messages, 1):
+        number = position if by_seq else m["uid"]
+        if not any(low <= number <= high for low, high in ranges):
+            continue
+        item = {"seq": position, "uid": m["uid"]}
+        if "internal_date" in chosen:
+            item["internal_date"] = iso(received(m))
+        if "body" in chosen:
+            item["body"] = base64.b64encode(raw_bytes(m)).decode("ascii")
+        if "flags" in chosen:
+            item["flags"] = ["\\" + f.capitalize() for f in flag_names(m)]
+        if "size" in chosen:
+            item["size"] = len(raw_bytes(m))
+        if "envelope" in chosen:
+            item["envelope"] = envelope_view(m)
+        if "structure" in chosen:
+            item["structure"] = {"content_type": "text/plain", "parts": []}
+        out.append(item)
+    emit({"messages": out})
+
+
+def imap_search(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    folder = folder_of(server, opts.get("mailbox", "INBOX"))
+    out = []
+    for position, m in enumerate(folder["messages"], 1):
+        when = received(m)
+        day = when.date() if when else None
+        ok = True
+        if "since" in opts:
+            ok = ok and day is not None and day >= day_of(opts["since"])
+        if "before" in opts:
+            ok = ok and day is not None and day < day_of(opts["before"])
+        if "on" in opts:
+            ok = ok and day == day_of(opts["on"])
+        if opts.get("seen"):
+            ok = ok and bool(m.get("seen"))
+        if opts.get("unseen"):
+            ok = ok and not m.get("seen")
+        if "from" in opts:
+            ok = ok and opts["from"].lower() in header_text(parsed(m), "From").lower()
+        if "subject" in opts:
+            ok = ok and opts["subject"].lower() in header_text(parsed(m), "Subject").lower()
+        if ok:
+            out.append({"id": position if opts.get("seq") else m["uid"]})
+    emit({"uid_mode": not opts.get("seq"), "ids": out})
+
+
+def message_read(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    name = opts.get("mailbox", "INBOX")
+    folder = folder_of(server, name)
+    if not opts.get("raw") or len(positional) != 1:
+        fail("fake himalaya: only `message read <id> --raw` is supported", code=2)
+    found = [m for m in folder["messages"] if str(m["uid"]) == positional[0]]
+    if not found:
+        fail(f"imap: no message {positional[0]} in {name}")
+    data = raw_bytes(found[0])
+    if STATE["json"]:
+        emit(data.decode("utf-8", "replace"))
+    else:
+        sys.stdout.buffer.write(data)
+
+
+def read_stdin():
+    data = sys.stdin.buffer.read()
+    CALL["stdin"] = data.decode("utf-8", "surrogateescape")
+    kept = []
+    for line in data.splitlines(keepends=True):  # himalaya stops at the first invalid line
+        try:
+            line.decode("utf-8")
+        except UnicodeDecodeError:
+            break
+        kept.append(line)
+    return b"".join(kept)
+
+
+def message_send(opts, positional):
+    mail = read_stdin()
+    server = load()
+    folders_of(server)
+    if failure(server, "smtp"):
+        fail(failure(server, "smtp"))
+    server.setdefault("_sent", []).append(
+        {"mailbox": STATE["account"], "raw": mail.decode("utf-8", "surrogateescape")})
+    save(server)
+    emit({"message": "Message successfully sent"})
+
+
+def message_add(opts, positional):
+    mail = read_stdin()
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    if "mailbox" not in opts:
+        fail("fake himalaya: message add needs -m", code=2)
+    folder = folder_of(server, opts["mailbox"], missing="TRYCREATE")
+    entry = {
+        "uid": 0, "internal_date": datetime.now(UTC).isoformat(),
+        "seen": "seen" in opts.get("flag", []), "raw": mail.decode("utf-8", "surrogateescape")}
+    entry["date"] = iso(header_date(entry))
+    uid = put(folder, entry)
+    save(server)
+    emit({"id": str(uid), "sent": False})
+
+
+def flag_add(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    folder = folder_of(server, opts.get("mailbox", "INBOX"))
+    flags = opts.get("flag", [])
+    if not flags or any(f not in FLAGS for f in flags):
+        fail("fake himalaya: flag add wants -f seen|answered|flagged|draft", code=2)
+    wanted = {int(x) for x in positional}
+    for m in folder["messages"]:
+        if m["uid"] in wanted:
+            for flag in flags:
+                if flag == "seen":
+                    m["seen"] = True
+                elif flag not in m.setdefault("flags", []):
+                    m["flags"].append(flag)
+    save(server)
+    emit({"flags": flags})
+
+
+def message_move(opts, positional):
+    server = load()
+    if failure(server, "imap"):
+        fail(failure(server, "imap"))
+    if "from" not in opts or "to" not in opts:
+        fail("fake himalaya: message move needs --from and --to", code=2)
+    source = folder_of(server, opts["from"])
+    target = folder_of(server, opts["to"], missing="TRYCREATE")
+    wanted = {int(x) for x in positional}
+    moved = [m for m in source["messages"] if m["uid"] in wanted]
+    if not moved:
+        emit({"message": f"No message moved: no message {','.join(positional)} in {opts['from']}"})
+        return
+    source["messages"] = [m for m in source["messages"] if m["uid"] not in wanted]
+    for m in moved:
+        put(target, dict(m))
+    save(server)
+    emit({"message": "Message(s) successfully moved"})
+
+
+def account_check(opts, positional):
+    server = load()
+    folders_of(server)
+    backends = []
+    for backend in ("imap", "smtp"):
+        text = failure(server, backend)
+        backends.append({"backend": backend, "ok": not text, "error": text or None})
+    emit({"account": STATE["account"], "backends": backends})
+
+
+COMMANDS = {
+    ("mailbox", "list"): (mailbox_list, {}, {"--counts": "counts"}, False),
+    ("envelope", "search"): (
+        envelope_search,
+        {"-m": "mailbox", "--mailbox": "mailbox", "-s": "size", "--page-size": "size",
+         "-p": "page", "--page": "page"},
+        {"--has-attachment": "attachment"}, True),
+    ("imap", "status"): (imap_status, {}, {}, False),
+    ("imap", "fetch"): (
+        imap_fetch, {"-m": "mailbox", "--mailbox": "mailbox"},
+        {"--envelope": "envelope", "--structure": "structure", "--flags": "flags",
+         "--internal-date": "internal_date", "--size": "size", "--body": "body",
+         "--seq": "seq"}, False),
+    ("imap", "search"): (
+        imap_search,
+        {"-m": "mailbox", "--mailbox": "mailbox", "--since": "since", "--before": "before",
+         "--on": "on", "--from": "from", "--subject": "subject"},
+        {"--seen": "seen", "--unseen": "unseen", "--seq": "seq"}, False),
+    ("message", "read"): (
+        message_read, {"-m": "mailbox", "--mailbox": "mailbox"}, {"--raw": "raw"}, False),
+    ("message", "send"): (message_send, {}, {"--no-save": "no_save"}, False),
+    ("message", "add"): (
+        message_add, {"-m": "mailbox", "--mailbox": "mailbox", "-f": "flag", "--flag": "flag"},
+        {}, False),
+    ("message", "move"): (
+        message_move, {"-f": "from", "--from": "from", "-t": "to", "--to": "to"}, {}, False),
+    ("flag", "add"): (
+        flag_add, {"-m": "mailbox", "--mailbox": "mailbox", "-f": "flag", "--flag": "flag"},
+        {}, False),
+    ("account", "check"): (account_check, {}, {}, False),
+}
+
+
+def main():
+    CALL["stdin_closed"] = stdin_is_null()
+    args = sys.argv[1:]
+    at = 0
+    while at < len(args) and args[at].startswith("-"):  # the global flags before the command
+        if args[at] == "--json":
+            STATE["json"] = True
+            at += 1
+        elif args[at] in VALUED:
+            if VALUED[args[at]] == "account":
+                STATE["account"] = args[at + 1]
+            at += 2
+        else:
+            break
+    rest = args[at:]
+    head = rest[:2]
+    if head in (["message", "delete"], ["imap", "expunge"]) or (
+            "--seen" in rest and head != ["imap", "search"]):
+        sys.stdout.write("F-NODEL\n")
+        finish(99)
+    spec = COMMANDS.get(tuple(head))
+    if spec is None:
+        fail("fake himalaya does not know the command: " + " ".join(head), code=2)
+    handler, valued, flags, query = spec
+    opts, positional = parse_options(rest[2:], valued, flags, query)
+    handler(opts, positional)
+    finish(0)
+
+
+try:
+    main()
+except Exception as err:
+    fail(f"fake himalaya crashed: {err!r}", code=97)
+'''
+
+
+def himalaya_body(server: Path, log: Path) -> str:
+    """The fake himalaya for `make_exe`, bound to the server file and the call log."""
+    return f"SERVER = {str(server)!r}\nLOG = {str(log)!r}\n{FAKE_HIMALAYA}"
+
+
+@dataclass(frozen=True)
+class FakeHimalaya:
+    exe: Path  # the executable `himalaya`, first on PATH
+    path: Path  # the server file (see FAKE_HIMALAYA)
+    log: Path  # the call log
+
+    def server(self) -> dict:
+        """The server file as it is now: sends, adds, moves and flags are in it."""
+        return json.loads(self.path.read_text("utf-8"))
+
+    def write(self, server: dict) -> None:
+        """Replace the server file, for a test that changes the mailbox between two commands."""
+        self.path.write_text(json.dumps(server), "utf-8", newline="\n")
+
+    def calls(self) -> list[dict]:
+        """Every call so far, oldest first: argv, cwd, stdin_closed, stdin and exit."""
+        if not self.log.exists():
+            return []
+        lines = self.log.read_text("utf-8").splitlines()
+        return [json.loads(line) for line in lines if line.strip()]

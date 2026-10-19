@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `flag add` output, naming the flags that were added.",
+  "properties": {
+    "flags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "flags"
+  ],
+  "title": "AddedFlags",
+  "type": "object"
+}
