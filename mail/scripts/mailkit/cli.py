@@ -5,14 +5,18 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import re
 import shutil
 import sys
+from contextlib import suppress
+from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import NoReturn
 
-from . import configs, context, himalaya, signin, tools, vault
+from . import configs, context, himalaya, query, signin, tools, vault
 from .paths import locked
-from .settings import Mailbox, MailError
+from .settings import FOLDER_ROLES, Mailbox, MailError
 
 
 class Parser(argparse.ArgumentParser):
@@ -208,6 +212,35 @@ def run_check(args: argparse.Namespace) -> None:
     print_json({box.name: check_mailbox(hima, box) for box in boxes})
 
 
+def day(text: str) -> date:
+    """A `--since` or `--before` value: YYYY-MM-DD, and no other spelling of a date."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        with suppress(ValueError):  # such as 2026-13-01
+            return date.fromisoformat(text)
+    raise argparse.ArgumentTypeError(f"{text!r} is not a date: use YYYY-MM-DD")
+
+
+def positive_int(text: str) -> int:
+    if not (text.isascii() and text.isdigit()) or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number from 1 up")
+    return int(text)
+
+
+def run_list(args: argparse.Namespace) -> None:
+    """Search the mailboxes and print one numbered list. The numbers are what the other commands
+    take, and they mean the last list only."""
+    ctx = load_ctx(args)
+    listing = query.search(ctx, himalaya.Himalaya(ctx), query.Query(
+        mailboxes=tuple(args.mailbox), folder=args.folder, since=args.since, before=args.before,
+        sender=args.sender, subject=args.subject, body=args.body, unseen=args.unseen,
+        limit=args.limit))
+    query.save_listing(ctx, listing)
+    print_json({
+        "items": [asdict(found) for found in listing.items],
+        "errors": listing.errors,
+        "note": query.NOTE})
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -273,6 +306,29 @@ def build_parser() -> Parser:
         "check", help="test that each mailbox signs in and answers (one mailbox, or all)")
     p.add_argument("mailbox", nargs="?")
     p.set_defaults(func=run_check)
+
+    p = sub.add_parser(
+        "list", help="search the mailboxes: one numbered list, newest first (the numbers are "
+        "what the other commands take)")
+    p.add_argument(
+        "--mailbox", action="append", default=[], metavar="M",
+        help="search this mailbox (repeat for several; default: all)")
+    p.add_argument(
+        "--folder", choices=FOLDER_ROLES, default="inbox",
+        help="which folder of each mailbox (default: inbox)")
+    p.add_argument(
+        "--since", type=day, metavar="YYYY-MM-DD", help="mail dated on or after this day")
+    p.add_argument(
+        "--before", type=day, metavar="YYYY-MM-DD", help="mail dated before this day")
+    p.add_argument(
+        "--from", dest="sender", metavar="TEXT", help="the sender's name or address contains TEXT")
+    p.add_argument("--subject", metavar="TEXT", help="the subject contains TEXT")
+    p.add_argument("--body", metavar="TEXT", help="the body contains TEXT")
+    p.add_argument("--unseen", action="store_true", help="only mail not marked as read")
+    p.add_argument(
+        "--limit", type=positive_int, default=20, metavar="N",
+        help="at most N mails in all (default: 20)")
+    p.set_defaults(func=run_list)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")

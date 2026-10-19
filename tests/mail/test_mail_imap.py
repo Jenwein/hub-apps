@@ -1,4 +1,4 @@
-"""The Himalaya wrapper against a real IMAP and SMTP server: GreenMail (marker `greenmail`).
+"""The Himalaya wrapper and `mx list` against a real server: GreenMail (marker `greenmail`).
 
 The fixture `greenmail_hub` (conftest.py) skips these unless MAIL_TEST_IMAP=host:port is set; CI
 starts GreenMail in Docker on Linux, and the step "Check the greenmail tests ran" fails if any of
@@ -12,6 +12,7 @@ Every test has a fresh user, so its INBOX starts empty. Mail is put into a folde
 """
 
 import imaplib
+import json
 import re
 import socket
 import socketserver
@@ -25,8 +26,10 @@ from email.utils import format_datetime, make_msgid
 from uuid import uuid4
 
 import pytest
+from mailkit.cli import main
 from mailkit.context import load
 from mailkit.himalaya import Himalaya, HimalayaError
+from mailkit.query import item
 from mailtest import GREENMAIL_BOX as BOX
 from mailtest import GREENMAIL_SECRET, SmtpProxy, fix_server_name
 
@@ -193,6 +196,32 @@ def test_add_puts_a_seen_copy_in_sent(ctx, hima):
     assert "\\Seen" in flags_of(ctx, "Sent", copies[0].id)
     assert b"The copy of a mail that was sent." in hima.raw(BOX, "Sent", copies[0].id)
     assert hima.search(BOX, "INBOX", [], 10) == []
+
+
+@pytest.mark.greenmail
+def test_list_finds_a_chinese_subject(greenmail_hub, ctx, hima, capsys):
+    """`mx list --subject 发票` sends no subject to the server (servers differ on non-ASCII
+    searches) and filters the newest envelopes itself."""
+    address = ctx.mailbox(BOX).address
+    tag = uuid4().hex[:8]
+    subject = f"发票 gm-list-{tag}"
+    hima.send(BOX, make_mail(address, subject, "A mail with a Chinese subject."))
+    hima.send(BOX, make_mail(address, f"gm-list-other-{tag}"))
+    wait_for(hima, "INBOX", 2)
+
+    def listed(*args: str) -> dict:
+        code = main(["--hub", str(greenmail_hub.root), "list", "--mailbox", BOX, *args])
+        out = capsys.readouterr()
+        assert code == 0, out.err
+        return json.loads(out.out)
+
+    found = listed("--subject", "发票")
+    assert [i["subject"] for i in found["items"]] == [subject], found
+    assert found["errors"] == {}
+    assert (found["items"][0]["n"], found["items"][0]["folder"]) == (1, "INBOX")
+    assert item(ctx, 1).subject == subject  # the number resolves to that mail
+    assert listed("--subject", "账单")["items"] == []
+    assert len(listed()["items"]) == 2
 
 
 # The proxy in front of GreenMail's SMTP port (see greenmail_hub in conftest.py). These two run
