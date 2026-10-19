@@ -6,6 +6,7 @@ is wrong, a receipt.pdf next to an .exe, and a body of 20000 characters.
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 # Imported before any test patches subprocess: importing it may ask the platform module, which
@@ -281,3 +282,40 @@ def test_pdfplumber_is_asked_for_the_first_ten_pages_only(monkeypatch):
     monkeypatch.setattr(pdfplumber, "open", spy)
     assert attachment_texts(eml("receipt-and-exe.eml"), 4000)[0][1] == "Total 88.00 CNY"
     assert list(asked["pages"]) == list(range(1, 11))
+
+
+# --- long address lists ------------------------------------------------------------------------
+
+
+def bulk_mail(names: list[str]) -> bytes:
+    folded = ",\n ".join(", ".join(names[at:at + 3]) for at in range(0, len(names), 3))
+    return (
+        f"From: Mallory <mallory@example.org>\nTo: {folded}\nCc: {folded}\n"
+        "Reply-To: a@example.org, b@example.org, c@example.org\n"
+        "Subject: bulk\nContent-Type: text/plain\n\nthe body\n").encode()
+
+
+def test_a_mail_with_300000_recipients_parses_quickly():
+    raw = bulk_mail([f"user{n:06d}@example.org" for n in range(300_000)])
+    start = time.monotonic()
+    found = parse(raw)
+    assert time.monotonic() - start < 5
+    assert len(found.to) == len(found.cc) == mailtext.ADDRESS_LIMIT == 200
+    assert found.to[:2] == ["user000000@example.org", "user000001@example.org"]
+    assert found.to[-1] == "user000199@example.org"
+    assert (found.sender_name, found.sender_addr) == ("Mallory", "mallory@example.org")
+    assert (found.subject, found.body) == ("bulk", "the body\n")
+
+
+def test_a_few_recipients_are_all_read():
+    found = parse(bulk_mail(["x@example.org", "Y <y@example.org>", '"Doe, Jo" <jo@example.org>']))
+    assert found.to == found.cc == ["x@example.org", "y@example.org", "jo@example.org"]
+    assert found.reply_to == ["a@example.org", "b@example.org", "c@example.org"]
+
+
+def test_a_long_list_is_cut_between_addresses():
+    # 200 addresses of about 170 characters: the cut at 20000 characters comes first.
+    names = [f'"{"N" * 140} {n:06d}" <user{n:06d}@example.org>' for n in range(200)]
+    found = parse(bulk_mail(names))
+    assert 100 < len(found.to) < 200
+    assert found.to == [f"user{n:06d}@example.org" for n in range(len(found.to))]

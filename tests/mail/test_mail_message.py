@@ -271,11 +271,12 @@ def test_show_of_a_mail_with_thousands_of_recipients_and_attachments_is_bounded(
     assert text.endswith("\n" + note) and len(text) == SHOW_LIMIT + 1 + len(note)
     assert len(parts) <= SHOW_LIMIT // 4000 + 1
     assert all(len(part) <= 4000 for part in parts)
-    # The lists show their first 50 entries and count the rest.
+    # The lists show their first 50 entries and count the rest of what parse read: at most 200
+    # addresses per header (mailtext.ADDRESS_LIMIT), not all 20000.
     to, cc = text.split("\n")[1:3]
     assert to.startswith("To: user00000@example.org, user00001@example.org")
-    assert to.endswith(", user00049@example.org, " + strings.t("show_more", "en", count=19_950))
-    assert cc.endswith(", user00049@example.org, " + strings.t("show_more", "en", count=19_950))
+    assert to.endswith(", user00049@example.org, " + strings.t("show_more", "en", count=150))
+    assert cc.endswith(", user00049@example.org, " + strings.t("show_more", "en", count=150))
     [attached] = [line for line in text.split("\n") if line.startswith("Attachments: ")]
     assert attached.count("; ") == 50  # 50 entries and the count
     assert attached.endswith(strings.t("show_more", "en", count=4_950))

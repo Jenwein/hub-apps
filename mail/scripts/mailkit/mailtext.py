@@ -33,6 +33,8 @@ from .settings import MailError
 
 FILENAME_LIMIT = 100
 HEADER_LIMIT = 998  # a header value, as one line (the line length of RFC 5322)
+ADDRESS_LIMIT = 200  # addresses read per header name (To, Cc, ...): a mail may list thousands
+ADDRESS_CHARS = 20_000  # of each raw address header, before the stdlib parser sees it
 PDF_PAGES = 10  # the pages of a PDF that are read
 PDF_MAX_BYTES = 5 * 1024 * 1024  # a bigger PDF is not read at all: slow, and a likely trap
 
@@ -141,19 +143,33 @@ def _header(msg: Message, name: str) -> str:
         return _line(raw[0])
 
 
+def _cut_list(value: str) -> str:
+    """A raw address list cut to ADDRESS_CHARS characters, at the last comma before the cut so no
+    address is split. The stdlib address parser gets slower than linear with the length."""
+    if len(value) <= ADDRESS_CHARS:
+        return value
+    head = value[:ADDRESS_CHARS]
+    comma = head.rfind(",")
+    return head[:comma] if comma > 0 else head
+
+
 def _addresses(msg: Message, name: str) -> list[tuple[str, str]]:
-    """(display name, address) of every address in the `name` headers."""
-    raw = _raw_values(msg, name)
-    if not raw:
-        return []
-    try:
-        found = [
-            (a.display_name, a.addr_spec)
-            for header in msg.get_all(name) or [] for a in header.addresses]
-    except PARSE_ERRORS:  # a header the parser cannot make sense of
-        found = getaddresses([_unescape(value) for value in raw])
-    # A name the parser left encoded (it gives up on a word that holds a line break).
-    return [(_line(_words(n)), _line(a)) for n, a in found if _line(a)]
+    """(display name, address) of the first ADDRESS_LIMIT addresses in the `name` headers. A mail
+    can list hundreds of thousands: each header is cut (`_cut_list`) before it is parsed, and no
+    further header is parsed once the limit is reached."""
+    found: list[tuple[str, str]] = []
+    for value in _raw_values(msg, name):
+        if len(found) >= ADDRESS_LIMIT:
+            break
+        value = _cut_list(value)
+        try:
+            header = msg.policy.header_fetch_parse(name, value)
+            pairs = [(a.display_name, a.addr_spec) for a in header.addresses]
+        except PARSE_ERRORS:  # a header the parser cannot make sense of
+            pairs = getaddresses([_unescape(value)])
+        # A name the parser left encoded (it gives up on a word that holds a line break).
+        found += [(_line(_words(n)), _line(a)) for n, a in pairs if _line(a)]
+    return found[:ADDRESS_LIMIT]
 
 
 def _date(msg: Message) -> str:
