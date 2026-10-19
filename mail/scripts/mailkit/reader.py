@@ -23,11 +23,12 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 
 from .mailtext import Attachment, Parsed, parse
-from .query import NAME_LIMIT, SUBJECT_LIMIT, clean
+from .query import INVISIBLE, NAME_LIMIT, SUBJECT_LIMIT, clean
 from .settings import MailError
 from .tools import NO_WINDOW, kill_tree
 
@@ -44,11 +45,18 @@ HEAD_LIMIT = 300  # a header line of the mail as the reader gets it
 
 # The agent's chat: the reader has no business with it.
 DROPPED_ENV = frozenset({"CC_SESSION_KEY", "CC_PROJECT"})
+# npm's `claude.cmd` runs through cmd.exe, which reads `%`, `^`, `&` and line breaks in the
+# arguments (the system prompt has all of them): only the native claude.exe is run on Windows.
+WINDOWS = os.name == "nt"
+SCRIPT_LAUNCHERS = (".cmd", ".bat")
 UNREADABLE = "the reader's answer could not be read"
 
 CODE = re.compile(r"[A-Za-z0-9-]{3,12}")
-NUMBER = re.compile(r"\d[\d,.]*")
-DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+# An amount is a number with at most one currency before it and one after it, each a short word of
+# letters (USD, CNY, 元) or a currency sign ($, ¥, €): see `_currency`. Nothing else may be in it.
+AMOUNT = re.compile(r"(?:([^\s\d]+) ?)?(\d[\d,.]*)(?: ?([^\s\d]+))?")
+CURRENCY_LETTERS = 4
+DAY =re.compile(r"\d{4}-\d{2}-\d{2}")
 SURROGATES = re.compile("[\ud800-\udfff]")
 CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # the C0 and C1 controls but \t and \n
 
@@ -222,9 +230,10 @@ def _line(value: object, limit: int) -> str:
 
 def _block(value: object, limit: int | None = None) -> str:
     """Free text of several lines (an answer, a draft): control characters out but tabs and line
-    breaks, cut to `limit`."""
+    breaks, the invisible characters of `clean` out too (they can hide or reorder words), cut to
+    `limit`."""
     text = _model_text(value).replace("\r\n", "\n").replace("\r", "\n")
-    text = CONTROLS.sub("", text).strip()
+    text = "".join(char for char in CONTROLS.sub("", text) if char not in INVISIBLE).strip()
     if limit is not None and len(text) > limit:
         text = text[:limit - 1] + "…"
     return text
@@ -243,12 +252,27 @@ def _code(value: object, text: str) -> str | None:
     return None
 
 
+def _currency(word: str | None) -> bool:
+    """Is `word` a currency: none at all, a short word of letters, or one currency sign?"""
+    if word is None:
+        return True
+    if word.isalpha():
+        return len(word) <= CURRENCY_LETTERS
+    return len(word) == 1 and unicodedata.category(word) == "Sc"
+
+
 def _amount(value: object, text: str) -> str | None:
-    amount = _line(value, AMOUNT_LIMIT)
-    number = NUMBER.search(amount)
-    if number and _occurs(number.group().rstrip(".,"), text, r"\d"):
-        return amount
-    return None
+    """The amount, when it is only a number with its currency and the sender wrote that number:
+    with no digit right before or after it, nor a `.` or `,` that goes on with a digit (1,234 is
+    not in 1,234.50, and 234.50 is not either)."""
+    amount = _line(value, AMOUNT_LIMIT).rstrip(".,")
+    shape = AMOUNT.fullmatch(amount)
+    if not shape or not (_currency(shape.group(1)) and _currency(shape.group(3))):
+        return None
+    number = re.escape(shape.group(2).rstrip(".,"))
+    if re.search(rf"(?<!\d)(?<!\d[.,]){number}(?![.,]?\d)", text) is None:
+        return None
+    return amount
 
 
 def _deadline(value: object) -> str | None:
@@ -354,6 +378,10 @@ class Reader:
             raise ReaderError(
                 "reading mail needs the Claude Code CLI (claude), which is not installed here: "
                 "install it, then run claude once in the server's terminal to sign in")
+        if WINDOWS and os.path.splitext(found)[1].lower() in SCRIPT_LAUNCHERS:
+            raise ReaderError(
+                "install Claude Code with its native installer: the npm .cmd launcher mangles "
+                "the reader's arguments")
         return found
 
     def argv(self, system: str, schema: dict) -> list[str]:

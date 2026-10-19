@@ -10,8 +10,9 @@ from pathlib import Path
 
 # Imported before any test patches subprocess: importing it may ask the platform module, which
 # runs a command on Windows. Reading a PDF itself runs nothing.
-import pdfplumber  # noqa: F401
+import pdfplumber
 import pytest
+from mailkit import mailtext
 from mailkit.mailtext import Attachment, attachment_bytes, attachment_texts, html_to_text, parse
 from mailkit.reader import LOOK_BODY_LIMIT, TRIAGE_BODY_LIMIT, Reader
 from mailkit.settings import MailError
@@ -204,3 +205,79 @@ def test_broken_html_still_gives_text():
     assert html_to_text("<p>open <b>never closed <div>x") == "open never closed\nx"
     assert html_to_text("<script>unclosed script") == ""
     assert "text" in html_to_text("<!-- a comment <p> --><p>text</p><![CDATA[x]]>")
+
+
+# --- hostile structure -------------------------------------------------------------------------
+
+DEEP = 2000  # far past what the stdlib parser and writer can recurse through
+
+
+def nested_multipart(depth: int) -> bytes:
+    opens = [
+        f'Content-Type: multipart/mixed; boundary="b{n}"\n\n--b{n}\n' for n in range(depth)]
+    closes = [f"\n--b{n}--\n" for n in reversed(range(depth))]
+    return (
+        "From: Deep <deep@example.org>\nSubject: deep multipart\nMIME-Version: 1.0\n"
+        + "".join(opens) + "Content-Type: text/plain\n\ninner text\n" + "".join(closes)
+    ).encode("ascii")
+
+
+def nested_messages(depth: int) -> bytes:
+    return (
+        "From: Deep <deep@example.org>\nSubject: deep messages\nMIME-Version: 1.0\n"
+        + "Content-Type: message/rfc822\n\n" * depth + "Subject: inner\n\ninner text\n"
+    ).encode("ascii")
+
+
+# 2000 levels break the parser; 200 (Python 3.12) and 600 (3.14) levels parse but break the
+# writer that gives an attached message's bytes back.
+@pytest.mark.parametrize("raw", [
+    nested_multipart(DEEP), nested_messages(DEEP), nested_messages(200), nested_messages(600)],
+    ids=["multipart-2000", "rfc822-2000", "rfc822-200", "rfc822-600"])
+def test_deep_nesting_never_crashes(raw):
+    found = parse(raw)
+    assert (found.sender_name, found.sender_addr) == ("Deep", "deep@example.org")
+    assert found.subject.startswith("deep ")
+    assert found.body == ""
+    texts = attachment_texts(raw, 4000)
+    assert all(text == "" for _, text in texts)
+    if found.attachments:
+        attachment_bytes(raw, 1)
+    else:
+        with pytest.raises(MailError, match="no attachment 1"):
+            attachment_bytes(raw, 1)
+
+
+def test_a_deep_mail_keeps_its_headers_without_its_parts():
+    found = parse(nested_multipart(DEEP))
+    assert found.subject == "deep multipart"
+    assert found.attachments == []
+
+
+def test_a_pdf_over_the_size_cap_is_not_read(monkeypatch):
+    assert mailtext.PDF_MAX_BYTES == 5 * 1024 * 1024
+    raw = eml("receipt-and-exe.eml")
+    size = len((FIXTURES / "receipt.pdf").read_bytes())
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a PDF over the cap must not be opened")
+
+    monkeypatch.setattr(mailtext, "PDF_MAX_BYTES", size - 1)
+    monkeypatch.setattr(pdfplumber, "open", refuse)
+    assert attachment_texts(raw, 4000)[0][1] == ""
+    monkeypatch.undo()
+    monkeypatch.setattr(mailtext, "PDF_MAX_BYTES", size)
+    assert attachment_texts(raw, 4000)[0][1] == "Total 88.00 CNY"
+
+
+def test_pdfplumber_is_asked_for_the_first_ten_pages_only(monkeypatch):
+    asked = {}
+    real_open = pdfplumber.open
+
+    def spy(stream, *args, **kwargs):
+        asked.update(kwargs)
+        return real_open(stream, *args, **kwargs)
+
+    monkeypatch.setattr(pdfplumber, "open", spy)
+    assert attachment_texts(eml("receipt-and-exe.eml"), 4000)[0][1] == "Total 88.00 CNY"
+    assert list(asked["pages"]) == list(range(1, 11))

@@ -23,6 +23,7 @@ from email import message_from_bytes, policy
 from email.errors import MessageError
 from email.header import decode_header, make_header
 from email.message import Message
+from email.parser import BytesHeaderParser
 from email.utils import getaddresses, parsedate_to_datetime
 from html import unescape
 from html.parser import HTMLParser
@@ -33,6 +34,7 @@ from .settings import MailError
 FILENAME_LIMIT = 100
 HEADER_LIMIT = 998  # a header value, as one line (the line length of RFC 5322)
 PDF_PAGES = 10  # the pages of a PDF that are read
+PDF_MAX_BYTES = 5 * 1024 * 1024  # a bigger PDF is not read at all: slow, and a likely trap
 
 # Lone surrogates: what the parser makes of bytes it could not decode (U+DC80 to U+DCFF stand
 # for the bytes 0x80 to 0xFF), and what no text may carry out of here.
@@ -41,10 +43,12 @@ TEXT_TYPES = ("text/plain", "text/html")
 PDF_TYPES = ("application/pdf", "application/x-pdf")
 
 # What the stdlib parsers raise on hostile input where they usually record a defect. No mail may
-# crash a command: on any of these a header is kept as it came, and a part has no text.
+# crash a command: on any of these a header is kept as it came, and a part has no text. The parser
+# and the writer recurse once per level of nesting, so a crafted mail of thousands of nested parts
+# raises RecursionError.
 PARSE_ERRORS = (
     AssertionError, AttributeError, IndexError, KeyError, LookupError, TypeError, ValueError,
-    MessageError)
+    MessageError, RecursionError)
 
 
 @dataclass(frozen=True)
@@ -163,10 +167,6 @@ def _date(msg: Message) -> str:
 # --- parts -------------------------------------------------------------------------------------
 
 
-def _message(raw: bytes) -> Message:
-    return message_from_bytes(raw, policy=policy.default)
-
-
 def _leaves(msg: Message) -> Iterator[Message]:
     """The parts that hold content, in MIME order. An attached message (message/rfc822) is one
     part: what it holds is not the mail's. A loop, not recursion: nesting may be deep."""
@@ -202,7 +202,7 @@ def _payload(part: Message) -> bytes:
         try:
             inner = part.get_payload(0)
             return inner.as_bytes() if isinstance(inner, Message) else b""
-        except PARSE_ERRORS:  # a message that cannot be written back
+        except PARSE_ERRORS:  # a message that cannot be written back, or nests too deep for it
             return b""
     try:
         data = part.get_payload(decode=True)
@@ -233,6 +233,17 @@ def _structure(msg: Message) -> tuple[Message | None, list[Message]]:
     return body, [part for part in leaves if not _is_text_of_mail(part)]
 
 
+def _read(raw: bytes) -> tuple[Message, Message | None, list[Message]]:
+    """The mail, its body part and its attachments. The stdlib parser recurses once per level of
+    nesting: a mail it cannot parse (thousands of nested parts) is read for its headers only, with
+    no body and no attachments."""
+    try:
+        msg = message_from_bytes(raw, policy=policy.default)
+    except PARSE_ERRORS:
+        return BytesHeaderParser(policy=policy.default).parsebytes(raw), None, []
+    return msg, *_structure(msg)
+
+
 def _attachment(index: int, part: Message) -> Attachment:
     name = clean(_filename(part) or "", FILENAME_LIMIT)
     return Attachment(
@@ -252,8 +263,7 @@ def _body(part: Message | None) -> str:
 def parse(raw: bytes) -> Parsed:
     """The mail of the exact bytes `raw`. Header values are one line each, without control or
     invisible characters; the body is plain text and is not cut (the reader cuts it)."""
-    msg = _message(raw)
-    body, files = _structure(msg)
+    msg, body, files = _read(raw)
     senders = _addresses(msg, "From")
     name, addr = senders[0] if senders else ("", "")
     return Parsed(
@@ -340,15 +350,18 @@ def html_to_text(html: str) -> str:
 
 
 def _pdf_text(data: bytes, limit: int) -> str:
-    """The text of the first PDF_PAGES pages, read from memory; "" for a PDF pdfplumber cannot
-    read (broken, encrypted)."""
+    """The text of the first PDF_PAGES pages, read from memory; "" for a PDF over PDF_MAX_BYTES
+    and for one pdfplumber cannot read (broken, encrypted). pdfplumber is asked for those pages
+    only, so it makes no page object for the others."""
+    if len(data) > PDF_MAX_BYTES:
+        return ""
     import pdfplumber  # here: a slow import that only PDFs need
 
     logging.getLogger("pdfminer").setLevel(logging.ERROR)  # no warnings about odd PDFs on stderr
     pages: list[str] = []
     try:
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages[:PDF_PAGES]:
+        with pdfplumber.open(io.BytesIO(data), pages=list(range(1, PDF_PAGES + 1))) as pdf:
+            for page in pdf.pages:
                 pages.append(page.extract_text() or "")
                 if sum(len(p) for p in pages) >= limit:
                     break
@@ -373,7 +386,7 @@ def _file_text(part: Message, attachment: Attachment, limit: int) -> str:
 def attachment_texts(raw: bytes, limit: int) -> list[tuple[Attachment, str]]:
     """Every attachment with its text cut to `limit` characters: the text of `text/*` parts and
     of PDFs; "" for every other type, which is never opened."""
-    _, files = _structure(_message(raw))
+    _, _, files = _read(raw)
     found = []
     for index, part in enumerate(files, 1):
         attachment = _attachment(index, part)
@@ -383,7 +396,7 @@ def attachment_texts(raw: bytes, limit: int) -> list[tuple[Attachment, str]]:
 
 def attachment_bytes(raw: bytes, index: int) -> tuple[Attachment, bytes]:
     """Attachment number `index` (from 1, as `Parsed.attachments` numbers them) and its bytes."""
-    _, files = _structure(_message(raw))
+    _, _, files = _read(raw)
     if not 1 <= index <= len(files):
         raise MailError(f"the mail has no attachment {index}: it has {len(files)}")
     part = files[index - 1]
