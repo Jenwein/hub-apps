@@ -25,6 +25,7 @@ from mailtest import (
     ROOT,
     SEED,
     Hub,
+    SmtpProxy,
     windows_launcher,
     write_mailboxes,
     write_placeholder_config,
@@ -113,12 +114,13 @@ GREENMAIL_FOLDERS = ("Sent", "Trash", "Archive")  # INBOX is there for every use
 
 
 @pytest.fixture
-def greenmail_hub(hub, capsys) -> Hub:
+def greenmail_hub(hub, capsys, request) -> Hub:
     """The hub, set up against a GreenMail server: skips unless MAIL_TEST_IMAP=host:port is set.
 
     A fresh mailbox `test` (see GREENMAIL_BOX): provider gmail, the address `test-<uuid>@localhost`,
     IMAP at MAIL_TEST_IMAP and SMTP at MAIL_TEST_SMTP (default: the IMAP host, port 3025), both
     without TLS, `save_copy`, the password sent by `login` (GreenMail refuses AUTHENTICATE PLAIN),
+    SMTP through an SmtpProxy (himalaya cannot read the server name GreenMail announces),
     and the folders INBOX, Sent, Trash and Archive (made over IMAP). The server takes any password
     (authentication is off) and makes the user on first login. The password `x` is stored as a
     secret, `mx configure` has written the himalaya config, and the password command of that
@@ -131,6 +133,8 @@ def greenmail_hub(hub, capsys) -> Hub:
     imap_host, _, imap_port = target.rpartition(":")
     smtp = os.environ.get("MAIL_TEST_SMTP") or f"{imap_host}:3025"
     smtp_host, _, smtp_port = smtp.rpartition(":")
+    proxy = SmtpProxy((smtp_host, int(smtp_port)))
+    request.addfinalizer(proxy.stop)
     address = f"test-{uuid.uuid4().hex}@localhost"
     write_mailboxes(hub, f"""[[mailbox]]
 name = "{GREENMAIL_BOX}"
@@ -139,8 +143,8 @@ provider = "gmail"
 imap_host = "{imap_host}"
 imap_port = {int(imap_port)}
 imap_tls = "none"
-smtp_host = "{smtp_host}"
-smtp_port = {int(smtp_port)}
+smtp_host = "127.0.0.1"
+smtp_port = {proxy.port}
 smtp_tls = "none"
 save_copy = true
 sasl = "login"

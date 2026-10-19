@@ -129,7 +129,8 @@ def test_send_then_search_then_read_keeps_unseen(ctx, hima):
 @pytest.mark.greenmail
 def test_status_and_fetch_dates(ctx, hima):
     address = ctx.mailbox(BOX).address
-    now = datetime.now(UTC).replace(microsecond=0)
+    # Received at half past nine: GreenMail answered 00:33 for a mail appended at 12:33.
+    now = datetime.now(UTC).replace(hour=9, minute=30, second=0, microsecond=0)
     old, recent = now - timedelta(days=10), now - timedelta(days=2)
 
     validity, first = hima.status(BOX, "INBOX")

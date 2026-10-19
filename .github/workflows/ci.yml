@@ -90,41 +90,6 @@ jobs:
           EOF
           echo "MAIL_TEST_IMAP=localhost:3143" >> "$GITHUB_ENV"
 
-      - name: Probe GreenMail
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        run: |
-          python3 - <<'EOF'
-          import socket
-
-          def talk(port, lines):
-              s = socket.create_connection(("localhost", port), timeout=5)
-
-              def read():
-                  s.settimeout(1.0)
-                  data = b""
-                  try:
-                      while True:
-                          chunk = s.recv(4096)
-                          if not chunk:
-                              break
-                          data += chunk
-                  except OSError:
-                      pass
-                  return data
-
-              print(port, "<-", read())
-              for line in lines:
-                  s.sendall(line)
-                  print(port, "->", line)
-                  print(port, "<-", read())
-              s.close()
-
-          talk(3025, [b"EHLO probe\r\n", b"AUTH LOGIN\r\n", b"QUIT\r\n"])
-          talk(3143, [b"a1 CAPABILITY\r\n", b"a2 LOGIN probe@localhost x\r\n",
-                      b"a3 CAPABILITY\r\n", b"a4 LOGOUT\r\n"])
-          EOF
-
       - run: uv run ruff check .
 
       # Skipped tests exit 0, so make sure the greenmail tests really ran where GreenMail is up.
