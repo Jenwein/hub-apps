@@ -230,7 +230,7 @@ If step 3 left something only the user can do (installing Tailscale, logging in,
 enabling Serve), tell them the exact commands, run
 `cc-hub app setup-state ledger waiting --note "<what is left>"`
 (for example `--note "install Tailscale and run sudo tailscale up"`), and stop:
-do not register the scheduled tasks or mark the app done. When the user says it
+do not register the scheduled task or mark the app done. When the user says it
 is done, run this file again from the top; finished steps are skipped. Linger
 (step 2) is not one of these: it never holds the setup up.
 
@@ -240,5 +240,7 @@ that charts will show Chinese as boxes until they install one, and give them
 the command to run when they like, such as `sudo apt install fonts-noto-cjk`
 on Debian or Ubuntu. Installing it needs root: never run `sudo` yourself.
 
-When nothing is left, the scheduled tasks and the rest are the `hub-apps`
-skill's job.
+When nothing is left, the scheduled task, the report section and the rest are
+the `hub-apps` skill's job. The app's only report section, in the monthly
+report, has no command, so there is nothing to approve; the reminder to export
+the bills comes with that report, so the skill offers to turn it on.

@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -45,3 +46,11 @@ def test_installs_from_the_tap(tmp_path):
     assert (hub / "apps/ledger/app.toml").exists()
     assert (hub / "ledger/main.beancount").exists()  # seeded
     assert (hub / "ledger/.gitignore").read_text("utf-8").strip() == "inbox/"
+
+    # cc-hub reads the monthly reminder as an instruction section and registers only `prices`.
+    sections = json.loads(run("report", "list", "--json").stdout)["sections"]
+    assert [(s["app"], s["period"], s["kind"], s["error"]) for s in sections] == [
+        ("ledger", "monthly", "instruction", None)
+    ]
+    tasks = json.loads(run("cron", "list", "--json").stdout)
+    assert [t["name"] for t in tasks if t["source"] == "ledger"] == ["ledger/prices"]

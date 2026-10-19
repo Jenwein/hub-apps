@@ -33,7 +33,8 @@ def test_seed_opens_no_placeholder(make_ledger):
 
 def test_app_toml_fields():
     data = tomllib.loads((APP / "app.toml").read_text("utf-8"))
-    assert data["app"]["name"] == "ledger" and data["app"]["min_hub"] == "0.4.0"
+    # reports/ needs cc-hub 0.7.0
+    assert data["app"]["name"] == "ledger" and data["app"]["min_hub"] == "0.7.0"
     assert data["data"]["dirs"] == ["ledger"]
     assert {r["bin"] for r in data["requires"]} == {
         "fava", "bean-check", "bean-query", "bean-price", "double-entry-generator", "uv"}

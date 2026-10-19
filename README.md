@@ -21,7 +21,7 @@ Or ask your agent in the chat: "Install the ledger app from Jenwein/hub-apps."
 `cc-hub app install` prints what the app needs (software, scripts, scheduled
 tasks) and changes nothing. When you agree, run the confirm command it printed,
 or tell your agent to. The agent then installs the software you approve and
-asks the setup questions.
+asks the setup questions. The ledger app needs cc-hub 0.7.0 or later.
 
 | Command | What it does | Example |
 |---|---|---|
@@ -54,10 +54,13 @@ in your language. Account names are English by default and yours to change.
 - **Covered.** Everyday income and spending, bank cards, the sub-accounts of
   Alipay and WeChat, credit cards and Huabei, loans you gave and took,
   reimbursements, and shares and funds with daily prices.
-- **Scheduled tasks**, in the server's local time: `prices` runs on weekdays
-  at 18:00 and updates the prices of your investments (it does nothing
-  without any); `monthly` runs on the 1st at 09:00 and reminds you to export
-  last month's bills, with the money still owed to you and by you.
+- **Prices.** A scheduled task runs on weekdays at 18:00, in the server's
+  local time, and updates the prices of your investments (it does nothing
+  without any). It writes to the chat only when something fails.
+- **Monthly report.** The ledger adds a part to the hub's monthly report (the
+  1st, 09:00 unless you move it): a reminder to export last month's bills,
+  with the money still owed to you and by you. During setup the agent offers
+  to turn the monthly report on.
 
 ### Software it installs
 
@@ -118,7 +121,7 @@ How much did I spend on food last month?
 Chart this month's spending
 ```
 
-**Once a month, import the bills.** On the 1st the bot reminds you. Export
+**Once a month, import the bills.** On the 1st the monthly report reminds you. Export
 last month's bills from each platform and bank and send the files to the chat.
 Once a month is easiest, and WeChat exports at most three months at a time.
 Bills often come in a zip with a password: unzip it yourself and send the file
