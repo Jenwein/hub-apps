@@ -118,11 +118,12 @@ def greenmail_hub(hub, capsys) -> Hub:
 
     A fresh mailbox `test` (see GREENMAIL_BOX): provider gmail, the address `test-<uuid>@localhost`,
     IMAP at MAIL_TEST_IMAP and SMTP at MAIL_TEST_SMTP (default: the IMAP host, port 3025), both
-    without TLS, `save_copy`, and the folders INBOX, Sent, Trash and Archive (made over IMAP). The
-    server takes any password (authentication is off) and makes the user on first login. The
-    password `x` is stored as a secret, `mx configure` has written the himalaya config, and the
-    password command of that config has run once, which also fills uv's cache for the script (the
-    first call of himalaya would otherwise spend its timeout on it).
+    without TLS, `save_copy`, the password sent by `login` (GreenMail refuses AUTHENTICATE PLAIN),
+    and the folders INBOX, Sent, Trash and Archive (made over IMAP). The server takes any password
+    (authentication is off) and makes the user on first login. The password `x` is stored as a
+    secret, `mx configure` has written the himalaya config, and the password command of that
+    config has run once, which also fills uv's cache for the script (the first call of himalaya
+    would otherwise spend its timeout on it).
     """
     target = os.environ.get("MAIL_TEST_IMAP")
     if not target:
@@ -142,6 +143,7 @@ smtp_host = "{smtp_host}"
 smtp_port = {int(smtp_port)}
 smtp_tls = "none"
 save_copy = true
+sasl = "login"
 
 [mailbox.folders]
 inbox = "INBOX"

@@ -190,6 +190,29 @@ imap_tls = "starttls"
     assert accounts["plain"]["imap"]["starttls"] is True
 
 
+def test_a_mailbox_can_send_its_password_by_login(hub):
+    write_mailboxes(hub, """[[mailbox]]
+name = "login"
+address = "me@localhost"
+provider = "gmail"
+sasl = "login"
+
+[[mailbox]]
+name = "plain"
+address = "me@example.org"
+provider = "gmail"
+""")
+    ctx = load(hub.root)
+    accounts = himalaya_config(ctx)["accounts"]
+    for backend in ("imap", "smtp"):
+        assert accounts["login"][backend]["sasl"] == {"login": {
+            "username": "me@localhost", "password": {"command": fetch_command(ctx, "login")}}}
+        assert list(accounts["plain"][backend]["sasl"]) == ["plain"]
+    carillon = carillon_config(ctx)["accounts"]
+    assert list(carillon["login"]["imap"]["sasl"]) == ["login"]
+    assert list(carillon["plain"]["imap"]["sasl"]) == ["plain"]
+
+
 def test_folder_aliases_come_from_mailboxes_toml(hub):
     write_mailboxes(hub, """\
 [[mailbox]]

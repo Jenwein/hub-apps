@@ -67,7 +67,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           docker run -d --name greenmail -p 3143:3143 -p 3025:3025 \
-            -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled' \
+            -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.verbose' \
             greenmail/standalone:2.1.3
           # An open port is not enough (the published port accepts before the JVM is up), so wait
           # for the IMAP and SMTP greetings, for at most 60 seconds.
@@ -89,6 +89,41 @@ jobs:
           sys.exit("GreenMail did not answer on 3143 and 3025 within 60 seconds")
           EOF
           echo "MAIL_TEST_IMAP=localhost:3143" >> "$GITHUB_ENV"
+
+      - name: Probe GreenMail
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          python3 - <<'EOF'
+          import socket
+
+          def talk(port, lines):
+              s = socket.create_connection(("localhost", port), timeout=5)
+
+              def read():
+                  s.settimeout(1.0)
+                  data = b""
+                  try:
+                      while True:
+                          chunk = s.recv(4096)
+                          if not chunk:
+                              break
+                          data += chunk
+                  except OSError:
+                      pass
+                  return data
+
+              print(port, "<-", read())
+              for line in lines:
+                  s.sendall(line)
+                  print(port, "->", line)
+                  print(port, "<-", read())
+              s.close()
+
+          talk(3025, [b"EHLO probe\r\n", b"AUTH LOGIN\r\n", b"QUIT\r\n"])
+          talk(3143, [b"a1 CAPABILITY\r\n", b"a2 LOGIN probe@localhost x\r\n",
+                      b"a3 CAPABILITY\r\n", b"a4 LOGOUT\r\n"])
+          EOF
 
       - run: uv run ruff check .
 

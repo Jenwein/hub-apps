@@ -73,11 +73,12 @@ def hook_command(ctx: Ctx, mailbox: str) -> list[str]:
 
 
 def credentials(ctx: Ctx, mb: Mailbox) -> dict:
-    """The `sasl` table: a password or a token is fetched by a command, never written here."""
+    """The `sasl` table: a password or a token is fetched by a command, never written here. A
+    password goes by `plain` (AUTHENTICATE PLAIN) unless the mailbox says `sasl = "login"`."""
     if mb.auth == "oauth":
         return {"xoauth2": {
             "username": mb.address, "token": {"command": oauth_token_command(ctx, mb.name)}}}
-    return {"plain": {
+    return {mb.sasl: {
         "username": mb.address, "password": {"command": fetch_command(ctx, mb.name)}}}
 
 

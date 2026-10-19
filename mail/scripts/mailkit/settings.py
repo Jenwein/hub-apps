@@ -16,6 +16,7 @@ class MailError(Exception):
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 
 TLS_MODES = ("tls", "starttls", "none")
+SASL_MODES = ("plain", "login")  # how a password login goes: AUTHENTICATE PLAIN, or LOGIN
 FOLDER_ROLES = ("inbox", "sent", "trash", "archive")
 
 
@@ -64,6 +65,7 @@ class Mailbox:
     imap_id: bool
     save_copy: bool
     folders: dict[str, str]  # role -> the server's folder name; "" = not known yet
+    sasl: str = "plain"  # how a password is sent (SASL_MODES); a server that refuses PLAIN: login
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,9 @@ def _mailbox(entry: dict, index: int) -> Mailbox:
     if provider is None:
         raise MailError(
             f"{where}: provider {provider_name!r} is not one of {', '.join(PROVIDERS)}")
+    sasl = _str(entry, "sasl", "plain", f"{where}: sasl")
+    if sasl not in SASL_MODES:
+        raise MailError(f"{where}: sasl must be one of {', '.join(SASL_MODES)}, got {sasl!r}")
     folders = {"inbox": "INBOX", "sent": "", "trash": "", "archive": ""}
     given = _table(entry, "folders", f"{where}: folders")
     for role in FOLDER_ROLES:
@@ -158,6 +163,7 @@ def _mailbox(entry: dict, index: int) -> Mailbox:
         imap_id=provider.imap_id,
         save_copy=_bool(entry, "save_copy", provider.save_copy, f"{where}: save_copy"),
         folders=folders,
+        sasl=sasl,
     )
 
 

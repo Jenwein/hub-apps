@@ -83,6 +83,7 @@ def test_provider_defaults(hub):
     assert (qq.address, qq.display_name, qq.provider) == ("me@qq.com", "Me", "qq")
     assert qq.save_copy and not gmail.save_copy and gmail.display_name == ""
     assert qq.folders == {"inbox": "INBOX", "sent": "", "trash": "", "archive": ""}
+    assert qq.sasl == gmail.sasl == "plain"
 
 
 def test_overrides_apply(hub):
@@ -98,6 +99,7 @@ imap_tls = "none"
 smtp_host = "y"
 smtp_port = 3025
 smtp_tls = "starttls"
+sasl = "login"
 
 [mailbox.folders]
 sent = "Sent Messages"
@@ -113,6 +115,7 @@ imap_port = 1993
     local = boxes["local"]
     assert local.imap == Server("x", 3143, "none") and local.smtp == Server("y", 3025, "starttls")
     assert not local.save_copy and local.imap_id  # the rest still comes from the provider
+    assert local.sasl == "login" and boxes["port-only"].sasl == "plain"
     assert local.folders == {"inbox": "INBOX", "sent": "Sent Messages", "trash": "",
                              "archive": "Archive"}
     assert boxes["port-only"].imap == Server("imap.qq.com", 1993, "tls")
@@ -140,6 +143,8 @@ def entry(**keys) -> str:
     (entry(smtp_port="0"), ['"box"', "smtp_port"]),
     (entry(imap_host="3"), ['"box"', "imap_host", "string"]),
     (entry(save_copy='"yes"'), ['"box"', "save_copy", "true or false"]),
+    (entry(sasl='"scram"'), ['"box"', "sasl", "plain, login", "scram"]),
+    (entry(sasl="1"), ['"box"', "sasl", "string"]),
     (entry(display_name="1"), ['"box"', "display_name", "string"]),
     (entry() + '[mailbox.folders]\nsent = 1\n', ['"box"', "folders.sent", "string"]),
     ('mailbox = "qq"\n', ["[[mailbox]]"]),
