@@ -24,6 +24,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "show_no_text": "(the mail has no text)",
         "show_cut": "[the body goes on: cut at {limit} characters]",
         "unknown": "unknown",
+        "show_bcc": "Bcc: {value}",
+        "draft_forwarded": "the forwarded mail",
+        "code_line": "To send draft {id}, reply with this code (valid for 24 hours): {code}",
+        "quote_header": "On {date}, {sender} wrote:",
     },
     "zh": {
         "chat_hello": "邮件已连接到这个聊天。以后你邮箱的草稿、确认码和提醒都会发到这里。",
@@ -39,6 +43,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "show_no_text": "（这封邮件没有正文）",
         "show_cut": "[正文未完：已在 {limit} 个字符处截断]",
         "unknown": "未知",
+        "show_bcc": "密送：{value}",
+        "draft_forwarded": "转发的原邮件",
+        "code_line": "要发送草稿 {id}，请回复这个确认码（24 小时内有效）：{code}",
+        "quote_header": "{date}，{sender} 写道：",
     },
 }
 

@@ -16,6 +16,7 @@ from typing import NoReturn
 
 from . import (
     chat,
+    compose,
     configs,
     context,
     himalaya,
@@ -313,6 +314,63 @@ def run_move(args: argparse.Namespace) -> None:
     print_json(message.move(ctx, himalaya.Himalaya(ctx), args.n, args.to))
 
 
+def read_text() -> str:
+    """The text on stdin, as UTF-8 (a byte order mark is dropped)."""
+    try:
+        return read_stdin_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise MailError("the text on stdin is not UTF-8") from None
+
+
+def run_draft(args: argparse.Namespace) -> None:
+    body = read_text()
+    ctx = load_ctx(args)
+    print_json(compose.new_draft(
+        ctx, args.mailbox, args.to, args.cc, args.bcc, args.subject, body, args.attach))
+
+
+def run_reply(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(compose.reply(
+        ctx, himalaya.Himalaya(ctx), args.n, args.intent, args.all, args.mailbox))
+
+
+def run_forward(args: argparse.Namespace) -> None:
+    note = "" if vault.at_terminal() else read_text()  # a person at a terminal is not asked
+    ctx = load_ctx(args)
+    print_json(compose.forward(ctx, himalaya.Himalaya(ctx), args.n, args.to, note, args.mailbox))
+
+
+def run_revise(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(compose.revise(ctx, himalaya.Himalaya(ctx), args.draft, args.instruction))
+
+
+def run_draft_update(args: argparse.Namespace) -> None:
+    body = read_text() if args.body else None
+    ctx = load_ctx(args)
+    print_json(compose.update(
+        ctx, args.draft, to=args.to, cc=args.cc, bcc=args.bcc, subject=args.subject,
+        attach=args.attach, body=body))
+
+
+def run_confirm(args: argparse.Namespace) -> None:
+    print_json(compose.confirm(load_ctx(args), args.draft))
+
+
+def run_send(args: argparse.Namespace) -> None:
+    ctx = load_ctx(args)
+    print_json(compose.send(ctx, himalaya.Himalaya(ctx), args.draft, args.code))
+
+
+def run_drafts(args: argparse.Namespace) -> None:
+    print_json(compose.listing(load_ctx(args)))
+
+
+def run_discard(args: argparse.Namespace) -> None:
+    print_json(compose.discard(load_ctx(args), args.draft))
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -462,6 +520,78 @@ def build_parser() -> Parser:
     p.add_argument("n", type=positive_int, help=number)
     p.add_argument("--to", required=True, choices=message.MOVE_TARGETS, help="where to")
     p.set_defaults(func=run_move)
+
+    address = "an email address (repeat for several)"
+    p = sub.add_parser(
+        "draft", help="write a mail, the body on stdin: the draft and the code that sends it go "
+        "to the private chat, never here")
+    p.add_argument("--mailbox", required=True, metavar="M", help="the mailbox it is sent from")
+    p.add_argument("--to", action="append", required=True, metavar="A", help=address)
+    p.add_argument("--cc", action="append", default=[], metavar="A", help=address)
+    p.add_argument("--bcc", action="append", default=[], metavar="A", help=address)
+    p.add_argument("--subject", required=True, metavar="S")
+    p.add_argument(
+        "--attach", action="append", default=[], metavar="PATH", help="a file (repeat for several)")
+    p.set_defaults(func=run_draft)
+
+    p = sub.add_parser(
+        "reply", help="the reader writes a reply to a listed mail as the user wants it; the "
+        "draft goes to the private chat")
+    p.add_argument("n", type=positive_int, help=number)
+    p.add_argument("--intent", required=True, metavar="TEXT", help="what the user wants to say")
+    p.add_argument(
+        "--all", action="store_true", help="copy everyone the mail went to (To and Cc)")
+    p.add_argument(
+        "--mailbox", metavar="M", help="send from this mailbox (default: the mail's own)")
+    p.set_defaults(func=run_reply)
+
+    p = sub.add_parser(
+        "forward", help="forward a listed mail as an attachment; a note for it on stdin")
+    p.add_argument("n", type=positive_int, help=number)
+    p.add_argument("--to", action="append", required=True, metavar="A", help=address)
+    p.add_argument(
+        "--mailbox", metavar="M", help="send from this mailbox (default: the mail's own)")
+    p.set_defaults(func=run_forward)
+
+    draft_id = "the id of the draft, such as d1a2b3c"
+    p = sub.add_parser(
+        "revise", help="the reader rewrites a reply it wrote as the user says (mx reply drafts "
+        "only)")
+    p.add_argument("draft", help=draft_id)
+    p.add_argument("--instruction", required=True, metavar="TEXT", help="the user's words")
+    p.set_defaults(func=run_revise)
+
+    given = "replaces the old list; repeat for several, \"\" for none"
+    p = sub.add_parser(
+        "draft-update", help="change a draft: the change and a new code go to the private chat")
+    p.add_argument("draft", help=draft_id)
+    p.add_argument("--to", action="append", metavar="A", help=given)
+    p.add_argument("--cc", action="append", metavar="A", help=given)
+    p.add_argument("--bcc", action="append", metavar="A", help=given)
+    p.add_argument("--subject", metavar="S")
+    p.add_argument("--attach", action="append", metavar="PATH", help=given)
+    p.add_argument(
+        "--body", action="store_true", help="a new body, on stdin, written by you")
+    p.set_defaults(func=run_draft_update)
+
+    p = sub.add_parser(
+        "confirm", help="a new code for a draft (after the old one expired, was void, or the "
+        "send failed)")
+    p.add_argument("draft", help=draft_id)
+    p.set_defaults(func=run_confirm)
+
+    p = sub.add_parser(
+        "send", help="send a draft with the code the user replied with in the chat")
+    p.add_argument("draft", help=draft_id)
+    p.add_argument("--code", required=True, metavar="CODE", help="the user's code")
+    p.set_defaults(func=run_send)
+
+    p = sub.add_parser("drafts", help="the drafts not sent yet")
+    p.set_defaults(func=run_drafts)
+
+    p = sub.add_parser("discard", help="throw a draft away")
+    p.add_argument("draft", help=draft_id)
+    p.set_defaults(func=run_discard)
 
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")

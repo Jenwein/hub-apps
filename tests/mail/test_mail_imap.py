@@ -1,4 +1,4 @@
-"""The Himalaya wrapper and `mx list` against a real server: GreenMail (marker `greenmail`).
+"""The Himalaya wrapper and the mx commands against a real server: GreenMail (marker `greenmail`).
 
 The fixture `greenmail_hub` (conftest.py) skips these unless MAIL_TEST_IMAP=host:port is set; CI
 starts GreenMail in Docker on Linux, and the step "Check the greenmail tests ran" fails if any of
@@ -12,15 +12,17 @@ Every test has a fresh user, so its INBOX starts empty. Mail is put into a folde
 """
 
 import imaplib
+import io
 import json
 import re
 import socket
 import socketserver
+import sys
 import threading
 import time
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
-from email import policy
+from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from uuid import uuid4
@@ -258,6 +260,103 @@ def test_show_and_move_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, cap
     [trashed] = hima.search(BOX, "Trash", [], 10)
     assert trashed.subject == subject
     assert hima.raw(BOX, "Trash", trashed.id) == original
+
+
+def inbox_of(ctx, address: str, count: int, seconds: float = 15.0) -> list[bytes]:
+    """The mails in the INBOX of another GreenMail user, as bytes, once there are `count` of
+    them, else after `seconds` whatever is there. GreenMail makes a user on delivery or on the
+    first login and takes any password."""
+    box = ctx.mailbox(BOX)
+    deadline = time.monotonic() + seconds
+    while True:
+        conn = imaplib.IMAP4(box.imap.host, box.imap.port, timeout=30)
+        found: list[bytes] = []
+        try:
+            conn.login(address, GREENMAIL_SECRET)
+            answer, _ = conn.select("INBOX", readonly=True)
+            assert answer == "OK"
+            answer, data = conn.uid("SEARCH", None, "ALL")
+            assert answer == "OK", data
+            for uid in data[0].split():
+                answer, parts = conn.uid("FETCH", uid, "(BODY.PEEK[])")
+                assert answer == "OK", parts
+                found += [part[1] for part in parts if isinstance(part, tuple)]
+        finally:
+            with suppress(imaplib.IMAP4.error, OSError):
+                conn.logout()
+        if len(found) >= count or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.3)
+
+
+CODE_AT_END = re.compile(r"(?<![0-9])([0-9]{6})$")  # the code ends the last line
+
+
+def drafted_and_sent(greenmail_hub, fake_chat, capsys, monkeypatch, *argv: str) -> dict:
+    """`mx draft --mailbox test <argv>` with a body on stdin, then `mx send` with the code the
+    chat got: what send printed."""
+
+    def mx(*words: str, stdin: str = "") -> dict:
+        data = io.BytesIO(stdin.encode("utf-8"))
+        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(data, encoding="utf-8"))
+        code = main(["--hub", str(greenmail_hub.root), *words])
+        out = capsys.readouterr()
+        assert code == 0, out.err
+        return json.loads(out.out)
+
+    body = "Hello from the send gate.\n中文正文。\n"
+    draft = mx("draft", "--mailbox", BOX, *argv, stdin=body)["draft"]
+    code = CODE_AT_END.search(fake_chat.messages()[-1]).group(1)
+    return mx("send", draft, "--code", code)
+
+
+@pytest.mark.greenmail
+def test_send_and_sent_copy_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, capsys,
+                                             monkeypatch):
+    """A draft goes out through himalaya, 7-bit, with a Chinese subject and body; the copy is
+    appended to Sent, marked as read (save_copy, F-SAVE)."""
+    record_chat(greenmail_hub)
+    rcpt = f"rcpt-{uuid4().hex[:8]}@greenmail.test"
+    subject = f"gm-draft-{uuid4().hex[:8]} 你好"
+
+    sent = drafted_and_sent(
+        greenmail_hub, fake_chat, capsys, monkeypatch, "--to", rcpt, "--subject", subject)
+
+    assert set(sent) == {"sent", "message_id"}, sent  # no copy_failed
+    [raw] = inbox_of(ctx, rcpt, 1)
+    mail = message_from_bytes(raw, policy=policy.default)
+    assert mail["Subject"] == subject and mail["Message-ID"] == sent["message_id"]
+    assert mail["From"] == ctx.mailbox(BOX).address and mail["To"] == rcpt
+    assert "中文正文。" in mail.get_content()
+    copies = hima.search(BOX, "Sent", [], 10)
+    assert [(e.subject, e.seen) for e in copies] == [(subject, True)], copies
+    assert "\\Seen" in flags_of(ctx, "Sent", copies[0].id)
+    copy =message_from_bytes(hima.raw(BOX, "Sent", copies[0].id), policy=policy.default)
+    assert copy["Message-ID"] == sent["message_id"]
+    assert hima.search(BOX, "INBOX", [], 10) == []  # it went to someone else
+
+
+@pytest.mark.greenmail
+def test_bcc_is_stripped_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, capsys,
+                                          monkeypatch):
+    """himalaya sends to To and Bcc and strips the Bcc line (F-SEND): both get the mail and
+    neither copy names the hidden recipient. The sent copy keeps it, as the sender's record."""
+    record_chat(greenmail_hub)
+    tag = uuid4().hex[:8]
+    seen, hidden = f"to-{tag}@greenmail.test", f"bcc-{tag}@greenmail.test"
+    subject = f"gm-bcc-{tag}"
+
+    drafted_and_sent(greenmail_hub, fake_chat, capsys, monkeypatch,
+                     "--to", seen, "--bcc", hidden, "--subject", subject)
+
+    [to_copy] = inbox_of(ctx, seen, 1)
+    [bcc_copy] = inbox_of(ctx, hidden, 1)
+    for raw in (to_copy, bcc_copy):
+        assert subject.encode() in raw
+        assert not re.search(rb"(?im)^bcc:", raw), raw
+    assert hidden.encode() not in to_copy
+    [copy] = hima.search(BOX, "Sent", [], 10)
+    assert re.search(rb"(?im)^bcc: " + re.escape(hidden.encode()), hima.raw(BOX, "Sent", copy.id))
 
 
 # The proxy in front of GreenMail's SMTP port (see greenmail_hub in conftest.py). These two run
