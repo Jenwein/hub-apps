@@ -74,7 +74,8 @@ bean-price sends only the symbols, never holdings or amounts. It fetches
 prices for the commodities the user holds and skips prices that are already
 in. A price it could not fetch is reported, and changes nothing else. If
 bean-check reports an error in `ledger/prices.beancount`, undo your change to
-that file. Commit only `ledger/prices.beancount`.
+that file. Commit only `ledger/prices.beancount`. The task writes to the chat
+only when something fails.
 
 ## In bills
 
