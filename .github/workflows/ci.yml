@@ -62,7 +62,8 @@ jobs:
       # `services:` block would also apply to the Windows leg, which has no Docker), so those
       # tests are skipped on Windows. Authentication is off: GreenMail creates each mailbox on
       # first mail or login, and the tests use a fresh address per test. The SMTP port 3025 is
-      # the tests' default (MAIL_TEST_SMTP unset means <imap host>:3025).
+      # the tests' default (MAIL_TEST_SMTP unset means <imap host>:3025). `greenmail.verbose`
+      # writes the protocol lines to the container log, which the last step prints on failure.
       - name: Start GreenMail
         if: runner.os == 'Linux'
         run: |

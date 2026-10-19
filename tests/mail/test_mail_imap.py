@@ -13,6 +13,9 @@ Every test has a fresh user, so its INBOX starts empty. Mail is put into a folde
 
 import imaplib
 import re
+import socket
+import socketserver
+import threading
 import time
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -25,7 +28,7 @@ import pytest
 from mailkit.context import load
 from mailkit.himalaya import Himalaya, HimalayaError
 from mailtest import GREENMAIL_BOX as BOX
-from mailtest import GREENMAIL_SECRET
+from mailtest import GREENMAIL_SECRET, SmtpProxy, fix_server_name
 
 
 @pytest.fixture
@@ -190,3 +193,46 @@ def test_add_puts_a_seen_copy_in_sent(ctx, hima):
     assert "\\Seen" in flags_of(ctx, "Sent", copies[0].id)
     assert b"The copy of a mail that was sent." in hima.raw(BOX, "Sent", copies[0].id)
     assert hima.search(BOX, "INBOX", [], 10) == []
+
+
+# The proxy in front of GreenMail's SMTP port (see greenmail_hub in conftest.py). These two run
+# everywhere, without GreenMail.
+
+
+@pytest.mark.parametrize("line, fixed", [
+    (b"220 /172.17.0.2 GreenMail SMTP Service v2.1.3 ready\r\n",
+     b"220 localhost GreenMail SMTP Service v2.1.3 ready\r\n"),
+    (b"250-/172.17.0.2\r\n", b"250-localhost\r\n"),
+    (b"250 AUTH PLAIN LOGIN XOAUTH2\r\n", b"250 AUTH PLAIN LOGIN XOAUTH2\r\n"),
+    (b"220 mail.example.org ESMTP\r\n", b"220 mail.example.org ESMTP\r\n"),
+    (b"250 OK /172.17.0.2\r\n", b"250 OK /172.17.0.2\r\n"),  # only the server name changes
+])
+def test_fix_server_name(line, fixed):
+    assert fix_server_name(line) == fixed
+
+
+def test_the_smtp_proxy_changes_only_the_server_name_in_replies():
+    received = []
+
+    class Server(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.wfile.write(b"220 /172.17.0.2 GreenMail SMTP Service v2.1.3 ready\r\n")
+            received.append(self.rfile.readline())
+            self.wfile.write(b"250-/172.17.0.2\r\n250 AUTH PLAIN LOGIN\r\n")
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Server)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = SmtpProxy(("127.0.0.1", server.server_address[1]))
+    try:
+        client = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+        with client, client.makefile("rb") as replies:
+            greeting = replies.readline()
+            assert greeting == b"220 localhost GreenMail SMTP Service v2.1.3 ready\r\n"
+            client.sendall(b"EHLO /172.17.0.2\r\n")
+            assert replies.readline() == b"250-localhost\r\n"
+            assert replies.readline() == b"250 AUTH PLAIN LOGIN\r\n"
+    finally:
+        proxy.stop()
+        server.shutdown()
+        server.server_close()
+    assert received == [b"EHLO /172.17.0.2\r\n"]  # what the client says goes through as it is
