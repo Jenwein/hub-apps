@@ -15,7 +15,7 @@ from dataclasses import asdict
 from datetime import UTC, timedelta
 from pathlib import Path
 
-from . import chat, clock, mailtext, query, strings
+from . import chat, clock, mailtext, query, rules, strings
 from .context import Ctx
 from .himalaya import AuthError, ConnectError, Himalaya, HimalayaError
 from .paths import write_private
@@ -125,13 +125,13 @@ def show(ctx: Ctx, hima: Himalaya, n: int) -> dict:
 
 
 def look(ctx: Ctx, hima: Himalaya, n: int) -> dict:
-    """The reader's verdict on mail `n`, its attachments read too: fixed fields only. The user's
-    rules arrive with `rules.combined`; until then the reader gets none."""
+    """The reader's verdict on mail `n`, its attachments read too, sorted by the default rules and
+    the user's (`rules.combined`): fixed fields only."""
     found = query.item(ctx, n)
     raw = _read(hima, found)
     verdict = Reader(ctx.settings.reader_model).look(
         found.key, found.mailbox, mailtext.parse(raw), mailtext.attachment_texts(raw, ATTACH_LIMIT),
-        "", ctx.settings.language)
+        rules.combined(ctx), ctx.settings.language)
     return {"n": n, "verdict": {name: getattr(verdict, name) for name in VERDICT_FIELDS}}
 
 

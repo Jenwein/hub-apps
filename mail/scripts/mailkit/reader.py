@@ -82,6 +82,18 @@ class ReaderError(MailError):
     """The reader could not be run, or its answer is not usable."""
 
 
+class ReaderDown(ReaderError):
+    """The reader did not answer: claude is missing or refused, could not start, did not finish
+    in time, printed something that is not its result, or said that it failed (not logged in, a
+    usage limit, an API error). Unlike an answer that does not fit the mails, this says nothing
+    about the mails it was given: it fails for any mail."""
+
+
+# The result of claude that is an error about the answer, not about claude: the model gave no
+# output that fits the schema, which a mail can bring about.
+ANSWER_ERRORS = frozenset({"error_max_structured_output_retries"})
+
+
 # --- the prompts -------------------------------------------------------------------------------
 
 DATA_RULE = (
@@ -303,6 +315,13 @@ def _items(answer: dict, count: int) -> list[dict]:
     return [by_index[n] for n in range(1, count + 1)]
 
 
+def from_headers(parsed: Parsed) -> tuple[str, str, str]:
+    """The sender, subject and date of a verdict, from the mail's headers, never from the model:
+    the sender's name, else the address, cut to NAME_LIMIT; the subject cut to SUBJECT_LIMIT."""
+    sender = clean(parsed.sender_name, NAME_LIMIT) or clean(parsed.sender_addr, NAME_LIMIT)
+    return sender, clean(parsed.subject, SUBJECT_LIMIT), parsed.date
+
+
 def _verdict(item: dict, key: str, mailbox: str, parsed: Parsed, evidence: str) -> Verdict:
     """The verdict of one item. `evidence` is what the sender wrote of what the reader got (see
     `_mail`). The model's own words for the tier or the category never go into an error: they
@@ -313,12 +332,13 @@ def _verdict(item: dict, key: str, mailbox: str, parsed: Parsed, evidence: str) 
     if category not in CATEGORIES:
         raise ReaderError(
             f"the reader gave a category that is not one of {', '.join(CATEGORIES)}")
+    sender, subject, when = from_headers(parsed)
     return Verdict(
         key=key,
         mailbox=mailbox,
-        sender=clean(parsed.sender_name, NAME_LIMIT) or clean(parsed.sender_addr, NAME_LIMIT),
-        subject=clean(parsed.subject, SUBJECT_LIMIT),
-        date=parsed.date,
+        sender=sender,
+        subject=subject,
+        date=when,
         summary=_line(item.get("summary"), SUMMARY_LIMIT),
         code=_code(item.get("code"), evidence),
         amount=_amount(item.get("amount"), evidence),
@@ -331,7 +351,9 @@ def _verdict(item: dict, key: str, mailbox: str, parsed: Parsed, evidence: str) 
 
 
 def _result(out: bytes, err: bytes, status: int) -> dict:
-    """The answer in what claude printed (`--output-format json`)."""
+    """The answer in what claude printed (`--output-format json`). Output that is not claude's
+    result, or a result that says claude failed, is ReaderDown; a result without a usable answer
+    is a plain ReaderError (see ReaderDown)."""
     try:
         data = json.loads(out)
     except ValueError:  # not JSON, or not UTF-8
@@ -340,12 +362,13 @@ def _result(out: bytes, err: bytes, status: int) -> dict:
         if status:
             first = next((line for line in err.decode("utf-8", "replace").splitlines()
                           if line.strip()), "")
-            raise ReaderError(
+            raise ReaderDown(
                 f"{UNREADABLE} (claude exited with status {status}: {clean(first, 200)})")
-        raise ReaderError(UNREADABLE)
+        raise ReaderDown(UNREADABLE)
     if data.get("is_error"):
         detail = data.get("result") or data.get("subtype") or "the reader failed"
-        raise ReaderError(clean(_model_text(detail) or str(detail), 300))
+        error = ReaderError if data.get("subtype") in ANSWER_ERRORS else ReaderDown
+        raise error(clean(_model_text(detail) or str(detail), 300))
     found = data.get("structured_output")
     if isinstance(found, dict):
         return found
@@ -375,11 +398,11 @@ class Reader:
     def executable(self) -> str:
         found = shutil.which(self.exe or "claude")
         if found is None:
-            raise ReaderError(
+            raise ReaderDown(
                 "reading mail needs the Claude Code CLI (claude), which is not installed here: "
                 "install it, then run claude once in the server's terminal to sign in")
         if WINDOWS and os.path.splitext(found)[1].lower() in SCRIPT_LAUNCHERS:
-            raise ReaderError(
+            raise ReaderDown(
                 "install Claude Code with its native installer: the npm .cmd launcher mangles "
                 "the reader's arguments")
         return found
@@ -403,12 +426,12 @@ class Reader:
                     argv, cwd=empty, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, creationflags=NO_WINDOW, **extra)
             except OSError as err:
-                raise ReaderError(f"cannot run claude: {err}") from err
+                raise ReaderDown(f"cannot run claude: {err}") from err
             try:
                 out, err = proc.communicate(payload.encode("utf-8"), timeout=self.timeout)
             except subprocess.TimeoutExpired:
                 kill_tree(proc)
-                raise ReaderError(f"the reader did not answer within {self.timeout:g} s") from None
+                raise ReaderDown(f"the reader did not answer within {self.timeout:g} s") from None
             except BaseException:  # Ctrl+C: do not leave claude running
                 kill_tree(proc)
                 raise

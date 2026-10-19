@@ -23,6 +23,7 @@ from . import (
     message,
     query,
     reader,
+    rules,
     signin,
     strings,
     tools,
@@ -261,6 +262,11 @@ def run_reader_check(args: argparse.Namespace) -> None:
     print_json(reader.check(reader.Reader(ctx.settings.reader_model), ctx.settings.language))
 
 
+def run_rules(args: argparse.Namespace) -> None:
+    """Plain text, not JSON: the rules as the reader gets them."""
+    print(rules.combined(load_ctx(args)))
+
+
 def run_chat_set(args: argparse.Namespace) -> None:
     """Record the chat this runs in as the private chat, and say so in it."""
     ctx = load_ctx(args)
@@ -463,6 +469,11 @@ def build_parser() -> Parser:
     p = sub.add_parser(
         "reader-check", help="test the mail reader (claude -p with no tools) on a sample mail")
     p.set_defaults(func=run_reader_check)
+
+    p = sub.add_parser(
+        "rules", help="print the rules mail is sorted by: the app's defaults, then the user's "
+        "own (mail/rules.md), which win")
+    p.set_defaults(func=run_rules)
 
     p = sub.add_parser(
         "chat-set", help="record this chat as the private chat: drafts, codes and alerts go "

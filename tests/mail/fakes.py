@@ -9,6 +9,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# How the fakes of himalaya and claude add a line to their call log. mx may run several of them
+# at once (triage sorts batches on threads), and on Windows the appends of two processes can tear
+# each other's lines: a directory made with mkdir, which only one process can make, is the lock
+# around the append.
+LOG_APPEND = r'''
+import os as _os
+import time as _time
+
+
+def append_log(path, text):
+    lock = path + ".lock"
+    deadline = _time.monotonic() + 30
+    while True:
+        try:
+            _os.mkdir(lock)
+            break
+        except (FileExistsError, PermissionError):  # Windows denies one that is being removed
+            if _time.monotonic() > deadline:
+                raise
+            _time.sleep(0.005)
+    try:
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(text)
+    finally:
+        _os.rmdir(lock)
+'''
+
+
 # The fake himalaya (v2.2.1) answers from a JSON "server" file and logs every call.
 #
 # The server file:
@@ -61,8 +89,7 @@ STATE = {"json": False, "account": None}
 
 def finish(code):
     CALL["exit"] = code
-    with open(LOG, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(CALL) + "\n")
+    append_log(LOG, json.dumps(CALL) + "\n")
     sys.stdout.flush()
     sys.stdout.buffer.flush()
     sys.exit(code)
@@ -743,7 +770,7 @@ except Exception as err:
 
 def himalaya_body(server: Path, log: Path) -> str:
     """The fake himalaya for `make_exe`, bound to the server file and the call log."""
-    return f"SERVER = {str(server)!r}\nLOG = {str(log)!r}\n{FAKE_HIMALAYA}"
+    return f"SERVER = {str(server)!r}\nLOG = {str(log)!r}\n{LOG_APPEND}\n{FAKE_HIMALAYA}"
 
 
 @dataclass(frozen=True)
@@ -803,8 +830,7 @@ NOT_LOGGED_IN = "Not logged in · Please run /login"
 
 
 def log(entry):
-    with open(LOG, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(entry) + "\n")
+    append_log(LOG, json.dumps(entry) + "\n")
 
 
 def emit(data):
@@ -878,7 +904,7 @@ except Exception as err:
 
 def claude_body(log: Path) -> str:
     """The fake claude for `make_exe`, bound to the call log."""
-    return f"LOG = {str(log)!r}\n{FAKE_CLAUDE}"
+    return f"LOG = {str(log)!r}\n{LOG_APPEND}\n{FAKE_CLAUDE}"
 
 
 def envelope(structured: dict | None, *, result: str | None = None,

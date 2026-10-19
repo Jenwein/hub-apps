@@ -13,8 +13,10 @@ from datetime import datetime
 import pytest
 from mailkit import strings
 from mailkit.cli import main
+from mailkit.context import load
 from mailkit.mailtext import parse
 from mailkit.message import SHOW_LIMIT, original, safe_filename
+from mailkit.rules import combined
 from mailtest import (
     CHAT_PROJECT,
     CHAT_SESSION,
@@ -375,13 +377,14 @@ def test_look_returns_fixed_fields_only(mailhub, fake_himalaya, fake_claude, fak
         "reason", "phishing"]
     # Not a word of the mail but the subject and the sender's name is in the output ...
     assert "Please pay" not in out.out and "Second line" not in out.out
-    # ... the mail went to the reader, on stdin, with its attachment named and no rules yet.
+    # ... the mail went to the reader, on stdin, with its attachment named, to be sorted by the
+    # default rules and the user's.
     [call] = fake_claude.calls()
     [(_, _, mail)] = [m for m in MARKER.findall(call["stdin"])]
     assert "Please pay 25.00 USD" in mail and "a.pdf" in mail
     assert "Please pay" not in " ".join(call["argv"])
     assert call["argv"][call["argv"].index("--system-prompt") + 1].endswith(
-        "(none given: use your judgement)")
+        combined(load(mailhub.root)))
     assert fake_chat.calls() == []  # `look` has no business with the chat
 
 
