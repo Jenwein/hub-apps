@@ -19,11 +19,12 @@ from . import chat, clock, mailtext, query, strings
 from .context import Ctx
 from .himalaya import AuthError, ConnectError, Himalaya, HimalayaError
 from .paths import write_private
-from .query import EPOCH, INVISIBLE, Item, clean, when
+from .query import EPOCH, INVISIBLE, NAME_LIMIT, Item, clean, when
 from .reader import ATTACH_LIMIT, CONTROLS, Reader
 from .settings import MailError
 
-SHOW_LIMIT = 40_000  # characters of the body that `show` sends: ten chat messages, not a flood
+SHOW_LIMIT = 40_000  # characters of the whole original that `show` sends: ten chat messages
+SHOW_LIST_LIMIT = 50  # recipients of To and of Cc, and attachments, that `show` names
 CODE_LIMIT = 20  # mails of one mailbox that `code` looks at, the newest
 SEARCH_BACK_DAYS = 2  # `code` asks for mail dated after this many days before its window
 MOVE_TARGETS = ("archive", "trash")
@@ -67,30 +68,48 @@ def _plain(text: str) -> str:
     return "".join(char for char in CONTROLS.sub("", text) if char not in INVISIBLE)
 
 
+def _bounded(entries: list[str], total: int, language: str) -> list[str]:
+    """`entries` (the first SHOW_LIST_LIMIT of `total` things), and how many more there are."""
+    if total > SHOW_LIST_LIMIT:
+        return [*entries, strings.t("show_more", language, count=total - SHOW_LIST_LIMIT)]
+    return entries
+
+
 def original(parsed: mailtext.Parsed, language: str) -> str:
     """The mail as the chat shows it: From, To, Cc, Date and Subject, the attachments, a blank
-    line and the body (cut to SHOW_LIMIT characters, and a line says so)."""
+    line and the body, in the user's language. Every part is bounded: the recipients and the
+    attachments to their first SHOW_LIST_LIMIT, the whole text to SHOW_LIMIT characters, and a
+    line says when something was left out."""
+
+    def say(key: str, value: str) -> str:
+        return strings.t(key, language, value=value)
+
+    def recipients(addresses: list[str]) -> str:
+        first = addresses[:SHOW_LIST_LIMIT]
+        return ", ".join(_bounded(first, len(addresses), language))
+
     sender = parsed.sender_addr
     if parsed.sender_name:
         sender = f"{parsed.sender_name} <{sender}>"
-    lines = [f"From: {sender}"]
+    lines = [say("show_from", sender)]
     if parsed.to:
-        lines.append("To: " + ", ".join(parsed.to))
+        lines.append(say("show_to", recipients(parsed.to)))
     if parsed.cc:
-        lines.append("Cc: " + ", ".join(parsed.cc))
-    lines.append(f"Date: {parsed.date or strings.t('unknown', language)}")
-    lines.append(f"Subject: {parsed.subject}")
+        lines.append(say("show_cc", recipients(parsed.cc)))
+    lines.append(say("show_date", parsed.date or strings.t("unknown", language)))
+    lines.append(say("show_subject", parsed.subject))
     if parsed.attachments:
-        names = "; ".join(
-            f"{a.index}. {a.filename} ({a.content_type}, {a.size} bytes)"
-            for a in parsed.attachments)
+        entries = [
+            f"{a.index}. {a.filename} ({a.content_type}, "
+            f"{strings.t('show_bytes', language, size=a.size)})"
+            for a in parsed.attachments[:SHOW_LIST_LIMIT]]
+        names = "; ".join(_bounded(entries, len(parsed.attachments), language))
         lines.append(strings.t("show_attachments", language, names=names))
-    body = _plain(parsed.body).strip()
-    if not body:
-        body = strings.t("show_no_text", language)
-    elif len(body) > SHOW_LIMIT:
-        body = body[:SHOW_LIMIT] + "\n" + strings.t("show_cut", language, limit=SHOW_LIMIT)
-    return "\n".join(lines) + "\n\n" + body
+    body = _plain(parsed.body).strip() or strings.t("show_no_text", language)
+    text = "\n".join(lines) + "\n\n" + body
+    if len(text) > SHOW_LIMIT:
+        text = text[:SHOW_LIMIT] + "\n" + strings.t("show_cut", language, limit=SHOW_LIMIT)
+    return text
 
 
 def show(ctx: Ctx, hima: Himalaya, n: int) -> dict:
@@ -199,9 +218,11 @@ def safe_filename(name: str, fallback: str) -> str:
 
 
 def attachments(ctx: Ctx, hima: Himalaya, n: int) -> dict:
-    """The attachments of mail `n`: number, file name, type and size."""
+    """The attachments of mail `n`: number, file name, type and size. The agent gets this, and a
+    file name is text from the mail: it is cut to NAME_LIMIT characters like a sender's name."""
     parsed = mailtext.parse(_read(hima, query.item(ctx, n)))
-    return {"n": n, "attachments": [asdict(a) for a in parsed.attachments]}
+    return {"n": n, "attachments": [
+        {**asdict(a), "filename": clean(a.filename, NAME_LIMIT)} for a in parsed.attachments]}
 
 
 def save_attachment(ctx: Ctx, key: str, name: str, data: bytes) -> Path:
@@ -231,7 +252,7 @@ def attachment_send(ctx: Ctx, hima: Himalaya, n: int, index: int) -> dict:
         raise MailError(f"attachment {index} of #{n} is empty or cannot be read")
     name = safe_filename(attachment.filename, f"attachment-{index}")
     chat.send_file(target, save_attachment(ctx, found.key, name, data))
-    return {"sent_file": name}
+    return {"sent_file": clean(name, NAME_LIMIT)}  # the file keeps the whole name; see attachments
 
 
 # --- mark and move -----------------------------------------------------------------------------
