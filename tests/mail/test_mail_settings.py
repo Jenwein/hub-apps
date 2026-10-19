@@ -466,7 +466,7 @@ def test_context_reports_a_bad_mailbox_file_before_making_the_state_dir(hub):
 def test_cli_error_format(tmp_path, capsys):
     assert main(["--hub", str(tmp_path), "secret-status"]) == 1
     captured = capsys.readouterr()
-    assert captured.err.startswith("mx: ") and "secret-status" in captured.err
+    assert captured.err.startswith("mx: ") and "no mail/mailboxes.toml" in captured.err
     assert captured.out == ""
 
 
