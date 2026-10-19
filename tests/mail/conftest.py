@@ -3,9 +3,14 @@
 Helpers that tests import by name are in mailtest.py: nothing imports from conftest.
 """
 
+import imaplib
+import json
 import os
 import shutil
+import subprocess
 import sys
+import uuid
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -14,9 +19,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fakes import FakeHimalaya, himalaya_body
-from mailtest import ROOT, SEED, Hub, windows_launcher, write_placeholder_config
+from mailtest import (
+    GREENMAIL_BOX,
+    GREENMAIL_SECRET,
+    ROOT,
+    SEED,
+    Hub,
+    windows_launcher,
+    write_mailboxes,
+    write_placeholder_config,
+)
 
 sys.path.insert(0, str(ROOT / "mail" / "scripts"))
+
+from mailkit import vault
+from mailkit.cli import main
+from mailkit.context import load
 
 
 @pytest.fixture
@@ -89,3 +107,65 @@ def fake_himalaya(hub, tmp_path, make_exe):
     crashed = [call["argv"][1:] for call in calls if call["exit"] == 97]
     if crashed:
         pytest.fail(f"the fake himalaya crashed on: {crashed}")
+
+
+GREENMAIL_FOLDERS = ("Sent", "Trash", "Archive")  # INBOX is there for every user
+
+
+@pytest.fixture
+def greenmail_hub(hub, capsys) -> Hub:
+    """The hub, set up against a GreenMail server: skips unless MAIL_TEST_IMAP=host:port is set.
+
+    A fresh mailbox `test` (see GREENMAIL_BOX): provider gmail, the address `test-<uuid>@localhost`,
+    IMAP at MAIL_TEST_IMAP and SMTP at MAIL_TEST_SMTP (default: the IMAP host, port 3025), both
+    without TLS, `save_copy`, and the folders INBOX, Sent, Trash and Archive (made over IMAP). The
+    server takes any password (authentication is off) and makes the user on first login. The
+    password `x` is stored as a secret, `mx configure` has written the himalaya config, and the
+    password command of that config has run once, which also fills uv's cache for the script (the
+    first call of himalaya would otherwise spend its timeout on it).
+    """
+    target = os.environ.get("MAIL_TEST_IMAP")
+    if not target:
+        pytest.skip("MAIL_TEST_IMAP=host:port is not set")
+    imap_host, _, imap_port = target.rpartition(":")
+    smtp = os.environ.get("MAIL_TEST_SMTP") or f"{imap_host}:3025"
+    smtp_host, _, smtp_port = smtp.rpartition(":")
+    address = f"test-{uuid.uuid4().hex}@localhost"
+    write_mailboxes(hub, f"""[[mailbox]]
+name = "{GREENMAIL_BOX}"
+address = "{address}"
+provider = "gmail"
+imap_host = "{imap_host}"
+imap_port = {int(imap_port)}
+imap_tls = "none"
+smtp_host = "{smtp_host}"
+smtp_port = {int(smtp_port)}
+smtp_tls = "none"
+save_copy = true
+
+[mailbox.folders]
+inbox = "INBOX"
+sent = "Sent"
+trash = "Trash"
+archive = "Archive"
+""")
+    conn = imaplib.IMAP4(imap_host, int(imap_port), timeout=30)
+    try:
+        conn.login(address, GREENMAIL_SECRET)
+        for folder in GREENMAIL_FOLDERS:
+            answer, data = conn.create(folder)
+            assert answer == "OK", f"GreenMail did not create {folder}: {data}"
+    finally:
+        with suppress(imaplib.IMAP4.error, OSError):
+            conn.logout()
+    vault.store(hub.state, GREENMAIL_BOX, GREENMAIL_SECRET)
+    code = main(["--hub", str(hub.root), "configure"])
+    done = capsys.readouterr()
+    assert code == 0, done.err
+    assert "himalaya.toml" in json.loads(done.out)["written"]
+    ctx = load(hub.root)
+    fetched = subprocess.run(
+        vault.fetch_command(ctx, GREENMAIL_BOX), check=False, cwd=hub.state,
+        stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+    assert fetched.stdout == GREENMAIL_SECRET.encode(), fetched.stderr.decode("utf-8", "replace")
+    return hub

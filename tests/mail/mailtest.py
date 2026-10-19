@@ -7,6 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 SEED = ROOT / "mail" / "seed" / "mail"
 
+# The mailbox that the greenmail_hub fixture sets up, and the password it stores for it.
+GREENMAIL_BOX = "test"
+GREENMAIL_SECRET = "x"
+
 
 @dataclass(frozen=True)
 class Hub:
