@@ -1,0 +1,9 @@
+[alerts]
+enabled = false   # real-time alerts for urgent mail
+host = ""         # the machine that runs them: the one that runs cc-connect
+
+[reader]
+model = "sonnet"  # model of the tool-less reader (claude --model)
+
+[chat]
+language = ""     # the user's language for chat messages, such as zh-CN

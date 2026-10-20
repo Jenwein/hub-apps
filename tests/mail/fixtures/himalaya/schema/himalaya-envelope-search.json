@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "Address": {
+      "description": "A single email address with an optional display name.",
+      "properties": {
+        "email": {
+          "description": "The address itself.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name, `Alice` in `Alice <alice@example.org>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "type": "object"
+    },
+    "Envelope": {
+      "description": "A message summary, enough to list without fetching a body.",
+      "properties": {
+        "date": {
+          "default": null,
+          "description": "The author-claimed send time, from the `Date:` header, `None` when\nit is missing or unparseable.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flags": {
+          "default": [],
+          "description": "The flags set on the message, a sorted set since wire order means\nnothing and a duplicate is nonsense.",
+          "items": {
+            "$ref": "#/$defs/Flag"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "from": {
+          "default": [],
+          "description": "The senders.",
+          "items": {
+            "$ref": "#/$defs/Address"
+          },
+          "type": "array"
+        },
+        "has-attachment": {
+          "default": null,
+          "description": "Whether the message carries an attachment, `None` when the caller\ndid not ask or the backend cannot tell.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The identifier the backend knows the message by: an IMAP UID, a\nJMAP email id, a Maildir filename id.",
+          "type": "string"
+        },
+        "in-reply-to": {
+          "default": [],
+          "description": "The messages this one replies to, from its `In-Reply-To:` header.\n\nA list, the grammar being `1*msg-id`. Each id is normalised like\n[`Envelope::message_id`], so a client pairs a reply with its parent\nfrom a listing alone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message-id": {
+          "default": null,
+          "description": "The RFC 5322 section 3.6.4 `Message-ID:`, normalised so it is\nstable across every backend storing the message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "default": 0,
+          "description": "The size of the raw RFC 5322 message, in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subject": {
+          "default": "",
+          "description": "The `Subject:` header.",
+          "type": "string"
+        },
+        "to": {
+          "default": [],
+          "description": "The primary recipients.",
+          "items": {
+            "$ref": "#/$defs/Address"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Flag": {
+      "description": "A flag attached to an envelope, keeping its wire spelling and IANA tag.",
+      "properties": {
+        "iana": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IanaFlag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "raw": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw"
+      ],
+      "type": "object"
+    },
+    "IanaFlag": {
+      "description": "IANA-registered email keywords, per the canonical table at\n<https://www.iana.org/assignments/imap-jmap-keywords/>.\n\nDeclaration order is the derived [`Ord`], which is what gives stable\nper-keyword sorting.",
+      "oneOf": [
+        {
+          "const": "seen",
+          "description": "The message has been read.",
+          "type": "string"
+        },
+        {
+          "const": "answered",
+          "description": "The message has been replied to.",
+          "type": "string"
+        },
+        {
+          "const": "flagged",
+          "description": "The message is marked for attention.",
+          "type": "string"
+        },
+        {
+          "const": "draft",
+          "description": "The message is an unsent draft.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "A sync verb rather than a flag to propagate.\n\nAdapters round-trip `\\Deleted` so single-side workflows behave,\nbut a sync translates it into a delete on the other side.",
+          "type": "string"
+        },
+        {
+          "const": "forwarded",
+          "description": "The message has been forwarded.",
+          "type": "string"
+        },
+        {
+          "const": "junk",
+          "description": "The message is junk.",
+          "type": "string"
+        },
+        {
+          "const": "not-junk",
+          "description": "The message has been marked as not junk.",
+          "type": "string"
+        },
+        {
+          "const": "phishing",
+          "description": "The message is a phishing attempt.",
+          "type": "string"
+        },
+        {
+          "const": "important",
+          "description": "The message is marked as important.",
+          "type": "string"
+        },
+        {
+          "const": "mdn-sent",
+          "description": "A disposition notification has been sent for the message.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `envelope list` output, a table of envelopes.",
+  "properties": {
+    "envelopes": {
+      "description": "The envelopes of this page.",
+      "items": {
+        "$ref": "#/$defs/Envelope"
+      },
+      "type": "array"
+    },
+    "queued": {
+      "description": "Messages staged for creation and not pushed yet, which have no id\nand so no row.\n\nZero for every backend whose writes reach the server as they are\nmade.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "queued",
+    "envelopes"
+  ],
+  "title": "Envelopes",
+  "type": "object"
+}

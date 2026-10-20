@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "ledger" / "scripts"))
 NEEDS_EXECUTABLE = {
     "deb": "double-entry-generator",
     "cchub": "cc-hub",
+    "himalaya": "himalaya",
 }
 
 

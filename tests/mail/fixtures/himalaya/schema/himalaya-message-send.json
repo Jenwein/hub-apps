@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The confirmation line of a saved or sent message.",
+  "properties": {
+    "message": {
+      "description": "What happened, for a human.",
+      "type": "string"
+    },
+    "queueId": {
+      "description": "The queue row id of a send deferred to the store's owner, which\n`pimdir queue cancel` takes and the engine reports against.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "message"
+  ],
+  "title": "MessageRouteOutput",
+  "type": "object"
+}

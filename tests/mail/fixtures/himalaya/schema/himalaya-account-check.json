@@ -1,0 +1,50 @@
+{
+  "$defs": {
+    "BackendCheck": {
+      "description": "Outcome of checking one backend's connection.",
+      "properties": {
+        "backend": {
+          "description": "The backend that was checked.",
+          "type": "string"
+        },
+        "error": {
+          "description": "Why it did not, when it did not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "description": "Whether it answered.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "backend",
+        "ok"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `account check` output, one outcome per backend.",
+  "properties": {
+    "account": {
+      "description": "The account that was checked.",
+      "type": "string"
+    },
+    "backends": {
+      "description": "One entry per backend the account declares and `--backend` allows.",
+      "items": {
+        "$ref": "#/$defs/BackendCheck"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "account",
+    "backends"
+  ],
+  "title": "CheckReport",
+  "type": "object"
+}

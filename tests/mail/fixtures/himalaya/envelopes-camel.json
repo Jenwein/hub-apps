@@ -1,0 +1,81 @@
+{
+  "queued": 0,
+  "envelopes": [
+    {
+      "id": "1042",
+      "messageId": "inv-q3@example.org",
+      "inReplyTo": [],
+      "flags": [
+        {
+          "raw": "\\Seen",
+          "iana": "seen"
+        }
+      ],
+      "subject": "季度发票 Q3 invoice",
+      "from": [
+        {
+          "name": "Alice 财务",
+          "email": "alice@example.org"
+        }
+      ],
+      "to": [
+        {
+          "name": null,
+          "email": "me@qq.com"
+        }
+      ],
+      "date": "2026-10-19T10:00:00+08:00",
+      "size": 48210,
+      "hasAttachment": true
+    },
+    {
+      "id": "1041",
+      "messageId": null,
+      "inReplyTo": [],
+      "flags": [],
+      "subject": "",
+      "from": [],
+      "to": [],
+      "date": null,
+      "size": 0,
+      "hasAttachment": null
+    },
+    {
+      "id": "1040",
+      "messageId": "re-lunch@example.org",
+      "inReplyTo": [
+        "lunch@example.org"
+      ],
+      "flags": [
+        {
+          "raw": "\\Answered",
+          "iana": "answered"
+        },
+        {
+          "raw": "$Label1",
+          "iana": null
+        }
+      ],
+      "subject": "Re: lunch",
+      "from": [
+        {
+          "name": null,
+          "email": "bob@example.org"
+        }
+      ],
+      "to": [
+        {
+          "name": "Me",
+          "email": "me@qq.com"
+        },
+        {
+          "name": null,
+          "email": "carol@example.org"
+        }
+      ],
+      "date": "2026-10-18T04:30:00Z",
+      "size": 912,
+      "hasAttachment": false
+    }
+  ]
+}

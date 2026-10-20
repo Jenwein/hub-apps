@@ -46,5 +46,63 @@ jobs:
         if: runner.os == 'Linux'
         run: uv tool install cc-hub
 
+      # The app's own downloader (pinned tag, SHA-256 checked) puts himalaya and carillon into
+      # ~/.local/bin, so CI exercises exactly what a user runs. The himalaya marker tests and the
+      # GreenMail tests need himalaya; the alert tests that run carillon need carillon.
+      - name: Install himalaya and carillon
+        if: runner.os == 'Linux'
+        run: |
+          uv run mail/scripts/mx.py install-tool himalaya
+          uv run mail/scripts/mx.py install-tool carillon
+          himalaya --version
+          carillon --version
+
+      # GreenMail stands in for a real mail server in the tests marked `greenmail`, which skip
+      # unless MAIL_TEST_IMAP is set. It runs as a Docker container on Linux only (a job-level
+      # `services:` block would also apply to the Windows leg, which has no Docker), so those
+      # tests are skipped on Windows. Authentication is off: GreenMail creates each mailbox on
+      # first mail or login, and the tests use a fresh address per test. The SMTP port 3025 is
+      # the tests' default (MAIL_TEST_SMTP unset means <imap host>:3025). `greenmail.verbose`
+      # writes the protocol lines to the container log, which the last step prints on failure.
+      - name: Start GreenMail
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --name greenmail -p 3143:3143 -p 3025:3025 \
+            -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled -Dgreenmail.verbose' \
+            greenmail/standalone:2.1.3
+          # An open port is not enough (the published port accepts before the JVM is up), so wait
+          # for the IMAP and SMTP greetings, for at most 60 seconds.
+          python3 - <<'EOF'
+          import socket, sys, time
+
+          def greeting(port):
+              try:
+                  with socket.create_connection(("localhost", port), timeout=2) as s:
+                      return s.recv(64)
+              except OSError:
+                  return b""
+
+          deadline = time.monotonic() + 60
+          while time.monotonic() < deadline:
+              if greeting(3143).startswith(b"* OK") and greeting(3025).startswith(b"220"):
+                  sys.exit(0)
+              time.sleep(1)
+          sys.exit("GreenMail did not answer on 3143 and 3025 within 60 seconds")
+          EOF
+          echo "MAIL_TEST_IMAP=localhost:3143" >> "$GITHUB_ENV"
+
       - run: uv run ruff check .
+
+      # Skipped tests exit 0, so make sure the greenmail tests really ran where GreenMail is up.
+      - name: Check the greenmail tests ran
+        if: runner.os == 'Linux'
+        run: |
+          set -o pipefail
+          uv run pytest -q -rs -m greenmail | tee "$RUNNER_TEMP/greenmail.log"
+          if grep -qi skipped "$RUNNER_TEMP/greenmail.log"; then echo "greenmail tests were skipped"; exit 1; fi
+
       - run: uv run pytest -q
+
+      - name: GreenMail logs
+        if: failure() && runner.os == 'Linux'
+        run: docker logs greenmail

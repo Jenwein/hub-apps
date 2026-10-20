@@ -1,0 +1,15 @@
+# The agent writes one [[mailbox]] table per mailbox here, and passwords are never stored in this file.
+#
+# [[mailbox]]
+# name = "work"                    # lowercase letters, digits and dashes: the id used in commands
+# address = "you@example.com"
+# display_name = "Your Name"       # the sender name on the mail you write
+# provider = "feishu"              # feishu | qq | gmail | outlook
+# save_copy = true                 # append a copy of sent mail to the sent folder; false where the
+#                                  # server keeps one itself, as Gmail does (default: the provider's)
+#
+# [mailbox.folders]                # the server's folder names; leave out a role that is not known yet
+# inbox = "INBOX"
+# sent = "Sent Messages"
+# trash = "Deleted Messages"
+# archive = "Archive"

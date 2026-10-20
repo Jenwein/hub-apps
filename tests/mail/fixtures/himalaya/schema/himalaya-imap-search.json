@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "SearchResult": {
+      "description": "One row of the search results, a single message id.",
+      "properties": {
+        "id": {
+          "description": "The UID, or the message number under `--seq`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `imap search` output, a table of message ids.",
+  "properties": {
+    "ids": {
+      "items": {
+        "$ref": "#/$defs/SearchResult"
+      },
+      "type": "array"
+    },
+    "uid_mode": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "uid_mode",
+    "ids"
+  ],
+  "title": "SearchTable",
+  "type": "object"
+}

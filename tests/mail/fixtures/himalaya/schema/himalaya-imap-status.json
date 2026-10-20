@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `imap status` output, one field per data item the server returned.",
+  "properties": {
+    "deleted": {
+      "description": "Count of messages carrying `\\Deleted`, per RFC 9208.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "deleted_storage": {
+      "description": "Bytes an expunge would reclaim, per RFC 9208.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "highest_mod_seq": {
+      "description": "The highest modification sequence, per RFC 7162 CONDSTORE.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "messages": {
+      "description": "Total message count.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "recent": {
+      "description": "Count of messages carrying `\\Recent`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "uid_next": {
+      "description": "The UID the next message will be assigned.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "uid_validity": {
+      "description": "The UID validity, which changes when every UID does.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "unseen": {
+      "description": "Count of messages lacking `\\Seen`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "MailboxStatus",
+  "type": "object"
+}

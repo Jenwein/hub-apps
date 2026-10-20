@@ -8,12 +8,14 @@ work, and runs a command only after you agree to it.
 | App | What it does |
 |---|---|
 | [`ledger`](ledger/) | Bookkeeping with beancount and Fava: record spending from chat, import Alipay, WeChat and bank bills, ask about your money, get charts. |
+| [`mail`](mail/) | Your mailboxes from chat: search and read mail, find verification codes, write and send with a confirmation code, daily and monthly report sections, optional alerts for urgent mail. |
 
 ## Install
 
 ```
 cc-hub tap add Jenwein/hub-apps
 cc-hub app install hub-apps/ledger
+cc-hub app install hub-apps/mail
 ```
 
 Or ask your agent in the chat: "Install the ledger app from Jenwein/hub-apps."
@@ -21,7 +23,7 @@ Or ask your agent in the chat: "Install the ledger app from Jenwein/hub-apps."
 `cc-hub app install` prints what the app needs (software, scripts, scheduled
 tasks) and changes nothing. When you agree, run the confirm command it printed,
 or tell your agent to. The agent then installs the software you approve and
-asks the setup questions. The ledger app needs cc-hub 0.7.0 or later.
+asks the setup questions. The ledger and mail apps need cc-hub 0.7.0 or later.
 
 | Command | What it does | Example |
 |---|---|---|
@@ -196,6 +198,92 @@ remote; it is never pasted into a website or another service. Bills are
 converted on your machine, the app's scripts make no network calls, and price
 lookups send only the symbols of what you hold, not amounts. Removing the app
 leaves `ledger/` as it is.
+
+## mail
+
+Your mailboxes from the chat. You talk to the agent in a direct chat, in your language, and it
+searches and reads your mail, finds verification codes, writes, replies to and forwards mail, and
+can tell you when something urgent arrives. It needs cc-hub 0.7.0 or later.
+
+- **Search and read.** "Mail from GitHub this week", "unread in QQ", "what did I send from QQ
+  last week".
+  The agent lists mail across your mailboxes, newest first. The original of a mail, or the answer
+  to a question about it, goes to your private chat.
+- **Verification codes.** "What is the QQ code?" gives the code from mail of the last few minutes.
+- **Write.** Write a mail, reply to one in your own words, or forward one. The draft goes to your
+  private chat with a one-time confirmation code, and the mail is sent only when you reply with
+  that code.
+- **Attachments.** The agent lists the attachments of a mail and sends one to the chat. A file you
+  send in the chat can be attached to the mail you write.
+- **Mark and move.** Mark mail read, or move it to the archive or the trash. Nothing is deleted
+  for good.
+- **Rules.** Say in your own words how mail is sorted ("GitHub notifications: ignore"; "mail from
+  my landlord goes in the daily report").
+- **Reports.** The mail app adds a section to the hub's daily report (the mail that arrived,
+  grouped by kind) and one to the monthly report (new versions of the tools it uses, how long
+  alerts were down, mailboxes that could not sign in). cc-hub runs the section's command itself;
+  during setup the agent shows you the command and asks you to approve it.
+- **Alerts (optional).** A background service on the machine that runs cc-connect keeps a
+  connection to each inbox and sends one chat message per urgent mail, with a warning when the
+  mail looks like phishing. Alerts are off until you turn them on.
+
+### Mailboxes
+
+Four kinds of mailbox work. Each needs something done in the account first; the agent walks you
+through it.
+
+| Mailbox | What it needs first |
+|---|---|
+| Feishu enterprise mail | Your company's admin allows third-party mail clients; you create a client password in your mail settings. |
+| QQ mail | The IMAP/SMTP service turned on and an authorization code created in QQ Mail's settings. |
+| Gmail | Two-step verification on, and an app password from your Google Account. |
+| Outlook (outlook.com, hotmail.com, live.com) | Nothing in the account: you sign in to Microsoft once, with a code you enter on any device. |
+
+### Software it uses
+
+The agent shows you each command and what it does, and installs nothing until you agree.
+
+| Software | What for | How it is installed |
+|---|---|---|
+| [himalaya](https://github.com/pimalaya/himalaya) v2.2.1 | reads and sends the mail over IMAP and SMTP | the app's own downloader, from the official GitHub release, SHA-256 checked, into `~/.local/bin`; no root |
+| Claude Code | the mail reader, which has no tools; needed even when the hub's agent is Codex | the official installer; you sign in once in the server terminal (`claude`, then `/login`) |
+| [uv](https://docs.astral.sh/uv/) | runs the app's scripts | the official installer, only if it is missing |
+| [carillon](https://github.com/pimalaya/carillon) v0.2.0 | alerts only: watches the inboxes | the app's downloader, when you turn alerts on |
+| [ortie](https://github.com/pimalaya/ortie) v2.3.0 | Outlook only: the Microsoft sign-in | the app's downloader, when you add an Outlook mailbox |
+
+The app's scripts fetch their Python packages the first time they run, through `uv run`. Alerts run
+as a background service of your user: systemd on Linux and WSL (which needs systemd turned on),
+launchd on macOS, Task Scheduler on Windows.
+
+### Using it
+
+After the install, say "set up the mail app". The agent checks the mail reader, records your
+private chat (a test message arrives there), and asks which mailboxes you use. For each one you type
+its password in the server terminal, never in the chat. Then it asks whether you want alerts.
+
+```
+Any new mail today?
+What is the verification code from QQ?
+Mail from GitHub this week
+Reply to the second one: yes, Thursday at 3 pm works for me
+Write to bob@example.org about the refund
+Move that one to the archive
+```
+
+### Safety
+
+Mail is read by a reader without tools (Claude Code with every tool switched off): the agent never
+reads a mail body or an attachment, and treats the subjects, sender names and attachment names it
+sees in lists as data, never as instructions. What the agent gets from the reader about a mail
+(`mx look`: a summary, a reason, a code, an amount, a deadline) is written by the reader and
+checked against the mail: the summary and the reason are one short line each, and a code, amount
+or deadline that the mail itself does not contain is dropped. Nothing is sent without the
+confirmation code from the chat: you read the draft there and type the code back. Passwords are
+typed in the server terminal and stay outside the hub.
+
+Passwords, drafts and the alert log are kept per machine, outside the hub. `mail/` in your hub
+holds the mailbox list (addresses and folder names), your sorting rules and the settings, with
+their history in git. Removing the app leaves `mail/` as it is.
 
 ## Develop
 

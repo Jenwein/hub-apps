@@ -1,0 +1,47 @@
+From: Cloud Billing <billing@cloud.example.com>
+To: me@example.org
+Subject: Your receipt
+Date: Mon, 19 Oct 2026 13:00:00 +0000
+Message-ID: <receipt-1@cloud.example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix"
+
+--mix
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=utf-8
+
+Thank you. Your receipt is attached.
+--alt
+Content-Type: text/html; charset=utf-8
+
+<p>Thank you. Your receipt is <b>attached</b>.</p>
+--alt--
+--mix
+Content-Type: application/pdf; name="receipt.pdf"
+Content-Disposition: attachment; filename="receipt.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2Jq
+CjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAzMDAg
+MTQ0XSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4g
+Pj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NSA+PgpzdHJlYW0KQlQgL0YxIDE4IFRm
+IDIwIDcwIFRkIChUb3RhbCA4OC4wMCBDTlkpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9i
+ago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4K
+ZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAow
+MDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDI0MSAwMDAwMCBu
+IAowMDAwMDAwMzM2IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgNiAvUm9vdCAxIDAgUiA+Pgpz
+dGFydHhyZWYKNDA2CiUlRU9GCg==
+--mix
+Content-Type: application/x-msdownload; name="setup.exe"
+Content-Disposition: attachment; filename="setup.exe"
+Content-Transfer-Encoding: base64
+
+TVqQAFRvdGFsIDk5LjAwIENOWSBydW4gbWUAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0e
+HyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZX
+WFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+Q
+kZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJ
+ysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/
+--mix--

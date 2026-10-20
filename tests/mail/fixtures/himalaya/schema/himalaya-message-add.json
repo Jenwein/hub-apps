@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The `message add` output, naming the message that was appended.",
+  "properties": {
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "queueId": {
+      "description": "The queue row id of a send deferred to the store's owner.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "sent": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "sent"
+  ],
+  "title": "MessageAddOutput",
+  "type": "object"
+}
