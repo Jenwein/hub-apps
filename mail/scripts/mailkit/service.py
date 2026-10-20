@@ -26,7 +26,6 @@ import os
 import plistlib
 import re
 import shutil
-import socket
 import tomllib
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -38,7 +37,7 @@ from .alerts import AlertQueue
 from .context import Ctx
 from .health import HEARTBEAT, Health, heartbeat
 from .marks import MARKS
-from .paths import POSIX, locked, read_json, write_json, write_private
+from .paths import POSIX, locked, read_json, this_machine, write_json, write_private
 from .settings import MailError, load_settings
 
 UNIT_NAME = "cc-hub-mail-watch.service"
@@ -355,11 +354,11 @@ def clear_marks(ctx: Ctx) -> None:
 
 
 def set_alerts(ctx: Ctx, enabled: bool) -> dict:
-    """Turn alerts on for this machine (`enabled` and `host` = this machine's name; the marks are
-    cleared) or off (`enabled` false, `host` empty; the heartbeat is removed). Returns the
+    """Turn alerts on for this machine (`enabled` and `host` = `paths.this_machine`; the marks
+    are cleared) or off (`enabled` false, `host` empty; the heartbeat is removed). Returns the
     settings as they are now."""
     path = ctx.data / CONFIG
-    host = socket.gethostname() if enabled else ""
+    host = this_machine(ctx.state) if enabled else ""
     try:
         old = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as err:
@@ -412,7 +411,7 @@ def status(ctx: Ctx) -> dict:
     return {
         "enabled": ctx.settings.alerts_enabled,
         "host": ctx.settings.alerts_host,
-        "this_host": socket.gethostname(),
+        "this_host": this_machine(ctx.state),
         "watching": watching,
         "carillon": carillon,
         "last_sweep": sweep.isoformat() if sweep else None,

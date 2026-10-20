@@ -28,6 +28,7 @@ from mailkit.context import load
 from mailkit.health import GRACE, STALE, Health, sign_in_command
 from mailkit.himalaya import AuthError, ConnectError, Himalaya
 from mailkit.marks import Mark, load_marks, save_marks, verdict_key
+from mailkit.paths import this_machine
 from mailkit.reader import Reader, Verdict
 from mailkit.settings import MailError
 from mailkit.triage import TriageResult
@@ -1059,15 +1060,18 @@ def test_watch_refuses_when_off_or_on_another_host(hub, monkeypatch, capsys):
     assert (printed.out, printed.err) == ("", "mx: alerts are off: mx alerts on\n")
 
     config = hub.data / "config.toml"
-    config.write_text('[alerts]\nenabled = true\nhost = "there"\n', "utf-8")
-    assert main(["--hub", str(hub.root), "watch"]) == 0
-    printed = capsys.readouterr()
-    assert (printed.out, printed.err) == ("", "mx: alerts run on there, not here\n")
+    here = this_machine(hub.state)
+    for other in ("there#0a1b2c3d", "here", "here#ffffffff"):  # the same name is not enough
+        config.write_text(f'[alerts]\nenabled = true\nhost = "{other}"\n', "utf-8")
+        assert main(["--hub", str(hub.root), "watch"]) == 0
+        printed = capsys.readouterr()
+        assert (printed.out, printed.err) == (
+            "", f"mx: alerts run on {other}, not on this machine ({here})\n")
     assert started == []  # no watcher, no carillon
     assert not (hub.state / "carillon.toml").exists()  # nothing was written
     assert not (hub.state / "watch.json").exists() and not (hub.state / "watch.lock").exists()
 
-    config.write_text('[alerts]\nenabled = true\nhost = "here"\n', "utf-8")
+    config.write_text(f'[alerts]\nenabled = true\nhost = "{here}"\n', "utf-8")
     watch.check_here(load(hub.root))  # this machine is the one
 
 

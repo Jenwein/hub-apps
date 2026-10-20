@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from .context import Ctx
-from .paths import POSIX, write_private
+from .paths import MACHINE_ID, POSIX, write_private
 from .settings import NAME_RE, MailError
 
 LOCK_NAME = "lock"  # the state lock (paths.locked): not data, and held while we work
@@ -176,11 +176,13 @@ def fetch_command(ctx: Ctx, mailbox: str) -> list[str]:
 
 
 def forget(state: Path, *, secrets: bool) -> list[str]:
-    """Empty the state directory, except `secrets/` unless `secrets` and except the lock the
-    caller holds. Returns the names it removed, sorted, relative to the directory."""
+    """Empty the state directory, except the lock the caller holds and, unless `secrets`,
+    `secrets/` and this machine's id (`paths.this_machine`: the alert switch names the machine by
+    it). Returns the names it removed, sorted, relative to the directory."""
     removed: list[str] = []
+    kept = () if secrets else ("secrets", MACHINE_ID)
     for entry in sorted(Path(state).iterdir(), key=lambda p: p.name):
-        if entry.name == LOCK_NAME or (entry.name == "secrets" and not secrets):
+        if entry.name == LOCK_NAME or entry.name in kept:
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():

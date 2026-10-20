@@ -701,7 +701,8 @@ def build_parser() -> Parser:
     p = sub.add_parser(
         "forget", help="delete this machine's mail state: drafts, marks, generated configs")
     p.add_argument(
-        "--secrets", action="store_true", help="delete the stored passwords too (kept otherwise)")
+        "--secrets", action="store_true",
+        help="delete the stored passwords and this machine's id too (kept otherwise)")
     p.set_defaults(func=run_forget)
     return parser
 

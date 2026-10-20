@@ -7,7 +7,6 @@ run covers [SINCE, T0) unless a test says otherwise.
 
 import json
 import re
-import socket
 from datetime import UTC, datetime, timedelta, timezone
 from email.utils import format_datetime
 
@@ -19,6 +18,7 @@ from mailkit.cli import main
 from mailkit.context import load
 from mailkit.health import Health, sign_in_command
 from mailkit.himalaya import Himalaya, TimedOut
+from mailkit.paths import this_machine
 from mailkit.reader import Reader, Verdict
 from mailkit.strings import STRINGS, t
 from mailkit.tools import TOOLS
@@ -111,8 +111,10 @@ def ctx(hub, clock):
 
 
 def alerts_on(hub) -> None:
+    hub.state.mkdir(parents=True, exist_ok=True)
     (hub.data / "config.toml").write_text(
-        f'[alerts]\nenabled = true\nhost = "{socket.gethostname()}"\n', "utf-8", newline="\n")
+        f'[alerts]\nenabled = true\nhost = "{this_machine(hub.state)}"\n', "utf-8",
+        newline="\n")
 
 
 def beat(ctx, at: datetime = T0) -> None:

@@ -10,6 +10,9 @@ import contextlib
 import hashlib
 import json
 import os
+import re
+import secrets
+import socket
 import sys
 import tempfile
 import time
@@ -21,6 +24,8 @@ from .settings import MailError
 
 STATE_ENV = "CC_HUB_MAIL_STATE"
 POSIX = os.name == "posix"  # permission bits mean something only here
+MACHINE_ID = "machine-id"  # in the state directory: see this_machine
+MACHINE_ID_RE = re.compile(r"[0-9a-f]{8}")
 
 LOCK_POLL_SECONDS = 0.2
 LOCK_STALE_SECONDS = 120.0
@@ -59,6 +64,35 @@ def state_dir(hub: Path) -> Path:
     except OSError as err:
         raise MailError(f"cannot create the mail state directory {path}: {err}") from err
     return path
+
+
+def _machine_id(path: Path) -> str | None:
+    """The id in `path`, or None when there is none or it is not one."""
+    try:
+        found = path.read_text("utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as err:
+        raise MailError(f"cannot read {path}: {err}") from err
+    return found if MACHINE_ID_RE.fullmatch(found) else None
+
+
+def this_machine(state: Path) -> str:
+    """This machine as the alert switch names it: `<hostname>#<id>`. The id is random, made on
+    first use and kept in the state directory (`machine-id`), so two machines that share a name
+    are told apart; Windows and the WSL inside it do, and each has its own state directory."""
+    path = Path(state) / MACHINE_ID
+    found = _machine_id(path)
+    if found is None:
+        with locked(state):
+            found = _machine_id(path)  # another process may have made it meanwhile
+            if found is None:
+                found = secrets.token_hex(4)
+                try:
+                    write_private(path, f"{found}\n".encode("ascii"))
+                except OSError as err:
+                    raise MailError(f"cannot write {path}: {err}") from err
+    return f"{socket.gethostname()}#{found}"
 
 
 def _replace(temp: str, path: Path) -> None:

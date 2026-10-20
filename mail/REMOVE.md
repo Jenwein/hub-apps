@@ -33,7 +33,8 @@ switching it off here would also switch off the machine that sends the alerts. L
 uv run apps/mail/scripts/mx.py alerts-status
 ```
 
-If `enabled` is true and `host` is not `this_host`, alerts run on another machine (`host`). Skip
+If `enabled` is true and `host` is not `this_host`, alerts run on another machine (`host`; WSL and
+the Windows around it are two machines). Skip
 `alerts off` and its commit, and tell the user that alerts stay on for that machine; to stop them
 they follow "Turn alerts off" in `apps/mail/skills/mail/alerts.md` there. Otherwise alerts are
 already off or they are on for this machine: run
@@ -57,8 +58,8 @@ drafts waiting for a code, the generated configs and the alert log. Ask the user
 the saved passwords and Outlook sign-ins too.
 
 - Yes: `uv run apps/mail/scripts/mx.py forget --secrets` empties the whole folder.
-- No: `uv run apps/mail/scripts/mx.py forget` deletes the rest and keeps `secrets/`, so a later
-  install of the app signs in at once.
+- No: `uv run apps/mail/scripts/mx.py forget` deletes the rest and keeps `secrets/` and the id
+  that names this machine, so a later install of the app signs in at once.
 
 Tell them that a password deleted here still works at the provider until they revoke it there:
 the authorization code, app password or client password in the mailbox's account settings, and for

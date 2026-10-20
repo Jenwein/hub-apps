@@ -12,6 +12,7 @@ import pytest
 from mailkit import cli, vault
 from mailkit.cli import main
 from mailkit.context import APP_DIR, load
+from mailkit.paths import this_machine
 from mailkit.settings import MailError
 from mailkit.tools import NO_WINDOW
 from mailkit.vault import (
@@ -413,6 +414,17 @@ def test_forget_keeps_secrets_unless_asked(hub):
     assert list(hub.state.iterdir()) == []
     assert hub.state.is_dir()  # the directory itself stays, with its mode
     assert forget(hub.state, secrets=True) == []
+
+
+def test_forget_keeps_the_machine_id_unless_secrets_go_too(hub):
+    # The id names this machine in the alert switch: without it, alerts that are on for this
+    # machine would look meant for another one.
+    fill_state(hub.state)
+    machine = this_machine(hub.state)
+    assert forget(hub.state, secrets=False) == ["drafts", "himalaya.toml", "marks.json"]
+    assert this_machine(hub.state) == machine
+    assert forget(hub.state, secrets=True) == ["machine-id", "secrets"]
+    assert list(hub.state.iterdir()) == []
 
 
 def test_forget_leaves_the_lock_alone(hub):

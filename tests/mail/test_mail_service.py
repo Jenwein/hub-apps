@@ -9,6 +9,7 @@ every operating system.
 import json
 import os
 import plistlib
+import re
 import runpy
 import shutil
 import socket
@@ -26,8 +27,9 @@ from mailkit.cli import main
 from mailkit.context import load
 from mailkit.health import Health
 from mailkit.marks import Mark, load_marks, save_marks
-from mailkit.paths import write_json
+from mailkit.paths import this_machine, write_json
 from mailkit.settings import MailError, Settings
+from mailkit.watch import check_here
 from mailtest import ROOT
 
 TASK_NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
@@ -528,7 +530,7 @@ CONFIG = """\
 # the settings of the mail app
 [alerts]
 enabled = false   # real-time alerts for urgent mail
-host = ""         # the machine that runs them: the one that runs cc-connect
+host = ""                  # the machine that runs them: the one that runs cc-connect
 
 [reader]
 model = "sonnet"  # model of the tool-less reader (claude --model)
@@ -538,9 +540,16 @@ language = "zh-CN"  # the user's language
 """
 
 
+MACHINE_ID = "0a1b2c3d"
+HOST = f"server-1#{MACHINE_ID}"  # this machine as the alert switch names it
+
+
 @pytest.fixture
-def named_host(monkeypatch):
+def named_host(hub, monkeypatch):
+    """This machine is `server-1`, and its state directory holds the id MACHINE_ID."""
     monkeypatch.setattr(socket, "gethostname", lambda: "server-1")
+    hub.state.mkdir(parents=True, exist_ok=True)
+    (hub.state / "machine-id").write_text(MACHINE_ID + "\n", "utf-8")
 
 
 def config_text(hub) -> str:
@@ -552,13 +561,13 @@ def test_alerts_on_off_edit_config_in_place(hub, named_host, capsys):
 
     assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
 
-    assert json.loads(capsys.readouterr().out) == {"enabled": True, "host": "server-1"}
+    assert json.loads(capsys.readouterr().out) == {"enabled": True, "host": HOST}
     assert config_text(hub) == CONFIG.replace(
-        "enabled = false   #", "enabled = true    #").replace('host = ""         #',
-                                                            'host = "server-1" #')
+        "enabled = false   #", "enabled = true    #").replace('host = ""                  #',
+                                                            f'host = "{HOST}" #')
     # comments and the other sections are still there, and the settings read back
     settings = load(hub.root).settings
-    assert (settings.alerts_enabled, settings.alerts_host) == (True, "server-1")
+    assert (settings.alerts_enabled, settings.alerts_host) == (True, HOST)
     assert (settings.reader_model, settings.language) == ("sonnet", "zh-CN")
 
     assert main(["--hub", str(hub.root), "alerts", "off"]) == 0
@@ -576,7 +585,7 @@ def test_alerts_on_edits_the_seed_and_keeps_its_comments(hub, named_host, capsys
     assert lines[:3] == [
         "[alerts]",
         "enabled = true    # real-time alerts for urgent mail",
-        'host = "server-1" # the machine that runs them: the one that runs cc-connect']
+        f'host = "{HOST}" # the machine that runs them: the one that runs cc-connect']
     assert config_text(hub).splitlines()[3:] == seed.splitlines()[3:]
     capsys.readouterr()
 
@@ -607,16 +616,16 @@ def test_alerts_on_adds_a_missing_key_or_section(hub, named_host, capsys):
                       "utf-8", newline="\n")
     assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
     assert config_text(hub) == (
-        '[alerts]\n# off for now\nenabled = true\nhost = "server-1"\n\n[chat]\nlanguage = ""\n')
+        f'[alerts]\n# off for now\nenabled = true\nhost = "{HOST}"\n\n[chat]\nlanguage = ""\n')
 
     config.write_text('[reader]\nmodel = "haiku"', "utf-8", newline="\n")  # no final line end
     assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
     assert config_text(hub) == (
-        '[reader]\nmodel = "haiku"\n\n[alerts]\nenabled = true\nhost = "server-1"\n')
+        f'[reader]\nmodel = "haiku"\n\n[alerts]\nenabled = true\nhost = "{HOST}"\n')
 
     config.write_text("[alerts]\nenabled = true", "utf-8", newline="\n")
     assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
-    assert config_text(hub) == '[alerts]\nenabled = true\nhost = "server-1"\n'
+    assert config_text(hub) == f'[alerts]\nenabled = true\nhost = "{HOST}"\n'
     capsys.readouterr()
 
 
@@ -629,14 +638,14 @@ def test_alerts_on_leaves_other_tables_with_the_same_key_names_alone(hub, named_
 
     assert config_text(hub) == (
         '[reader]\nenabled = "no"\nhost = "elsewhere"\n[alerts]\nenabled = true\n'
-        'host = "server-1"\n')
+        f'host = "{HOST}"\n')
     capsys.readouterr()
 
 
 def test_a_host_with_a_hash_or_a_quote_survives_a_second_edit(hub, monkeypatch, capsys):
     monkeypatch.setattr(socket, "gethostname", lambda: 'we"ird#name')
     assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
-    assert load(hub.root).settings.alerts_host == 'we"ird#name'
+    assert load(hub.root).settings.alerts_host.startswith('we"ird#name#')
 
     assert main(["--hub", str(hub.root), "alerts", "off"]) == 0
 
@@ -766,7 +775,7 @@ def status(hub, capsys) -> dict:
 
 def test_alerts_status_of_a_hub_that_never_ran_alerts(hub, named_host, now, capsys):
     assert status(hub, capsys) == {
-        "enabled": False, "host": "", "this_host": "server-1", "watching": False,
+        "enabled": False, "host": "", "this_host": HOST, "watching": False,
         "carillon": None, "last_sweep": None, "queued_alerts": 0, "problems": []}
 
 
@@ -782,8 +791,8 @@ def test_alerts_status_of_a_running_watcher(hub, named_host, now, capsys):
 
     result = status(hub, capsys)
 
-    assert result["enabled"] is True and result["host"] == "server-1"
-    assert result["this_host"] == "server-1" and result["watching"] is True
+    assert result["enabled"] is True and result["host"] == HOST
+    assert result["this_host"] == HOST and result["watching"] is True
     assert result["carillon"] == "up"
     assert result["last_sweep"] == (NOW - timedelta(minutes=7)).isoformat()
     assert result["queued_alerts"] == 2
@@ -849,9 +858,57 @@ def test_alerts_status_on_another_machine(hub, now, monkeypatch, capsys):
 
     result = status(hub, capsys)
 
-    assert (result["enabled"], result["host"], result["this_host"]) == (True, "office", "laptop")
+    assert (result["enabled"], result["host"]) == (True, "office")
+    assert re.fullmatch(r"laptop#[0-9a-f]{8}", result["this_host"])
     assert result["watching"] is False
 
+
+# --- which machine this is ---------------------------------------------------------------------
+
+
+def test_this_machine_is_the_hostname_and_an_id_kept_in_the_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "box")
+    state = tmp_path / "state"
+    state.mkdir()
+
+    first = this_machine(state)
+
+    assert re.fullmatch(r"box#[0-9a-f]{8}", first)
+    assert (state / "machine-id").read_text("utf-8").strip() == first.split("#")[1]
+    assert this_machine(state) == first  # kept: made on first use only
+    if os.name == "posix":
+        assert (state / "machine-id").stat().st_mode & 0o777 == 0o600
+
+
+def test_an_unreadable_machine_id_is_made_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "box")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "machine-id").write_text("not an id\n", "utf-8")
+
+    found = this_machine(state)
+
+    assert re.fullmatch(r"box#[0-9a-f]{8}", found)
+    assert this_machine(state) == found
+
+
+def test_two_state_directories_with_one_hostname_are_two_machines(hub, tmp_path, monkeypatch,
+                                                                   capsys):
+    # Windows and its WSL share the hostname, but each has a state directory of its own.
+    monkeypatch.setattr(socket, "gethostname", lambda: "pc")
+    assert main(["--hub", str(hub.root), "alerts", "on"]) == 0
+    windows = json.loads(capsys.readouterr().out)["host"]
+    assert re.fullmatch(r"pc#[0-9a-f]{8}", windows)
+    assert status(hub, capsys)["this_host"] == windows
+
+    monkeypatch.setenv("CC_HUB_MAIL_STATE", str(tmp_path / "wsl-state"))
+    result = status(hub, capsys)
+
+    assert result["host"] == windows
+    assert re.fullmatch(r"pc#[0-9a-f]{8}", result["this_host"])
+    assert result["this_host"] != windows
+    with pytest.raises(MailError, match=f"alerts run on {windows}, not on this machine"):
+        check_here(load(hub.root))
 
 # --- mx.py without a console --------------------------------------------------------------------
 

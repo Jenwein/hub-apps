@@ -162,7 +162,9 @@ lowercase letters, digits and dashes).
 Skip this step when `enabled` under `[alerts]` in `mail/config.toml` is true and
 `uv run apps/mail/scripts/mx.py alerts-status` shows `"watching": true`. When `enabled` is true
 but `host` is not `this_host`, alerts were turned on for another machine: leave them, and tell
-the user. When `enabled` is true and `watching` is false, the service is missing or stopped (the
+the user. Both name a machine by its hostname and an id kept in its mail state, so WSL and the
+Windows around it, which share a hostname, are two machines. When `enabled` is true and
+`watching` is false, the service is missing or stopped (the
 user may have stopped it on purpose, as `apps/mail/skills/mail/alerts.md` describes): tell the
 user that the alert service is not running here, and ask before you create, change or start it.
 If they agree, do "The system" and "The service" below, and not "Switch on". If they say no,
@@ -198,9 +200,10 @@ uv run apps/mail/scripts/mx.py alerts on
 uv run apps/mail/scripts/mx.py configure
 ```
 
-`alerts on` records this machine as `host` in `mail/config.toml` and resets the catch-up
-position: the first check only sets a starting point, and mail that came before is not alerted
-(the daily report lists it). `configure` writes carillon's config from the list of mailboxes.
+`alerts on` records this machine (`this_host`) as `host` in `mail/config.toml` and resets the
+catch-up position: the first check only sets a starting point, and mail that came before is not
+alerted (the daily report lists it). `configure` writes carillon's config from the list of
+mailboxes.
 Commit the switch, because other copies of the hub read `host` to know which machine sends the
 alerts. If the language from step 3 is not committed yet, this commit takes it too:
 

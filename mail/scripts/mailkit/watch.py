@@ -35,7 +35,6 @@ from __future__ import annotations
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -54,7 +53,7 @@ from .context import Ctx
 from .health import GRACE, HEARTBEAT, Health, heartbeat, sign_in_command
 from .himalaya import AuthError, Himalaya
 from .marks import MAX_CATCH_UP, Mark, fresh, inbox_folder, load_marks, save_marks, verdict_key
-from .paths import write_json
+from .paths import this_machine, write_json
 from .query import clean
 from .reader import Reader, ReaderError, Verdict
 from .settings import NAME_RE, Mailbox, MailError
@@ -565,11 +564,13 @@ def poke(state: Path, mailbox: str) -> None:
 
 
 def check_here(ctx: Ctx) -> None:
-    """Alerts run only when they are on, and only on the machine they were turned on for."""
+    """Alerts run only when they are on, and only on the machine they were turned on for
+    (`paths.this_machine`)."""
     if not ctx.settings.alerts_enabled:
         raise MailError("alerts are off: mx alerts on")
-    if ctx.settings.alerts_host != socket.gethostname():
-        raise MailError(f"alerts run on {ctx.settings.alerts_host}, not here")
+    here = this_machine(ctx.state)
+    if ctx.settings.alerts_host != here:
+        raise MailError(f"alerts run on {ctx.settings.alerts_host}, not on this machine ({here})")
 
 
 @contextmanager

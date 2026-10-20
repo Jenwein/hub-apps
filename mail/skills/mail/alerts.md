@@ -26,7 +26,7 @@ uv run apps/mail/scripts/mx.py alerts-status
 | Field | Meaning |
 |---|---|
 | `enabled`, `host` | whether alerts are on, and the machine they were turned on for |
-| `this_host` | this machine; when it differs from `host`, alerts are meant for the other machine |
+| `this_host` | this machine; when it differs from `host`, alerts are meant for the other machine. A machine is named `<hostname>#<id>`, the id kept in that machine's mail state, so Windows and the WSL inside it, which share a hostname, are two machines |
 | `watching` | the watcher is running. `false` means the service is not running or its last sign of life is older than 2 minutes |
 | `carillon` | `up` or `down`: the listener the watcher runs; `null` when the watcher is not running |
 | `last_sweep` | when every inbox was last checked |
@@ -42,9 +42,10 @@ start a background service of the user's account.
 
 1. `mx install-tool carillon` downloads the pinned carillon from its official release, checks its
    SHA-256, and puts it in `.local/bin` of the user's home directory (once per machine).
-2. `mx alerts on` turns alerts on for this machine: it records the machine's name as `host` in
-   `mail/config.toml`, so run it on the right machine. The first check afterwards only sets a
-   starting point: mail that came while alerts were off is not alerted. The daily report lists it.
+2. `mx alerts on` turns alerts on for this machine: it records the machine (`this_host` of
+   `alerts-status`) as `host` in `mail/config.toml`, so run it on the right machine. The first
+   check afterwards only sets a starting point: mail that came while alerts were off is not
+   alerted. The daily report lists it.
 3. Commit `mail/config.toml`, and do not push (the hub's nightly task pushes what is committed).
    The nightly task commits only the memory files, so this file would stay changed, and `host` is
    how other copies of the hub know which machine runs the alerts; a copy that never gets the
