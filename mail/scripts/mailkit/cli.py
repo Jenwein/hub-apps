@@ -33,7 +33,7 @@ from . import (
     vault,
     watch,
 )
-from .paths import locked
+from .paths import locked, this_machine
 from .settings import FOLDER_ROLES, Mailbox, MailError
 
 
@@ -117,11 +117,24 @@ def run_secret_fetch(args: argparse.Namespace) -> None:
     sys.stdout.flush()
 
 
+def needed_tools(ctx: context.Ctx) -> list[str]:
+    """The tools this hub runs here: himalaya; ortie with an Outlook mailbox; carillon when alerts
+    are on for this machine."""
+    names = ["himalaya"]
+    if any(box.auth == "oauth" for box in ctx.mailboxes.values()):
+        names.append("ortie")
+    if ctx.settings.alerts_enabled and ctx.settings.alerts_host == this_machine(ctx.state):
+        names.append("carillon")
+    return names
+
+
 def run_configure(args: argparse.Namespace) -> None:
-    """Write the himalaya, carillon and ortie configs, and say what the user still has to type."""
+    """Write the himalaya, carillon and ortie configs, and say what the user still has to type
+    and which tool is not the pinned version."""
     ctx = load_ctx(args)
     written = configs.write_configs(ctx)
     boxes = ctx.mailboxes.items()
+    problems = [tools.version_problem(name) for name in needed_tools(ctx)]
     print_json({
         "written": written,
         "missing_secrets": [
@@ -130,6 +143,7 @@ def run_configure(args: argparse.Namespace) -> None:
         "missing_sign_in": [
             name for name, box in boxes
             if box.auth == "oauth" and not vault.has_token(ctx.state, name)],
+        "versions": [problem.message() for problem in problems if problem is not None],
     })
 
 
@@ -223,11 +237,25 @@ def check_mailbox(hima: himalaya.Himalaya, box: Mailbox) -> dict:
 
 
 def run_check(args: argparse.Namespace) -> None:
-    """Test the mailboxes (the named one, else all). Exit 0 whatever the answers are."""
+    """Test the mailboxes (the named one, else all). Exit 0 whatever the answers are. A mailbox
+    whose tools (himalaya; ortie for Outlook) are not the pinned versions is not tried: the
+    answer is that problem, of the kind `other`."""
     ctx = load_ctx(args)
     boxes = [ctx.mailbox(args.mailbox)] if args.mailbox else list(ctx.mailboxes.values())
     hima = himalaya.Himalaya(ctx)
-    print_json({box.name: check_mailbox(hima, box) for box in boxes})
+    wrong = tools.version_problem("himalaya")
+    if wrong is None and any(box.auth == "oauth" for box in boxes):
+        wrong_ortie = tools.version_problem("ortie")
+    else:
+        wrong_ortie = None
+    found = {}
+    for box in boxes:
+        problem = wrong or (wrong_ortie if box.auth == "oauth" else None)
+        if problem is not None:
+            found[box.name] = {"ok": False, "kind": "other", "error": problem.message()}
+        else:
+            found[box.name] = check_mailbox(hima, box)
+    print_json(found)
 
 
 def day(text: str) -> date:

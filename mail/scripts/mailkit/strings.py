@@ -59,6 +59,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "Mail: the listener for new mail (carillon) has not been running for more than "
             "{minutes} minutes, so new mail is only checked every {every} minutes and alerts can "
             "come late. Its log: {log}"),
+        "tools_stopped": (
+            "Mail: alerts are stopped on this machine because {problems}. To fix it, type this "
+            "in the server's terminal, in the hub's folder:\n{commands}\n.local/bin of your home "
+            "directory must come first on PATH. Then start the alert service again."),
+        "tool_missing": "{tool} is not installed (the mail app needs {pinned})",
+        "tool_other": "{tool} is {found}, but the mail app needs {pinned}",
+        "tool_silent": "{tool} does not say its version (the mail app needs {pinned})",
+        "separator": "; ",
         # the report sections
         "urgent": "Urgent:",
         "awaiting_reply": "Waiting for your reply:",
@@ -157,6 +165,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "carillon_down": (
             "邮件：监听新邮件的程序（carillon）已经超过 {minutes} 分钟没有运行，所以现在每 "
             "{every} 分钟才检查一次新邮件，提醒可能会晚到。它的日志：{log}"),
+        "tools_stopped": (
+            "邮件：这台机器上的实时提醒已停止，因为{problems}。要修复，请在服务器的终端里、总站的"
+            "目录下输入：\n{commands}\n你主目录下的 .local/bin 必须排在 PATH 的最前面。然后重新"
+            "启动提醒服务。"),
+        "tool_missing": "没有安装 {tool}（邮件应用需要 {pinned}）",
+        "tool_other": "{tool} 的版本是 {found}，但邮件应用需要 {pinned}",
+        "tool_silent": "{tool} 没有说明自己的版本（邮件应用需要 {pinned}）",
+        "separator": "；",
         # the report sections
         "urgent": "紧急：",
         "awaiting_reply": "等你回复：",

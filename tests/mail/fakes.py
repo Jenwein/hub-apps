@@ -95,6 +95,8 @@ def stdin_is_null():
 # Exit 99 with `F-NODEL` on stdout: `message delete`, `imap expunge` and `--seen` (except as the
 # filter of `imap search`), with himalaya's aliases (`msg`, `rm`) and `imap delete`, `imap close`,
 # `imap raw`. Exit 97: the fake itself crashed. A command or option it does not know exits 2.
+# `himalaya --version` prints `himalaya v<$FAKE_HIMALAYA_VERSION, default 2.2.1> +imap +smtp` and
+# is not logged.
 FAKE_HIMALAYA = r'''
 import base64
 import json
@@ -745,6 +747,11 @@ COMMANDS = {
 
 
 def main():
+    if sys.argv[1:] == ["--version"]:  # not a call on a mailbox: not logged
+        version = os.environ.get("FAKE_HIMALAYA_VERSION") or "2.2.1"
+        sys.stdout.write(f"himalaya v{version} +imap +smtp\n")
+        sys.stdout.flush()
+        sys.exit(0)
     CALL["stdin_closed"] = stdin_is_null()
     args = sys.argv[1:]
     at = 0
@@ -1114,7 +1121,8 @@ class FakeChat:
 #   stdout and stderr its own), logs {"hook": <account>, "exit": <status>} for each, and waits to
 #   be stopped. SIGTERM logs {"stopped": "SIGTERM"} and exits 0, as carillon does.
 # - "exit": exits 1 at once, as carillon does when it rejects its config.
-# A crash adds {"crashed": "<error>"} and exits 97.
+# A crash adds {"crashed": "<error>"} and exits 97. `carillon --version` prints
+# `carillon v<$FAKE_CARILLON_VERSION, default 0.2.0>` and is not logged.
 FAKE_CARILLON = r'''
 import json
 import os
@@ -1136,6 +1144,9 @@ def stop(signum, frame):
 
 def main():
     args = sys.argv[1:]
+    if args == ["--version"]:  # not a run: not logged
+        print("carillon v" + (os.environ.get("FAKE_CARILLON_VERSION") or "0.2.0"), flush=True)
+        sys.exit(0)
     log({"argv": sys.argv, "cwd": os.getcwd(), "stdin_closed": stdin_is_null()})
     print("fake carillon: out", flush=True)
     print("fake carillon: err", file=sys.stderr, flush=True)

@@ -42,7 +42,7 @@ from mailkit.watch import (
     TICK_SECONDS,
     Watcher,
 )
-from mailtest import write_mailboxes
+from mailtest import record_chat, write_mailboxes
 
 BOXES = """\
 [[mailbox]]
@@ -1283,3 +1283,98 @@ def test_a_tick_whose_state_write_fails_is_logged_and_the_watcher_goes_on(ctx, c
     assert any(line.startswith("a tick failed: ") and "Access is denied" in line
                for line in lines), lines
 
+
+# --- the tools the watcher runs ----------------------------------------------------------------
+
+INSTALL = "uv run apps/mail/scripts/mx.py install-tool {}"
+
+
+def only_tools(tmp_path, monkeypatch, make_exe, **versions: str | None) -> None:
+    """PATH is the folder of make_exe and nothing else (the fake cc-connect is there too), with a
+    tool for each of `versions` that prints that version; None removes the tool."""
+    folder = tmp_path / "bin"
+    folder.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(folder))
+    if not (folder / "uv.py").exists():
+        make_exe("uv", FAKE_UV)  # the generated configs name it
+    for name, version in versions.items():
+        for path in folder.glob(f"{name}.*"):
+            path.unlink()
+        if (folder / name).exists():
+            (folder / name).unlink()
+        if version is not None:
+            make_exe(name, f"print('{name} v{version} +imap')")
+
+
+@pytest.fixture
+def started(monkeypatch) -> list[str]:
+    """`mx watch` with a Watcher that records that it was started, and nothing more."""
+    found: list[str] = []
+
+    class Started:
+        def __init__(self, *args, **kwargs):
+            found.append("watcher")
+
+        def run(self) -> None:
+            pass
+
+    monkeypatch.setattr(watch, "Watcher", Started)
+    return found
+
+
+def test_watch_stops_and_tells_the_chat_once_when_a_tool_is_not_the_pinned_one(
+        hub, make_exe, fake_chat, tmp_path, monkeypatch, capsys, started):
+    write_mailboxes(hub, BOXES)
+    alerts_here(hub)
+    record_chat(hub)
+    only_tools(tmp_path, monkeypatch, make_exe, himalaya="1.1.0", carillon="0.2.0")
+    other = strings.t("tool_other", "", tool="himalaya", found="1.1.0", pinned="2.2.1")
+
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+
+    assert started == []
+    assert fake_chat.messages() == [strings.t(
+        "tools_stopped", "", problems=other, commands=INSTALL.format("himalaya"))]
+    err = capsys.readouterr().err
+    assert "mx: himalaya on PATH (" in err and "is 1.1.0, but the mail app needs 2.2.1" in err
+    assert "is 1.1.0, but the mail app needs 2.2.1" in (hub.state / "watch.log").read_text("utf-8")
+
+    assert main(["--hub", str(hub.root), "watch"]) == 0  # the service starts it again: no news
+    assert len(fake_chat.messages()) == 1
+
+    only_tools(tmp_path, monkeypatch, make_exe, carillon=None)
+    assert main(["--hub", str(hub.root), "watch"]) == 0  # a new problem: told, with the old one
+    missing = strings.t("tool_missing", "", tool="carillon", pinned="0.2.0")
+    assert fake_chat.messages()[1:] == [strings.t(
+        "tools_stopped", "", problems=f"{other}; {missing}",
+        commands=f"{INSTALL.format('himalaya')}\n{INSTALL.format('carillon')}")]
+
+    only_tools(tmp_path, monkeypatch, make_exe, himalaya="2.2.1", carillon="0.2.0")
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    assert started == ["watcher"] and len(fake_chat.messages()) == 2
+
+    only_tools(tmp_path, monkeypatch, make_exe, himalaya="1.1.0")  # broken again: told again
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    assert len(fake_chat.messages()) == 3 and started == ["watcher"]
+    capsys.readouterr()
+
+
+def test_a_tool_notice_the_chat_did_not_take_is_tried_at_the_next_start(
+        hub, make_exe, fake_chat, tmp_path, monkeypatch, capsys, started):
+    write_mailboxes(hub, BOXES)
+    alerts_here(hub, language="zh-CN")
+    record_chat(hub)
+    only_tools(tmp_path, monkeypatch, make_exe, himalaya="2.2.1", carillon="0.1.0")
+    fake_chat.mode("fail")
+
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    assert fake_chat.messages() == [] and started == []
+
+    fake_chat.mode("")
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    assert fake_chat.messages() == [strings.t(
+        "tools_stopped", "zh-CN",
+        problems=strings.t("tool_other", "zh-CN", tool="carillon", found="0.1.0", pinned="0.2.0"),
+        commands=INSTALL.format("carillon"))]
+    assert fake_chat.messages()[0].startswith("邮件：")
+    capsys.readouterr()

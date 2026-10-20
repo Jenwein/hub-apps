@@ -9,7 +9,8 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from mailkit import vault
+from fakes import FAKE_UV
+from mailkit import tools, vault
 from mailkit.cli import main
 from mailkit.configs import (
     carillon_config,
@@ -22,6 +23,7 @@ from mailkit.configs import (
     write_configs,
 )
 from mailkit.context import load
+from mailkit.paths import this_machine
 from mailkit.settings import MailError, Server
 from mailkit.tools import NO_WINDOW
 from mailkit.vault import fetch_command, mx_command, store, token_path
@@ -412,7 +414,8 @@ def test_configure_rewrites_a_file_that_was_edited_by_hand(four, capsys):
     assert json.loads(capsys.readouterr().out)["written"] == ["carillon.toml"]
 
 
-def test_configure_lists_missing_secrets_and_sign_ins(four, capsys):
+def test_configure_lists_missing_secrets_and_sign_ins(four, capsys, monkeypatch):
+    monkeypatch.setattr(tools, "version_problem", lambda name: None)
     assert main(["configure"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["missing_secrets"] == ["feishu", "qq", "gmail"]
@@ -423,7 +426,51 @@ def test_configure_lists_missing_secrets_and_sign_ins(four, capsys):
     vault.store_token(four.state, "outlook", b"{}")
     assert main(["configure"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out == {"written": [], "missing_secrets": ["feishu"], "missing_sign_in": []}
+    assert out == {
+        "written": [], "missing_secrets": ["feishu"], "missing_sign_in": [], "versions": []}
+
+
+def tool_bin(tmp_path, monkeypatch, make_exe, **versions: str) -> None:
+    """PATH is a folder with a tool for each of `versions` that prints that version, and
+    uv, and nothing else: no real tool of this machine is found."""
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    make_exe("uv", FAKE_UV)  # the generated configs name it
+    for name, version in versions.items():
+        make_exe(name, f"print('{name} v{version}')")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+
+
+def test_configure_names_a_tool_that_is_not_the_pinned_version(
+        hub, tmp_path, monkeypatch, make_exe, capsys):
+    write_mailboxes(hub, PASSWORD_ONLY)
+    tool_bin(tmp_path, monkeypatch, make_exe, himalaya="2.2.1")
+    assert main(["configure"]) == 0
+    assert json.loads(capsys.readouterr().out)["versions"] == []
+
+    tool_bin(tmp_path, monkeypatch, make_exe, himalaya="1.1.0")
+    assert main(["configure"]) == 0
+    [problem] = json.loads(capsys.readouterr().out)["versions"]
+    assert problem.startswith("himalaya on PATH (") and "is 1.1.0, but the mail app needs 2.2.1" in (
+        problem)
+    assert problem.endswith(
+        "run uv run apps/mail/scripts/mx.py install-tool himalaya, and put .local/bin of your home "
+        "directory first on PATH")
+
+
+def test_configure_checks_ortie_for_outlook_and_carillon_for_alerts_here(
+        four, tmp_path, monkeypatch, make_exe, capsys):
+    tool_bin(tmp_path, monkeypatch, make_exe, himalaya="2.2.1")
+    assert main(["configure"]) == 0
+    assert json.loads(capsys.readouterr().out)["versions"] == [(
+        "ortie is not on PATH, and the mail app needs 2.3.0: run uv run apps/mail/scripts/mx.py "
+        "install-tool ortie, and put .local/bin of your home directory first on PATH")]
+
+    tool_bin(tmp_path, monkeypatch, make_exe, himalaya="2.2.1", ortie="2.3.0")
+    (four.data / "config.toml").write_text(
+        f'[alerts]\nenabled = true\nhost = "{this_machine(four.state)}"\n', "utf-8")
+    assert main(["configure"]) == 0
+    [problem] = json.loads(capsys.readouterr().out)["versions"]
+    assert problem.startswith("carillon is not on PATH")
 
 
 def test_configure_needs_a_hub(tmp_path, capsys):
@@ -731,11 +778,12 @@ def test_ctrl_c_while_ortie_waits_cancels_the_sign_in(four, make_exe, monkeypatc
     assert out.out == "" and "mx: cancelled: nothing signed in" in out.err
 
 
-def test_configure_with_no_mailbox_writes_empty_configs(hub, capsys):
+def test_configure_with_no_mailbox_writes_empty_configs(hub, capsys, monkeypatch):
+    monkeypatch.setattr(tools, "version_problem", lambda name: None)
     assert main(["configure"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "written": ["himalaya.toml", "carillon.toml"], "missing_secrets": [],
-        "missing_sign_in": []}
+        "missing_sign_in": [], "versions": []}
     assert state_toml(hub, "himalaya.toml") == {"accounts": {}}
 
 

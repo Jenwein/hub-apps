@@ -69,12 +69,12 @@ from .marks import (
     save_marks,
     verdict_key,
 )
-from .paths import this_machine, write_json
+from .paths import read_json, this_machine, write_json
 from .query import clean
 from .reader import Reader, ReaderError, Verdict
 from .settings import NAME_RE, Mailbox, MailError
 from .strings import t
-from .tools import NO_WINDOW, kill_tree
+from .tools import NO_WINDOW, kill_tree, version_problem
 from .triage import triage
 from .verdicts import VerdictStore
 
@@ -697,6 +697,60 @@ def single_instance(state: Path) -> Iterator[None]:
         os.close(fd)
 
 
+TOOLS_TOLD = "tools.json"  # in the state directory: the tool problems the chat was told of
+
+
+def tools_ready(ctx: Ctx, send: Callable[[str], None], log: Callable[[str], None]) -> bool:
+    """Are himalaya and carillon the pinned versions? When not, say so on stderr and in the log,
+    and tell the chat once per problem (the problems told are kept in TOOLS_TOLD; a notice the
+    chat does not take is tried at the next start), and return False: the watcher does not
+    start, since tools of other versions may answer what mx cannot read."""
+    problems = [p for p in (version_problem("himalaya"), version_problem("carillon")) if p]
+    path = ctx.state / TOOLS_TOLD
+    try:
+        data = read_json(path, {})
+    except MailError:  # unreadable: tell again
+        data = {}
+    told = data.get("told") if isinstance(data, dict) else None
+    told = [key for key in told if isinstance(key, str)] if isinstance(told, list) else []
+    keys = [problem.key for problem in problems]
+    if not problems:
+        if told:
+            with suppress(OSError):
+                write_json(path, {"told": []})
+        return True
+    for problem in problems:
+        log(problem.message())
+        if sys.stderr is not None:  # none under a windowless Python
+            print(f"mx: {problem.message()}", file=sys.stderr)
+    if set(keys) <= set(told):
+        return False
+    language = ctx.settings.language
+    lines = []
+    for problem in problems:
+        if problem.found is None:
+            lines.append(t("tool_missing", language, tool=problem.tool, pinned=problem.pinned))
+        elif not problem.found:
+            lines.append(t("tool_silent", language, tool=problem.tool, pinned=problem.pinned))
+        else:
+            lines.append(t("tool_other", language, tool=problem.tool, found=problem.found,
+                           pinned=problem.pinned))
+    text = t("tools_stopped", language, problems=t("separator", language).join(lines),
+             commands="\n".join(
+                 f"uv run apps/mail/scripts/mx.py install-tool {problem.tool}"
+                 for problem in problems))
+    try:
+        send(text)
+    except ChatError as err:
+        log(f"the chat cannot be reached, the tool notice waits for the next start: {err}")
+        return False
+    try:
+        write_json(path, {"told": keys})
+    except OSError as err:
+        log(f"cannot write {path}: {err}")
+    return False
+
+
 def chat_sender(ctx: Ctx) -> Callable[[str], None]:
     """The watcher's `send`: the recorded private chat, looked up for each message, so a chat that
     is recorded later is used. No chat recorded is a chat that cannot be reached: the message
@@ -715,9 +769,10 @@ def chat_sender(ctx: Ctx) -> Callable[[str], None]:
 
 
 def serve(ctx: Ctx) -> None:
-    """`mx watch`: unless alerts are on and meant for this machine, say so on stderr and return;
-    that is no failure, and a service manager that restarts only failures leaves it stopped.
-    Otherwise write the configs and watch until SIGTERM or Ctrl+C."""
+    """`mx watch`: unless alerts are on and meant for this machine, and himalaya and carillon
+    are the pinned versions (`tools_ready`), say so on stderr and return; that is no failure, and
+    a service manager that restarts only failures leaves it stopped. Otherwise write the configs
+    and watch until SIGTERM or Ctrl+C, or until alerts are switched off or moved."""
     try:
         check_here(ctx)
     except MailError as err:
@@ -725,9 +780,12 @@ def serve(ctx: Ctx) -> None:
             print(f"mx: {err}", file=sys.stderr)
         return
     with single_instance(ctx.state):
-        configs.write_configs(ctx)
         rotate_log(ctx.state)
+        log = file_log(ctx.state / LOG)
+        send = chat_sender(ctx)
+        if not tools_ready(ctx, send, log):
+            return
+        configs.write_configs(ctx)
         Watcher(
-            ctx, hima=Himalaya(ctx), reader=Reader(ctx.settings.reader_model),
-            send=chat_sender(ctx), spawn=lambda: spawn_carillon(ctx), clock=clock_module.now,
-            log=file_log(ctx.state / LOG)).run()
+            ctx, hima=Himalaya(ctx), reader=Reader(ctx.settings.reader_model), send=send,
+            spawn=lambda: spawn_carillon(ctx), clock=clock_module.now, log=log).run()

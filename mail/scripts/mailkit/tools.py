@@ -216,13 +216,8 @@ def install_tool(
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 
 
-def installed_version(name: str) -> str | None:
-    """The version the tool on PATH prints for `--version`; None when it is not on PATH or
-    prints none."""
-    tool = _known(name)
-    exe = shutil.which(tool.binary)  # a .cmd shim on Windows cannot be started by bare name
-    if exe is None:
-        return None
+def _version_of(exe: str) -> str | None:
+    """The version that `exe --version` prints, or None."""
     try:
         done = subprocess.run(
             [exe, "--version"], check=False, stdin=subprocess.DEVNULL, capture_output=True,
@@ -231,3 +226,54 @@ def installed_version(name: str) -> str | None:
         return None
     found = _VERSION_RE.search(f"{done.stdout}\n{done.stderr}")
     return found.group() if found else None
+
+
+def installed_version(name: str) -> str | None:
+    """The version the tool on PATH prints for `--version`; None when it is not on PATH or
+    prints none."""
+    tool = _known(name)
+    exe = shutil.which(tool.binary)  # a .cmd shim on Windows cannot be started by bare name
+    return None if exe is None else _version_of(exe)
+
+
+@dataclass(frozen=True)
+class VersionProblem:
+    """A tool on PATH that is not the pinned release, or no tool on PATH."""
+
+    tool: str
+    found: str | None  # the version on PATH: None when it is not on PATH, "" when it says none
+    pinned: str  # the pinned version, without the tag's `v`
+    path: str = ""  # where it was found
+
+    @property
+    def key(self) -> str:
+        """The problem in a word, to tell whether it was told before."""
+        shown = "missing" if self.found is None else self.found or "unknown"
+        return f"{self.tool} {shown}"
+
+    def message(self) -> str:
+        """The problem and its fix, in English (for the agent and the log)."""
+        fix = (
+            f"run uv run apps/mail/scripts/mx.py install-tool {self.tool}, and put .local/bin of "
+            "your home directory first on PATH")
+        if self.found is None:
+            return f"{self.tool} is not on PATH, and the mail app needs {self.pinned}: {fix}"
+        if not self.found:
+            return (
+                f"{self.tool} on PATH ({self.path}) does not say its version, and the mail app "
+                f"needs {self.pinned}: {fix}")
+        return (
+            f"{self.tool} on PATH ({self.path}) is {self.found}, but the mail app needs "
+            f"{self.pinned}: {fix}")
+
+
+def version_problem(name: str) -> VersionProblem | None:
+    """None when the tool on PATH is the pinned release of `name`; else what is wrong. A tool
+    of another version may print other JSON, or none, so mx does not run it on a mailbox."""
+    tool = _known(name)
+    pinned = tool.version.removeprefix("v")
+    exe = shutil.which(tool.binary)
+    if exe is None:
+        return VersionProblem(name, None, pinned)
+    found = _version_of(exe) or ""
+    return None if found == pinned else VersionProblem(name, found, pinned, exe)

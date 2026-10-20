@@ -78,6 +78,13 @@ machine has the list, but neither the configs nor the passwords) and names the m
 still lack a password (`missing_secrets`) or an Outlook sign-in (`missing_sign_in`). `check` tests
 every mailbox in the list.
 
+When `versions` in the answer of `configure` is not empty, a program the app runs (himalaya;
+ortie for Outlook; carillon once alerts are on) is missing or is not the version the app was
+built for, and `check` answers `kind` `other` with the same text. Each entry names the
+`install-tool` command that fixes it: tell the user, and with their OK run it. If the entry still
+shows after that, another copy of the program comes first on `PATH`: `.local/bin` of the home
+directory must come before it.
+
 A mailbox is done when `check` answers `{"ok": true}` for it and its `sent` and `trash` folders
 are written under `[mailbox.folders]` (a missing `archive` folder is fine: some providers have
 none). For every other mailbox the user wants, do the following in order, and skip a part that is

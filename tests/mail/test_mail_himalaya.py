@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import re
 import shutil
 import socket
 import subprocess
@@ -974,12 +976,49 @@ def test_check_uses_the_inbox_folder_of_the_mailbox(hub, ctx, fake_himalaya, cap
     assert code == 0 and json.loads(out) == {"gmail": {"ok": True}}
 
 
-def test_check_without_himalaya_is_one_clear_error(hub, ctx, monkeypatch, tmp_path, capsys):
+def test_check_without_himalaya_says_so_for_each_mailbox(hub, ctx, monkeypatch, tmp_path, capsys):
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.setenv("PATH", str(empty))
     code, out, err = run_cli(hub, capsys, "check")
-    assert (code, out) == (1, "") and "mx install-tool himalaya" in err
+    assert (code, err) == (0, "")
+    result = json.loads(out)
+    assert list(result) == ["qq", "gmail"]
+    for answer in result.values():
+        assert (answer["ok"], answer["kind"]) == (False, "other")
+        assert answer["error"].startswith("himalaya is not on PATH, and the mail app needs 2.2.1")
+        assert "mx.py install-tool himalaya" in answer["error"]
+        assert ".local/bin of your home directory first on PATH" in answer["error"]
+
+
+def test_check_with_another_himalaya_version_asks_nothing_of_it(
+        hub, ctx, fake_himalaya, monkeypatch, capsys):
+    fake = fake_himalaya(make_server())
+    monkeypatch.setenv("FAKE_HIMALAYA_VERSION", "1.1.0")
+    code, out, _ = run_cli(hub, capsys, "check", "qq")
+    answer = json.loads(out)["qq"]
+    assert code == 0 and (answer["ok"], answer["kind"]) == (False, "other")
+    shown = re.fullmatch(
+        r"himalaya on PATH \((.+)\) is 1\.1\.0, but the mail app needs 2\.2\.1: run uv run "
+        r"apps/mail/scripts/mx\.py install-tool himalaya, and put \.local/bin of your home "
+        r"directory first on PATH", answer["error"])
+    assert shown and os.path.normcase(shown[1]) == os.path.normcase(str(fake.exe))
+    assert fake.calls() == []  # a himalaya of another version is not asked about the mailbox
+
+
+def test_check_of_an_outlook_mailbox_needs_the_pinned_ortie(
+        hub, ctx, fake_himalaya, make_exe, capsys):
+    write_mailboxes(hub, BOXES + (
+        '\n[[mailbox]]\nname = "outlook"\naddress = "me@outlook.com"\nprovider = "outlook"\n'))
+    fake_himalaya(make_server())
+    make_exe("ortie", "print('ortie v2.0.0')")
+    code, out, _ = run_cli(hub, capsys, "check")
+    result = json.loads(out)
+    assert code == 0 and result["qq"] == {"ok": True}  # the other mailboxes are checked
+    assert result["outlook"]["kind"] == "other"
+    assert "ortie on PATH" in result["outlook"]["error"]
+    assert "is 2.0.0, but the mail app needs 2.3.0" in result["outlook"]["error"]
+    assert "install-tool ortie" in result["outlook"]["error"]
 
 
 # --- the real binary, offline -----------------------------------------------------------------

@@ -298,11 +298,61 @@ def test_installed_version_of_an_unknown_tool():
         tools.installed_version("curl")
 
 
+# --- version_problem ---
+
+
+FIX = (
+    "uv run apps/mail/scripts/mx.py install-tool {tool}, and put .local/bin of your home "
+    "directory first on PATH")
+
+
+def only_bin(tmp_path, monkeypatch) -> None:
+    """PATH is the folder of make_exe and nothing else: no real tool of this machine is found."""
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+
+
+def test_the_pinned_version_is_no_problem(make_exe, tmp_path, monkeypatch):
+    only_bin(tmp_path, monkeypatch)
+    make_exe("himalaya", "print('himalaya v2.2.1 +imap +smtp')")
+    make_exe("carillon", "print('carillon v0.2.0')")
+    assert tools.version_problem("himalaya") is None
+    assert tools.version_problem("carillon") is None
+
+
+def test_another_version_is_a_problem_that_says_how_to_fix_it(make_exe, tmp_path, monkeypatch):
+    only_bin(tmp_path, monkeypatch)
+    exe = make_exe("himalaya", "print('himalaya v1.1.0 +imap')")
+
+    found = tools.version_problem("himalaya")
+
+    assert (found.tool, found.found, found.pinned) == ("himalaya", "1.1.0", "2.2.1")
+    assert os.path.normcase(found.path) == os.path.normcase(str(exe))
+    assert found.message() == (
+        f"himalaya on PATH ({found.path}) is 1.1.0, but the mail app needs 2.2.1: run "
+        + FIX.format(tool="himalaya"))
+
+
+def test_a_missing_tool_or_one_without_a_version_is_a_problem(make_exe, tmp_path, monkeypatch):
+    only_bin(tmp_path, monkeypatch)
+    missing = tools.version_problem("ortie")
+    assert (missing.tool, missing.found, missing.pinned) == ("ortie", None, "2.3.0")
+    assert missing.message() == (
+        "ortie is not on PATH, and the mail app needs 2.3.0: run " + FIX.format(tool="ortie"))
+
+    exe = make_exe("carillon", "print('carillon dev build')")
+    silent = tools.version_problem("carillon")
+    assert silent.found == "" and os.path.normcase(silent.path) == os.path.normcase(str(exe))
+    assert silent.message() == (
+        f"carillon on PATH ({silent.path}) does not say its version, and the mail app needs "
+        "0.2.0: run " + FIX.format(tool="carillon"))
+
+
 # --- the command ---
 
 
 def test_install_tool_command_needs_no_hub(tmp_path, monkeypatch, capsys):
-    """R1: no mail/mailboxes.toml here, and the working directory is not a hub."""
+    """No mail/mailboxes.toml here, and the working directory is not a hub."""
     archive = tgz({"himalaya": b"bin", "himalaya.exe": b"exe"})
     pin(monkeypatch, archive)
     work = tmp_path / "elsewhere"

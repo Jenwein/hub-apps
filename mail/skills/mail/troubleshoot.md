@@ -15,7 +15,10 @@ uv run apps/mail/scripts/mx.py secret-status
 `check` tests each mailbox (or the one named): it signs in, opens both the receiving and the
 sending side, and lists one mail. The answer per mailbox is `{"ok": true}` or
 `{"ok": false, "kind": "auth" | "connect" | "other", "error": "..."}`; the command itself ends with
-status 0 either way. `secret-status` says per mailbox whether a password is stored (`true` or
+status 0 either way. An `error` that says himalaya (or ortie, for Outlook) is not on `PATH` or is
+another version than the app needs comes before any sign-in: the mailbox was not tried. With the
+user's OK run the `install-tool` command it names; when it still shows after that, another copy
+comes first on `PATH`, and `.local/bin` of the home directory must come before it. `secret-status` says per mailbox whether a password is stored (`true` or
 `false`; `"oauth"` for an Outlook mailbox) and never shows it.
 
 ## The sign-in fails
@@ -112,7 +115,10 @@ Go through the fields ([alerts.md](alerts.md) explains them):
    turns on. A Windows task runs only while the user is logged on, and it sees only the user
    account's `PATH`, not the one of a shell: himalaya, carillon, claude and cc-connect must all be
    on it, or the service cannot start them. A service started before `PATH` was changed has to
-   be ended and run again.
+   be ended and run again. The watcher also stops at its start when himalaya or carillon is
+   missing or not the version the app needs: `watch.log` then ends with that, and the chat was
+   told once. With the user's OK run the `install-tool` command it names, make sure `.local/bin`
+   of the home directory comes first on `PATH`, and start the service again.
 3. `carillon` is `down`: the listener cannot run. `mx install-tool carillon` if it is missing; the
    reason is in `watch.log`.
 4. `queued_alerts` is above 0: the chat cannot be reached (see above). The alerts are sent when it
