@@ -225,10 +225,14 @@ def _list(hima: Himalaya, box: _Box, until: datetime, left: list[dict]) -> None:
         box.error = err
         return
     box.validity = validity
+    given_up = set()  # never fetched again, also when the window still covers its arrival
     for entry in left:
         key = entry["key"]
-        if (entry["mailbox"] == name and entry["folder"] == box.folder
-                and key.split("/")[1] == validity and not entry.get("given_up")):
+        if entry["mailbox"] != name:
+            continue
+        if entry.get("given_up"):
+            given_up.add(key)
+        elif entry["folder"] == box.folder and key.split("/")[1] == validity:
             box.items.append((key, name, box.folder, entry["uid"]))
             box.carried.add(key)
             box.flags[key] = (entry.get("alone") is True, entry.get("timeouts") or 0)
@@ -236,7 +240,7 @@ def _list(hima: Himalaya, box: _Box, until: datetime, left: list[dict]) -> None:
     new = sorted(
         (_aware(when), uid) for uid, when in arrived.items()
         if uid in asked and when is not None and box.start <= _aware(when) < until)
-    known = {item[0] for item in box.items}
+    known = {item[0] for item in box.items} | given_up
     for _, uid in new:
         key = verdict_key(name, validity, str(uid))
         if key not in known:

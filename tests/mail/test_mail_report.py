@@ -133,8 +133,10 @@ class SlowFetch(Himalaya):
     def __init__(self, ctx, slow: set[int]):
         super().__init__(ctx)
         self.slow = slow
+        self.fetched: list[int] = []  # the UIDs asked for, call after call
 
     def fetch_raw(self, mailbox: str, folder: str, uids: list[int]) -> dict[int, bytes]:
+        self.fetched += uids
         if self.slow & set(uids):
             raise TimedOut(f"himalaya did not answer within {report.HIMALAYA_TIMEOUT:g} s")
         return super().fetch_raw(mailbox, folder, uids)
@@ -602,6 +604,30 @@ def test_a_mail_that_times_out_alone_three_times_is_given_up(ctx, clock, fake_hi
     clock.at = T0 + 3 * DAY
     assert daily(ctx, T0 + 2 * DAY + HOUR, T0 + 3 * DAY, hima=hima) == t("daily_nothing", "en")
     assert json.loads((ctx.state / "report.json").read_text("utf-8"))["left"] == []
+
+
+def test_a_given_up_mail_is_not_fetched_again_while_its_window_is_covered_again(
+        ctx, clock, fake_himalaya, fake_claude):
+    fake_himalaya(server(qq=[message(1, "Domain renewal")]))
+    fake_claude.by_subject(SORTED)
+    hima = SlowFetch(ctx, {1})
+    given_up = (
+        "Mail in qq that took too long to fetch, three reports in a row: 1. It is left out "
+        "from now on: look for it in the mailbox itself.")
+    # No report goes out, so every run covers the window from SINCE again, where the mail
+    # arrived.
+    for hours in (0, 1):
+        clock.at = T0 + hours * HOUR
+        assert daily(ctx, SINCE, clock.at, hima=hima) == (
+            "Mail not sorted in time: 1. The next report lists it.")
+    clock.at = T0 + 2 * HOUR
+    assert daily(ctx, SINCE, clock.at, hima=hima) == given_up
+
+    hima.slow, hima.fetched = set(), []  # a fetch now would work, and show
+    clock.at = T0 + 3 * HOUR
+    assert daily(ctx, SINCE, clock.at, hima=hima) == given_up
+    assert hima.fetched == []
+    assert fake_claude.calls() == []
 
 
 def test_a_server_that_cannot_be_reached_in_time_is_no_slow_mail(ctx, clock, fake_himalaya,
