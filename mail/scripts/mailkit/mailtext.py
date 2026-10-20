@@ -35,7 +35,8 @@ FILENAME_LIMIT = 100
 HEADER_LIMIT = 998  # a header value, as one line (the line length of RFC 5322)
 ADDRESS_LIMIT = 200  # addresses read per header name (To, Cc, ...): a mail may list thousands
 ADDRESS_CHARS = 20_000  # read of all the headers of one name together (To: one budget for all)
-ENTRY_CHARS = 1_000  # a longer entry of an address list is no address anyone writes
+ENTRY_CHARS = 1_000  # a longer entry of an address list keeps its address only (`_squeezed`)
+ADDR_SPEC_CHARS = 320  # the longest address such an entry may keep: 64 + @ + 255
 CHUNK_CHARS = 2_000  # what the stdlib address parser gets at once
 PDF_PAGES = 10  # the pages of a PDF that are read
 PDF_MAX_BYTES = 5 * 1024 * 1024  # a bigger PDF is not read at all: slow, and a likely trap
@@ -182,15 +183,56 @@ def _entries(value: str, budget: int) -> tuple[list[str], int]:
     return entries, end
 
 
+def _last_angle(entry: str) -> str | None:
+    """What the last `<...>` of an address-list entry holds, outside quotes and comments (with
+    backslash escapes): the address of `"name" <address>`. None when there is none."""
+    found: str | None = None
+    start: int | None = None  # where the open `<` is
+    quoted, escaped, comments = False, False, 0
+    for at, char in enumerate(entry):
+        if start is not None:
+            if char == ">":
+                found, start = entry[start + 1:at], None
+        elif escaped:
+            escaped = False
+        elif quoted or comments:
+            if char == "\\":
+                escaped = True
+            elif quoted and char == '"':
+                quoted = False
+            elif comments and char == "(":
+                comments += 1
+            elif comments and char == ")":
+                comments -= 1
+        elif char == '"':
+            quoted = True
+        elif char == "(":
+            comments = 1
+        elif char == "<":
+            start = at
+    return found
+
+
+def _squeezed(entry: str) -> str:
+    """An entry longer than ENTRY_CHARS as `<address>`: its display name is dropped, its address
+    (the last `<...>`, of at most ADDR_SPEC_CHARS) kept, so that a name made too long does not
+    hide the address and let the next entry pass for the sender. "" when it has none."""
+    found = _last_angle(entry)
+    found = found.strip() if found is not None else ""
+    return f"<{found}>" if found and len(found) <= ADDR_SPEC_CHARS else ""
+
+
 def _chunks(entries: list[str]) -> Iterator[str]:
     """The entries joined again in pieces of at most CHUNK_CHARS characters. The stdlib address
     parser is slower than linear with the length of what it gets (19,000 backslashes take over a
-    second), so it only ever gets short pieces; an entry longer than ENTRY_CHARS is no address
-    anyone writes and is left out."""
+    second), so it only ever gets short pieces; an entry longer than ENTRY_CHARS goes in as its
+    address alone (`_squeezed`), or not at all."""
     chunk: list[str] = []
     size = 0
     for entry in entries:
-        if len(entry) > ENTRY_CHARS or not entry.strip():
+        if len(entry) > ENTRY_CHARS:
+            entry = _squeezed(entry)
+        if not entry.strip():
             continue
         if chunk and size + len(entry) > CHUNK_CHARS:
             yield ",".join(chunk)

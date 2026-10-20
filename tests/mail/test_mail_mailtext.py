@@ -333,6 +333,31 @@ def test_quoted_names_with_commas_never_leave_a_piece_of_a_name(length):
     assert found.cc == found.to
 
 
+def test_an_entry_with_an_overlong_name_keeps_its_address():
+    # A name over the cap is no name anyone writes, but the address after it is what the mail
+    # came from or went to: it must not vanish and leave the next entry to pass for the sender.
+    padding = "x" * 1_100
+    raw = (
+        f'From: "{padding}" <evil@phish.example>, Bank <service@bank.example>\n'
+        f'To: "{padding}" <evil@phish.example>, Bob <bob@example.org>\n'
+        "Subject: hi\n\nbody\n").encode()
+    found = parse(raw)
+    assert (found.sender_name, found.sender_addr) == ("", "evil@phish.example")
+    assert found.to == ["evil@phish.example", "bob@example.org"]
+
+
+def test_an_overlong_entry_keeps_only_an_address_outside_its_quotes_and_comments():
+    padding = "x" * 1_100
+    raw = (
+        f'From: "{padding} <service@bank.example>"\n'  # a name that only looks like an address
+        f'To: ({padding} <a@b.example>) <c@d.example>, "{padding}" <{"y" * 400}@e.example>,'
+        " f@g.example\n"
+        "Subject: hi\n\nbody\n").encode()
+    found = parse(raw)
+    assert (found.sender_name, found.sender_addr) == ("", "")
+    assert found.to == ["c@d.example", "f@g.example"]  # an address over 320 characters is none
+
+
 def repeated_header(value: str, times: int = 20) -> bytes:
     return (
         "From: Mallory <mallory@example.org>\n" + f"To: {value}\n" * times
