@@ -375,12 +375,14 @@ class Himalaya:
         return found
 
     def run(
-        self, mailbox: str, *args: str, input: bytes | None = None, json: bool = True
+        self, mailbox: str, *args: str, input: bytes | None = None, json: bool = True,
+        timeout: float | None = None,
     ) -> bytes:
         """`himalaya -c himalaya.toml -a <mailbox> [--json] <args>` in the state directory; the
         bytes it printed. Stdin is the null device unless `input` is given. A non-zero exit is an
         HimalayaError (an AuthError or ConnectError when the text says so) with the message from
-        stdout; no answer within the timeout kills it and is a ConnectError. A forbidden command
+        stdout; no answer within `timeout` seconds (default: the timeout of this Himalaya) kills
+        it and is a TimedOut, a ConnectError. A forbidden command
         (FORBIDDEN) is refused before anything runs, and so is any call while the machine has no
         himalaya.toml: himalaya would tell the caller to run its own `himalaya configure`."""
         refused = forbidden(args)
@@ -402,11 +404,12 @@ class Himalaya:
                 **extra)
         except OSError as err:
             raise MailError(f"cannot run himalaya: {err}") from err
+        limit = self.timeout if timeout is None else timeout
         try:
-            out, err = proc.communicate(input, timeout=self.timeout)
+            out, err = proc.communicate(input, timeout=limit)
         except subprocess.TimeoutExpired:
             kill_tree(proc)
-            raise TimedOut(f"himalaya did not answer within {self.timeout:g} s") from None
+            raise TimedOut(f"himalaya did not answer within {limit:g} s") from None
         except BaseException:  # Ctrl+C: do not leave himalaya running
             kill_tree(proc)
             raise
@@ -499,11 +502,12 @@ class Himalaya:
             raise HimalayaError(f"himalaya returned no message for {id} in {folder}")
         return out
 
-    def send(self, mailbox: str, raw: bytes) -> None:
-        """Send a mail without saving a copy (the caller appends the copy: see `add`). himalaya
-        stops reading at the first line that is not UTF-8, so the mail must be 7-bit."""
+    def send(self, mailbox: str, raw: bytes, timeout: float | None = None) -> None:
+        """Send a mail without saving a copy (the caller appends the copy: see `add`), within
+        `timeout` seconds (default: the timeout of this Himalaya). himalaya stops reading at the
+        first line that is not UTF-8, so the mail must be 7-bit."""
         _check_mail(raw)
-        self.run(mailbox, "message", "send", "--no-save", input=raw)
+        self.run(mailbox, "message", "send", "--no-save", input=raw, timeout=timeout)
 
     def add(self, mailbox: str, folder: str, raw: bytes) -> None:
         """Append a mail to `folder`, marked as read."""

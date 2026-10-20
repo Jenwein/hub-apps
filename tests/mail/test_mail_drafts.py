@@ -21,7 +21,7 @@ from mailkit import clock, compose, drafts, strings
 from mailkit.cli import main
 from mailkit.context import load
 from mailkit.drafts import CODE_TTL, MAX_ATTACH_BYTES, CodeError, Draft
-from mailkit.himalaya import Himalaya
+from mailkit.himalaya import Himalaya, TimedOut
 from mailkit.settings import MailError
 from mailtest import (
     CHAT_PROJECT,
@@ -902,6 +902,53 @@ def test_failed_send_needs_a_new_code(mailhub, chat, fake_chat, fake_himalaya, m
     ok(mx("confirm", id))
     ok(mx("send", id, "--code", last_code(fake_chat)))
     assert len(fake.server()["_sent"]) == 1
+
+
+def test_the_send_timeout_grows_with_the_size_of_the_mail(
+        mailhub, chat, fake_chat, server, mx, tmp_path, monkeypatch):
+    assert compose.send_timeout(0) == 90
+    assert compose.send_timeout(2_000_000) == 150
+    seen: list[tuple[list[str], float | None]] = []
+    real = Himalaya.run
+
+    def run(self, mailbox, *args, **kwargs):
+        seen.append((list(args[:2]), kwargs.get("timeout")))
+        return real(self, mailbox, *args, **kwargs)
+
+    monkeypatch.setattr(Himalaya, "run", run)
+    big = tmp_path / "big.bin"
+    big.write_bytes(bytes(range(256)) * 12_000)  # 3 MB of bytes: about 4 MB in base64
+    id = new_draft(mx, "--attach", str(big))
+
+    ok(mx("send", id, "--code", last_code(fake_chat)))
+
+    [raw] = [call["stdin"] for call in sends(server)]
+    [(_, timeout)] = [found for found in seen if found[0] == ["message", "send"]]
+    assert timeout == compose.send_timeout(len(raw.encode("ascii"))) > 200
+
+
+@pytest.mark.parametrize("box", ["qq", "gmail"])
+def test_a_send_that_timed_out_may_have_gone(mailhub, chat, fake_chat, server, mx, monkeypatch,
+                                             box):
+    def timed_out(self, mailbox, raw, timeout=None):
+        raise TimedOut(f"himalaya did not answer within {timeout:g} s")
+
+    monkeypatch.setattr(Himalaya, "send", timed_out)
+    data = ok(mx("draft", "--mailbox", box, "--to", "bob@example.org", "--subject", "Lunch",
+                 stdin=BODY))
+    id = data["draft"]
+
+    result = mx("send", id, "--code", last_code(fake_chat))
+
+    fails(result, f"draft {id} may have been sent: himalaya did not answer within ")
+    assert "not sent" not in result.err
+    assert f"before you run mx confirm {id}" in result.err
+    if box == "gmail":  # the server keeps the copy of what it sent
+        assert f"mx list --mailbox {box} --folder sent" in result.err
+    else:  # mx appends the copy after a send that answered: the sent folder cannot tell
+        assert "ask the recipient" in result.err and "--folder sent" not in result.err
+    saved = stored(mailhub, id)
+    assert saved["sent_at"] == "" and saved["code_hash"] == ""  # the code is spent all the same
 
 
 def test_failed_copy_still_counts_as_sent(mailhub, chat, fake_chat, fake_himalaya, mx):

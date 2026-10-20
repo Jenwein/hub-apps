@@ -145,6 +145,8 @@ When `send` refuses:
 | `wrong code (N tries left)` | tell the user the code did not match; ask them to read it again from the chat message with the draft. Never try other codes yourself |
 | `wrong code 3 times`, `the code expired`, `no code is waiting`, `the draft changed after its code was sent` | run `mx confirm <id>`, tell the user a new code is in the chat and the old one is dead |
 | `not sent: ...; run mx confirm <id> for a new code` | the code is spent and the mail did not go. Tell the user the reason; once it is fixed, `mx confirm <id>` |
+| `draft <id> may have been sent: himalaya did not answer within ...` | the code is spent, and the server may have taken the mail before the time ran out. Never tell the user it was not sent: tell them it may have gone out. Look for it as the message says (`mx list --mailbox <m> --folder sent`, or, where it says the sent folder cannot tell, the user asks the recipient). Only when it did not go, `mx confirm <id>` for a new code |
+| `draft <id> changed meanwhile: run mx send again` | another command changed the draft while this one checked the code; the code still holds. Run the same `mx send` again |
 | `the mail that draft ... forwards changed on the server` | make a new forward |
 | `already sent` | nothing; do not write it again |
 

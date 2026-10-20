@@ -33,7 +33,7 @@ from pathlib import Path
 from . import chat, clock, drafts, mailtext, query, strings
 from .context import Ctx
 from .drafts import MAX_ATTACH_BYTES, CodeError, Draft
-from .himalaya import Himalaya
+from .himalaya import Himalaya, TimedOut
 from .message import ATTACHMENTS_DIR
 from .query import INVISIBLE, SUBJECT_LIMIT, clean
 from .reader import CONTROLS, Reader
@@ -57,6 +57,10 @@ MESSAGE_ID = re.compile(r"<[!-;=?-~]+>")  # printable ASCII but <, > and space, 
 REPLY_PREFIXES = ("re:", "re：", "回复:", "回复：")
 FORWARD_PREFIXES = ("fwd:", "fw:", "转发:", "转发：")
 MB = 1024 * 1024
+# The time himalaya has to send a mail: SEND_TIMEOUT seconds, and SEND_TIMEOUT_PER_MB more for each
+# million bytes of the mail as it is built (attachments in base64 included).
+SEND_TIMEOUT = 90.0
+SEND_TIMEOUT_PER_MB = 30.0
 
 
 # --- what the agent gives ----------------------------------------------------------------------
@@ -479,7 +483,9 @@ def send(ctx: Ctx, hima: Himalaya, id: str, code: str) -> dict:
         drafts.save(ctx, d)
         try:
             raw = build(d, mb, original, files)
-            hima.send(d.mailbox, raw)
+            hima.send(d.mailbox, raw, timeout=send_timeout(len(raw)))
+        except TimedOut as err:  # the server may have taken the mail before the time ran out
+            raise MailError(_maybe_sent(id, mb, err)) from err
         except (MailError, ValueError) as err:
             raise MailError(f"not sent: {err}; run mx confirm {id} for a new code") from err
         d.sent_at = clock.now().isoformat()
@@ -491,6 +497,26 @@ def send(ctx: Ctx, hima: Himalaya, id: str, code: str) -> dict:
         if failed:
             result["copy_failed"] = failed  # the mail went out all the same
     return result
+
+
+def send_timeout(size: int) -> float:
+    """Seconds himalaya has to send a mail of `size` bytes: a large one takes a while to upload."""
+    return SEND_TIMEOUT + SEND_TIMEOUT_PER_MB * size / 1_000_000
+
+
+def _maybe_sent(id: str, mb: Mailbox, err: TimedOut) -> str:
+    """What a send that ran out of time says: the mail may have gone out, so it must be looked
+    for before a new code could send it a second time. Where mx appends the sent copy itself, the
+    sent folder has none of a send that did not answer, and only the recipient can tell."""
+    if mb.save_copy:
+        look = (
+            f"{mb.name} gets its sent copy from mx after a send that answered, so its sent folder "
+            "cannot tell: ask the recipient whether it arrived")
+    else:
+        look = f"look for it with mx list --mailbox {mb.name} --folder sent, or ask the recipient"
+    return (
+        f"draft {id} may have been sent: {err}. The code is spent, and the mail may have gone "
+        f"out: {look}, before you run mx confirm {id} for a new code")
 
 
 def listing(ctx: Ctx) -> dict:
