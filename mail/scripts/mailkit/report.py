@@ -6,12 +6,14 @@ CC_HUB_REPORT_UNTIL, and moves the window on only once a report went out (or had
 so a report that could not be sent is covered again by the next one. It cuts a section beyond
 SECTION_LIMIT characters and stops one that runs longer than 300 s.
 
-The daily section lists the inbox mail of every mailbox dated in the window: first the urgent
-mail whose alert did not go out, then the daily tier by category, a line per mail, then the mail
-the reader could not sort. A line holds the mailbox, the sender (from the headers, cleaned), the
-reader's summary, and the deadline, amount and phishing warning when the reader found them: the
-fields the reader checked, never text from a body. Verdicts that the watcher or an earlier report
-stored are reused; the rest are sorted with `triage`, one mailbox at a time.
+The daily section lists the inbox mail of every mailbox that arrived in the window (by the
+server's arrival time, not the Date header, which a slow relay or a wrong clock puts anywhere and
+some mail lacks): first the urgent mail whose alert did not go out, then the daily tier by
+category, a line per mail, then the mail the reader could not sort. A line holds the mailbox, the
+sender (from the headers, cleaned), the reader's summary, and the deadline, amount and phishing
+warning when the reader found them: the fields the reader checked, never text from a body.
+Verdicts that the watcher or an earlier report stored are reused; the rest are sorted with
+`triage`, one mailbox at a time.
 
 What one report could not finish, a later one picks up (`state/report.json`):
 
@@ -19,7 +21,11 @@ What one report could not finish, a later one picks up (`state/report.json`):
   fetched, or whose mailbox failed while it was fetched. The next report sorts it with its own
   mail, whatever its date. Once listed, an entry keeps the end of the window that listed it
   (`listed`) until a report starts at or after that end: until then the report that listed it may
-  not have gone out, and cc-hub covers its window again.
+  not have gone out, and cc-hub covers its window again; a report that starts before that end
+  takes the entry as not listed yet, so it stays until a report that went out has listed it.
+  Mail whose fetch took too long is fetched on its own next time (`alone`), so that one very large
+  mail holds up no other; a mail whose own fetch took too long TIMEOUTS_TO_GIVE_UP times in a row
+  (`timeouts`) is said once and left out.
 - `missed`: for a mailbox that could not be listed, where its window started. Later reports list
   it from there, until a report that read it went out (`read`), the same way. Each run marks
   every mailbox as missed before it starts, so a run that is stopped or fails halfway leaves the
@@ -36,6 +42,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -46,15 +53,15 @@ from . import clock
 from .alerts import AlertQueue
 from .context import Ctx
 from .health import Health, heartbeat, sign_in_command
-from .himalaya import AuthError, Himalaya
-from .marks import LAST_ZONE, inbox_folder, verdict_key
+from .himalaya import AuthError, ConnectError, Himalaya, TimedOut
+from .marks import LAST_ZONE, inbox_folder, uid_set, verdict_key
 from .paths import locked, read_json, write_json
-from .query import NAME_LIMIT, SUBJECT_LIMIT, Query, clean, server_query
+from .query import NAME_LIMIT, SUBJECT_LIMIT, clean
 from .reader import AMOUNT_LIMIT, SUMMARY_LIMIT, Reader, ReaderError, Verdict
 from .settings import Mailbox, MailError
 from .strings import t
 from .tools import TOOLS, fetch_url
-from .triage import FALLBACK_REASON, FETCH_FALLBACK_REASON, triage
+from .triage import FALLBACK_REASON, FETCH_FALLBACK_REASON, WORKERS, TriageResult, triage
 from .verdicts import VerdictStore
 from .watch import LOGIN_KINDS
 
@@ -66,7 +73,7 @@ from .watch import LOGIN_KINDS
 DAILY_BUDGET = 140.0
 READER_TIMEOUT = 120.0
 HIMALAYA_TIMEOUT = 20.0  # each himalaya call of the daily section
-SEARCH_LIMIT = 500  # mails per mailbox that one daily section reads
+TIMEOUTS_TO_GIVE_UP = 3  # a mail whose own fetch took too long this often in a row is left out
 SECTION_LIMIT = 20_000  # characters: cc-hub cuts a section's output beyond this
 LATEST_TIMEOUT = 10  # seconds GitHub has to say a tool's latest release
 FIELD_LIMIT = 300  # an error text as part of a line
@@ -74,11 +81,14 @@ REPORT = "report.json"  # in the state directory
 # The categories of the daily tier that have a heading of their own, in the order shown; the
 # others (money, security, other) are shown under "other".
 GROUPS = ("awaiting_reply", "due_soon", "orders", "bills")
+# What himalaya prints when the server, not himalaya's own timeout, gave up waiting.
+TIMEOUT_WORDS = ("timed out", "os error 10060")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,39}")
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 Item = tuple[str, str, str, int]  # verdict key, mailbox, folder, UID: what triage takes
+Flags = tuple[bool, int]  # of a carried mail: fetch it alone, how often its own fetch took too long
 
 
 def _aware(at: datetime) -> datetime:
@@ -128,6 +138,10 @@ def _done(text: object, since: datetime) -> bool:
     return end is not None and end <= since
 
 
+def _count(value: object) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+
+
 def _left_entry(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -138,7 +152,8 @@ def _left_entry(entry: object) -> bool:
     parts = key.split("/")
     listed = entry.get("listed")
     return (len(parts) == 3 and parts[0] == mailbox and parts[2] == str(uid)
-            and (listed is None or _time(listed) is not None))
+            and (listed is None or _time(listed) is not None)
+            and entry.get("alone") in (None, True, False) and _count(entry.get("timeouts")))
 
 
 def _missed_entry(entry: object) -> bool:
@@ -147,8 +162,9 @@ def _missed_entry(entry: object) -> bool:
 
 
 def _load_state(ctx: Ctx, since: datetime) -> dict:
-    """What earlier reports left, without what a report that went out has listed or read. A
-    file that cannot be read counts as none: it must not stop every report from now on."""
+    """What earlier reports left, without what a report that went out has listed or read. An
+    entry listed by a report that did not go out counts as not listed yet. A file that cannot be
+    read counts as none: it must not stop every report from now on."""
     with locked(ctx.state):
         try:
             data = read_json(ctx.state / REPORT, {})
@@ -158,7 +174,7 @@ def _load_state(ctx: Ctx, since: datetime) -> dict:
     left, missed = data.get("left"), data.get("missed")
     return {
         "left": [
-            e for e in (left if isinstance(left, list) else [])
+            {**e, "listed": None} for e in (left if isinstance(left, list) else [])
             if _left_entry(e) and not _done(e.get("listed"), since)],
         "missed": {
             name: e for name, e in (missed.items() if isinstance(missed, dict) else ())
@@ -171,7 +187,7 @@ def _save_state(ctx: Ctx, state: dict) -> None:
         write_json(ctx.state / REPORT, state)
 
 
-# --- the daily section -------------------------------------------------------------------------
+# --- listing -----------------------------------------------------------------------------------
 
 
 @dataclass
@@ -184,41 +200,167 @@ class _Box:
     validity: str | None = None  # its UIDVALIDITY, once it was listed
     items: list[Item] = field(default_factory=list)  # to sort: carried first, then the new mail
     carried: set[str] = field(default_factory=set)  # the keys of the carried entries in `items`
-    full: bool = False  # the search found SEARCH_LIMIT mails: there may be older ones
+    flags: dict[str, Flags] = field(default_factory=dict)  # of the carried entries
     error: MailError | None = None  # it could not be listed, or fetched from
+
+    def flags_of(self, key: str) -> Flags:
+        return self.flags.get(key, (False, 0))
 
 
 def _list(hima: Himalaya, box: _Box, until: datetime, left: list[dict]) -> None:
     """Fill in `box`: the mail carried for it that the server still numbers the same way, then
-    its mail dated in [box.start, until), oldest first. A failure goes into `box.error`."""
+    the mail that arrived in [box.start, until), in the order it arrived. A failure goes into
+    `box.error`."""
     name = box.mb.name
     try:
         validity, _ = hima.status(name, box.folder)
-        # `after D` compares the day of each Date header in the sender's own zone: the day
-        # before the start in the zone where a day starts last misses nothing, and the exact
-        # time filters the rest.
-        day = box.start.astimezone(LAST_ZONE).date()
-        found = hima.search(name, box.folder, server_query(Query(since=day)), SEARCH_LIMIT)
+        # SEARCH SINCE compares the day each mail arrived in the server's own time zone: from the
+        # day of the start in the zone where a day starts last nothing is missed, and the times
+        # of arrival filter the rest.
+        uids = hima.uids_since(name, box.folder, box.start.astimezone(LAST_ZONE).date())
+        arrived = hima.fetch_dates(name, box.folder, uid_set(uids)) if uids else {}
     except MailError as err:
         box.error = err
         return
     box.validity = validity
     for entry in left:
+        key = entry["key"]
         if (entry["mailbox"] == name and entry["folder"] == box.folder
-                and entry["key"].split("/")[1] == validity):
-            box.items.append((entry["key"], name, box.folder, entry["uid"]))
-            box.carried.add(entry["key"])
-    dated = [(_aware(e.date), e) for e in found if e.date is not None]
-    box.full = len(found) >= SEARCH_LIMIT and bool(dated) and min(d for d, _ in dated) >= box.start
+                and key.split("/")[1] == validity):
+            box.items.append((key, name, box.folder, entry["uid"]))
+            box.carried.add(key)
+            box.flags[key] = (entry.get("alone") is True, entry.get("timeouts") or 0)
+    asked = set(uids)
     new = sorted(
-        (when, int(e.id)) for when, e in dated
-        if box.start <= when < until and e.id.isascii() and e.id.isdigit())
+        (_aware(when), uid) for uid, when in arrived.items()
+        if uid in asked and when is not None and box.start <= _aware(when) < until)
     known = {item[0] for item in box.items}
     for _, uid in new:
         key = verdict_key(name, validity, str(uid))
         if key not in known:
             known.add(key)
             box.items.append((key, name, box.folder, uid))
+
+
+# --- sorting -----------------------------------------------------------------------------------
+
+
+@dataclass
+class _Sorted:
+    """What sorting the mail of the daily section came to."""
+
+    verdicts: list[Verdict] = field(default_factory=list)
+    carry: dict[str, Flags] = field(default_factory=dict)  # what the next report takes
+    unfetched: dict[str, int] = field(default_factory=dict)  # by mailbox: fetched again next time
+    given_up: dict[str, int] = field(default_factory=dict)  # by mailbox: left out from now on
+    not_sorted: int = 0
+    reader_failed: int = 0
+    reader_why: str | None = None
+
+
+def _timed_out(err: MailError) -> bool:
+    """Did the fetch take too long, by himalaya's own timeout or by the server's?"""
+    return isinstance(err, TimedOut) or (
+        isinstance(err, ConnectError) and any(word in str(err).lower() for word in TIMEOUT_WORDS))
+
+
+def _too_long(done: _Sorted, box: _Box, left: list[str]) -> None:
+    """The fetch of `left` took too long: each is fetched on its own next time. A mail whose own
+    fetch took too long TIMEOUTS_TO_GIVE_UP times is given up."""
+    alone = len(left) == 1  # every mail of a batch whose fetch fails is left: it was alone
+    for key in left:
+        times = box.flags_of(key)[1] + alone
+        if times >= TIMEOUTS_TO_GIVE_UP:
+            done.given_up[box.mb.name] = done.given_up.get(box.mb.name, 0) + 1
+        else:
+            done.carry[key] = (True, times)
+            done.not_sorted += 1
+
+
+def _settle(done: _Sorted, store: VerdictStore, box: _Box, keys: list[str],
+            result: TriageResult | None, err: MailError | None) -> None:
+    """Take in what one triage call over `keys` of `box` came to."""
+    if err is None:
+        for v in result.verdicts:
+            done.verdicts.append(v)
+            if _fell_back(v, FETCH_FALLBACK_REASON):  # not stored: fetched again next time
+                done.carry[v.key] = box.flags_of(v.key)
+                done.unfetched[box.mb.name] = done.unfetched.get(box.mb.name, 0) + 1
+        left = result.left
+    else:
+        # What finished before the error was stored; the rest waits for the next report.
+        found = store.get_many(keys)
+        done.verdicts += [found[key] for key in keys if key in found]
+        left = [key for key in keys if key not in found]
+        if isinstance(err, ReaderError):
+            done.reader_why = done.reader_why or clean(str(err), FIELD_LIMIT)
+        elif _timed_out(err):  # a very large mail, most likely: not the mailbox's failure
+            _too_long(done, box, left)
+            return
+        else:  # the mailbox failed while its mail was fetched: its line says so
+            box.error = box.error or err
+            done.carry.update((key, box.flags_of(key)) for key in left)
+            return
+    done.carry.update((key, box.flags_of(key)) for key in left)
+    if box.error is not None:
+        return  # the mailbox's line says its mail waits
+    if done.reader_why is None:
+        done.not_sorted += len(left)
+    else:
+        done.reader_failed += len(left)
+
+
+def _call(ctx: Ctx, hima: Himalaya, reader: Reader, items: list[Item], budget: float,
+          monotonic: Callable[[], float]) -> tuple[TriageResult | None, MailError | None]:
+    try:
+        return triage(ctx, hima, reader, items, budget=budget, monotonic=monotonic), None
+    except MailError as err:
+        return None, err
+
+
+def _budget(done: _Sorted, box: _Box, deadline: float, monotonic: Callable[[], float]) -> float:
+    """How long a call for `box` may start batches: none once the reader did not answer or the
+    mailbox failed."""
+    if done.reader_why is not None or box.error is not None:
+        return 0.0
+    return max(0.0, deadline - monotonic())
+
+
+def _sort_box(ctx: Ctx, hima: Himalaya, reader: Reader, store: VerdictStore, done: _Sorted,
+              box: _Box, deadline: float, monotonic: Callable[[], float]) -> None:
+    """Sort the mail of `box`, starting no batch after `deadline`. The mail to fetch alone goes
+    first, each in a call of its own, WORKERS at a time: a call whose fetch takes too long holds
+    up no other. Then the rest, in batches."""
+    alone = sorted(
+        (item for item in box.items if box.flags_of(item[0])[0]),
+        key=lambda item: box.flags_of(item[0])[1])  # the fewest timeouts first
+    stop = threading.Event()  # the reader or the mailbox failed: the others wait
+
+    def one(item: Item) -> tuple[Item, TriageResult | None, MailError | None]:
+        budget = 0.0 if stop.is_set() else _budget(done, box, deadline, monotonic)
+        result, err = _call(ctx, hima, reader, [item], budget, monotonic)
+        if err is not None and not _timed_out(err):
+            stop.set()
+        return item, result, err
+
+    if alone:
+        with ThreadPoolExecutor(WORKERS) as pool:
+            outcomes = list(pool.map(one, alone))
+        # The failures first: the mail that did not start because of one is counted under it.
+        for item, result, err in sorted(outcomes, key=lambda outcome: outcome[2] is None):
+            _settle(done, store, box, [item[0]], result, err)
+    rest = [item for item in box.items if not box.flags_of(item[0])[0]]
+    if not rest:
+        return
+    if box.error is not None:
+        done.carry.update((item[0], box.flags_of(item[0])) for item in rest)
+        return
+    result, err = _call(ctx, hima, reader, rest, _budget(done, box, deadline, monotonic),
+                        monotonic)
+    _settle(done, store, box, [item[0] for item in rest], result, err)
+
+
+# --- the text ----------------------------------------------------------------------------------
 
 
 def _fell_back(v: Verdict, reason: str) -> bool:
@@ -336,12 +478,14 @@ def _problem(health: Health, box: _Box, at: datetime, language: str) -> str:
     return t("cannot_read", language, mailbox=box.mb.name, why=why)
 
 
+# --- the daily section -------------------------------------------------------------------------
+
+
 def daily(ctx: Ctx, hima: Himalaya, reader: Reader, since: datetime, until: datetime,
           language: str, *, monotonic: Callable[[], float] = time.monotonic) -> str:
     """The daily section for [since, until), in `language` (see the module's docstring)."""
     start = monotonic()
     since, until = _aware(since), _aware(until)
-    until_text = until.isoformat()
     state = _load_state(ctx, since)
     boxes = []
     for mb in ctx.mailboxes.values():
@@ -357,48 +501,19 @@ def daily(ctx: Ctx, hima: Himalaya, reader: Reader, since: datetime, until: date
         list(pool.map(lambda box: _list(hima, box, until, state["left"]), boxes))
 
     store = VerdictStore(ctx)
-    verdicts: list[Verdict] = []
-    carry: set[str] = set()  # what the next report takes
-    unfetched: dict[str, int] = {}
-    not_sorted = reader_failed = 0
-    reader_why: str | None = None
+    done = _Sorted()
     todo = [box for box in boxes if box.error is None and box.items]
     for index, box in enumerate(todo):
         # Each mailbox may start batches for its share of the budget that is left, so the first
         # does not take it all; once the reader did not answer, it is not asked again.
-        budget = 0.0 if reader_why is not None else max(
-            0.0, (DAILY_BUDGET - (monotonic() - start)) / (len(todo) - index))
-        keys = [item[0] for item in box.items]
-        try:
-            result = triage(ctx, hima, reader, box.items, budget=budget, monotonic=monotonic)
-        except MailError as err:
-            # What finished before the error was stored; the rest waits for the next report.
-            found = store.get_many(keys)
-            verdicts += [found[key] for key in keys if key in found]
-            missing = [key for key in keys if key not in found]
-            carry.update(missing)
-            if isinstance(err, ReaderError):
-                reader_why = clean(str(err), FIELD_LIMIT)
-                reader_failed += len(missing)
-            else:  # the mailbox failed while its mail was fetched
-                box.error = err
-            continue
-        for v in result.verdicts:
-            verdicts.append(v)
-            if _fell_back(v, FETCH_FALLBACK_REASON):  # not stored: fetched again next time
-                carry.add(v.key)
-                unfetched[box.mb.name] = unfetched.get(box.mb.name, 0) + 1
-        carry.update(result.left)
-        if reader_why is None:
-            not_sorted += len(result.left)
-        else:
-            reader_failed += len(result.left)
+        share = max(0.0, (DAILY_BUDGET - (monotonic() - start)) / (len(todo) - index))
+        _sort_box(ctx, hima, reader, store, done, box, monotonic() + share, monotonic)
 
     owner = {item[0]: item[1] for box in boxes for item in box.items}
     urgent: list[str] = []
     grouped: dict[str, list[str]] = {group: [] for group in (*GROUPS, "other")}
     unsorted: list[str] = []
-    for v in sorted(verdicts, key=_order):
+    for v in sorted(done.verdicts, key=_order):
         name = owner[v.key]
         if _fell_back(v, FETCH_FALLBACK_REASON):
             continue  # counted per mailbox
@@ -413,29 +528,32 @@ def daily(ctx: Ctx, hima: Himalaya, reader: Reader, since: datetime, until: date
     blocks = [(t(key, language), rows) for key, rows in (
         ("urgent", urgent), *grouped.items(), ("unsorted", unsorted)) if rows]
 
-    tail = [t("unfetched", language, mailbox=name, n=n) for name, n in unfetched.items()]
-    if not_sorted:
-        tail.append(t("not_sorted", language, n=not_sorted))
-    if reader_failed:
-        tail.append(t("reader_failed", language, why=reader_why, n=reader_failed))
+    tail = [t("unfetched", language, mailbox=name, n=n) for name, n in done.unfetched.items()]
+    tail += [
+        t("unfetched_dropped", language, mailbox=name, n=n) for name, n in done.given_up.items()]
+    if done.not_sorted:
+        tail.append(t("not_sorted", language, n=done.not_sorted))
+    if done.reader_failed:
+        tail.append(t("reader_failed", language, why=done.reader_why, n=done.reader_failed))
     health, at = Health(ctx), clock.now()
     for box in boxes:
         if box.error is not None:
             tail.append(_problem(health, box, at, language))
         else:
             health.mailbox_ok(box.mb.name, at, kinds=LOGIN_KINDS)
-            if box.full:
-                tail.append(t("over_limit", language, mailbox=box.mb.name, n=SEARCH_LIMIT))
     if ctx.settings.alerts_enabled:
         tail += _alert_lines(ctx, since, until, language)
-    if not blocks and not (unfetched or not_sorted or reader_failed):
-        tail.insert(0, t("daily_nothing", language))
+    waiting = done.unfetched or done.given_up or done.not_sorted or done.reader_failed
+    if not blocks and not waiting:
+        unread = any(box.error is not None for box in boxes)
+        tail.insert(0, t("daily_nothing_read" if unread else "daily_nothing", language))
 
-    _save_state(ctx, _next_state(state, boxes, carry, {v.key for v in verdicts}, until_text))
+    got = {v.key for v in done.verdicts}
+    _save_state(ctx, _next_state(state, boxes, done.carry, got, until.isoformat()))
     return _section(blocks, tail, language)
 
 
-def _next_state(state: dict, boxes: list[_Box], carry: set[str], got: set[str],
+def _next_state(state: dict, boxes: list[_Box], carry: dict[str, Flags], got: set[str],
                 until: str) -> dict:
     """What this run leaves for the next (see the module's docstring)."""
     by_name = {box.mb.name: box for box in boxes}
@@ -443,24 +561,27 @@ def _next_state(state: dict, boxes: list[_Box], carry: set[str], got: set[str],
     kept: set[str] = set()
     for entry in state["left"]:
         box = by_name.get(entry["mailbox"])
-        if box is None:
-            continue  # the mailbox is gone
         key = entry["key"]
-        if key in kept:
-            continue
+        if box is None or key in kept:
+            continue  # the mailbox is gone, or the entry is there twice
         if box.validity is None:
             left.append(entry)  # its mailbox was not listed: it waits as it was
-        elif key in box.carried and (key in carry or key in got):
-            left.append({**entry, "listed": None if key in carry else until})
+        elif key in box.carried and key in carry:
+            alone, timeouts = carry[key]
+            left.append({**entry, "listed": None, "alone": alone, "timeouts": timeouts})
+        elif key in box.carried and key in got:
+            left.append({**entry, "listed": until})
         else:
-            continue  # the server no longer has it, or numbers its mail anew
+            continue  # gone from the server, numbered anew, or given up
         kept.add(key)
     for box in boxes:
         for key, mailbox, folder, uid in box.items:
             if key in carry and key not in kept:
                 kept.add(key)
-                left.append(
-                    {"key": key, "mailbox": mailbox, "folder": folder, "uid": uid, "listed": None})
+                alone, timeouts = carry[key]
+                left.append({
+                    "key": key, "mailbox": mailbox, "folder": folder, "uid": uid, "listed": None,
+                    "alone": alone, "timeouts": timeouts})
     missed = {}
     for box in boxes:
         name = box.mb.name

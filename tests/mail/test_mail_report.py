@@ -388,8 +388,8 @@ def test_carried_mail_comes_again_until_its_report_went_out(ctx, clock, fake_him
 def test_daily_window_is_exact(ctx, fake_himalaya, fake_claude):
     since = datetime(2026, 10, 19, 5, 0, tzinfo=UTC)
     until = since + DAY
-    # A sender far behind UTC: the mail at `since` is dated the day before there, which the
-    # server compares by that date.
+    # A server far behind UTC: the mail that arrived at `since` arrived the day before there,
+    # and the server searches by that day.
     behind = timezone(timedelta(hours=-11))
     assert since.astimezone(behind).date() < since.date()
     fake_himalaya(server(qq=[
@@ -450,12 +450,137 @@ def test_daily_section_stays_within_cc_hubs_limit(ctx, fake_himalaya, fake_claud
     assert fake_claude.calls() == []
 
 
-def test_daily_says_when_a_mailbox_had_more_mail_than_it_reads(ctx, fake_himalaya, fake_claude,
-                                                               monkeypatch):
-    monkeypatch.setattr(report, "SEARCH_LIMIT", 2)
-    fake_himalaya(server(qq=[message(uid, "Weekly news", T0 - uid * HOUR) for uid in (1, 2, 3)]))
-    assert lines(daily(ctx))[-1] == (
-        "qq has more new mail than one report reads: only the newest 2 are in this one.")
+def test_daily_selects_mail_by_arrival(ctx, fake_himalaya, fake_claude):
+    late = message(1, "Friday meeting", T0 - 3 * DAY)  # dated three days ago ...
+    late["internal_date"] = (T0 - HOUR).isoformat()  # ... but it only arrived now
+    undated = {
+        "uid": 2, "internal_date": (T0 - 2 * HOUR).isoformat(), "seen": False,
+        "raw": ("From: Shop <shop@example.org>\nTo: me@qq.com\nSubject: Parcel shipped\n"
+                "Content-Type: text/plain; charset=utf-8\n\nThe text.\n")}
+    early = message(3, "Domain renewal", T0 - HOUR)  # dated now ...
+    early["internal_date"] = (SINCE - HOUR).isoformat()  # ... but it arrived before the window
+    fake_himalaya(server(qq=[late, undated, early]))
+    fake_claude.by_subject(SORTED)
+
+    assert daily(ctx) == (
+        "Waiting for your reply:\n"
+        "- [qq] Shop: Alice asks whether Friday works. · 2026-10-23\n"
+        "\n"
+        "Orders and deliveries:\n"
+        "- [qq] Shop: Your parcel is on its way.")
+
+
+def test_nothing_line_names_only_the_mailboxes_read(ctx, fake_himalaya, fake_claude):
+    fake_himalaya(server(qq=[message(1, "Weekly news")], fail={"gmail": "connection refused"}))
+    unread = (
+        "gmail could not be read (connection refused); its mail is listed once it can be read "
+        "again.")
+    assert daily(ctx) == (
+        f"No new mail needs your attention in the mailboxes that could be read.\n\n{unread}")
+    assert lines(daily(ctx, language="zh"))[0] == "能读取的邮箱里没有需要你关注的新邮件。"
+
+
+def test_carried_mail_survives_a_rerun_that_was_stopped(ctx, clock, fake_himalaya, fake_claude,
+                                                        monkeypatch):
+    fake_himalaya(server(qq=[message(1, "Parcel shipped")]))
+    fake_claude.by_subject(SORTED)
+    times = iter([0.0])
+    daily(ctx, monotonic=lambda: next(times, report.DAILY_BUDGET + 1))  # the mail is left
+    listed = "Orders and deliveries:\n- [qq] Shop: Your parcel is on its way."
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY) == listed  # this report is not sent
+
+    def stopped(*args, **kwargs):
+        raise RuntimeError("stopped after 300 s")
+
+    real = report.triage
+    monkeypatch.setattr(report, "triage", stopped)
+    clock.at = T0 + DAY + HOUR
+    with pytest.raises(RuntimeError):  # the run over the same window is stopped halfway ...
+        daily(ctx, T0, T0 + DAY + HOUR)
+    monkeypatch.setattr(report, "triage", real)
+
+    # ... and that report goes out with a failure line. The mail was in no report that went out.
+    clock.at = T0 + 2 * DAY
+    assert daily(ctx, T0 + DAY + HOUR, T0 + 2 * DAY) == listed
+    clock.at = T0 + 3 * DAY
+    assert daily(ctx, T0 + 2 * DAY, T0 + 3 * DAY) == t("daily_nothing", "en")
+
+
+def test_carried_mail_survives_a_rerun_that_cannot_list_its_mailbox(ctx, clock, fake_himalaya,
+                                                                    fake_claude):
+    fake = fake_himalaya(server(qq=[message(1, "Parcel shipped")]))
+    fake_claude.by_subject(SORTED)
+    times = iter([0.0])
+    daily(ctx, monotonic=lambda: next(times, report.DAILY_BUDGET + 1))  # the mail is left
+    listed = "Orders and deliveries:\n- [qq] Shop: Your parcel is on its way."
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY) == listed  # this report is not sent
+
+    data = fake.server()
+    data["fail"] = {"qq": "connection refused"}
+    fake.write(data)
+    clock.at = T0 + DAY + HOUR
+    assert "qq could not be read" in daily(ctx, T0, T0 + DAY + HOUR)  # this one goes out
+
+    del data["fail"]
+    fake.write(data)
+    clock.at = T0 + 2 * DAY
+    assert daily(ctx, T0 + DAY + HOUR, T0 + 2 * DAY) == listed
+    clock.at = T0 + 3 * DAY
+    assert daily(ctx, T0 + 2 * DAY, T0 + 3 * DAY) == t("daily_nothing", "en")
+
+
+def reader_calls_with(fake_claude, subject: str) -> list[int]:
+    """For each reader call that got the mail `subject`: how many mails it got."""
+    found = []
+    for call in fake_claude.calls():
+        subjects = re.findall(r"^Subject: (.*)$", call["stdin"], re.MULTILINE)
+        if subject in subjects:
+            found.append(len(subjects))
+    return found
+
+
+def test_a_batch_whose_fetch_times_out_is_fetched_mail_by_mail_next_time(
+        ctx, clock, fake_himalaya, fake_claude):
+    huge = message(3, "Domain renewal")
+    huge["fail_fetch"] = "imap: connection timed out"
+    fake_himalaya(server(qq=[message(1, "Parcel shipped"), message(2, "Friday"), huge]))
+    fake_claude.by_subject(SORTED)
+
+    # The three are one batch, whose fetch takes too long: no mailbox failure, but the mail waits.
+    assert daily(ctx) == "Mail not sorted in time: 3. The next report lists it."
+
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY) == (
+        "Waiting for your reply:\n"
+        "- [qq] Shop: Alice asks whether Friday works. · 2026-10-23\n"
+        "\n"
+        "Orders and deliveries:\n"
+        "- [qq] Shop: Your parcel is on its way.\n"
+        "\n"
+        "Mail not sorted in time: 1. The next report lists it.")
+    assert reader_calls_with(fake_claude, "Parcel shipped") == [1]
+    assert reader_calls_with(fake_claude, "Friday") == [1]
+
+
+def test_a_mail_that_times_out_alone_three_times_is_given_up(ctx, clock, fake_himalaya,
+                                                             fake_claude):
+    huge = message(1, "Domain renewal")
+    huge["fail_fetch"] = "imap: connection timed out"
+    fake_himalaya(server(qq=[huge]))
+    waiting = "Mail not sorted in time: 1. The next report lists it."
+
+    assert daily(ctx) == waiting
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY) == waiting
+    clock.at = T0 + 2 * DAY
+    assert daily(ctx, T0 + DAY, T0 + 2 * DAY) == (
+        "Mail in qq that took too long to fetch, three reports in a row: 1. It is left out "
+        "from now on: look for it in the mailbox itself.")
+    clock.at = T0 + 3 * DAY
+    assert daily(ctx, T0 + 2 * DAY, T0 + 3 * DAY) == t("daily_nothing", "en")
+    assert json.loads((ctx.state / "report.json").read_text("utf-8"))["left"] == []
 
 
 def test_daily_shares_the_budget_and_ends_in_time(ctx, fake_himalaya, fake_claude, monkeypatch):

@@ -21,6 +21,7 @@ from mailkit.himalaya import (
     Folder,
     Himalaya,
     HimalayaError,
+    TimedOut,
     classify,
     decode_utf7,
     guess_folders,
@@ -560,8 +561,9 @@ def test_output_that_is_not_json_is_a_clear_error(hub, ctx, make_exe):
 def test_timeout_raises_connect_error(hub, ctx, make_exe):
     make_exe("himalaya", "import time; time.sleep(60)")
     started = time.monotonic()
-    with pytest.raises(ConnectError, match=r"did not answer within 1 s"):
+    with pytest.raises(ConnectError, match=r"did not answer within 1 s") as raised:
         Himalaya(ctx, timeout=1).folders("qq")
+    assert isinstance(raised.value, TimedOut)  # a connection failure of its own kind
     assert time.monotonic() - started < 30  # the child was killed, not waited for
 
 

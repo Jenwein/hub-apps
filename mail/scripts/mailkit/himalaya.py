@@ -42,6 +42,10 @@ class ConnectError(HimalayaError):
     """The server could not be reached, or did not answer in time."""
 
 
+class TimedOut(ConnectError):
+    """himalaya did not finish within its timeout (a slow server, or a very large mail)."""
+
+
 # Lowercase substrings of what himalaya prints, except `535` (the SMTP code), which counts only as
 # a number of its own: `message 15350 not found` is no login failure. The last five connection
 # patterns are the locale-free Winsock error numbers, since Windows words the rest in the language
@@ -402,7 +406,7 @@ class Himalaya:
             out, err = proc.communicate(input, timeout=self.timeout)
         except subprocess.TimeoutExpired:
             kill_tree(proc)
-            raise ConnectError(f"himalaya did not answer within {self.timeout:g} s") from None
+            raise TimedOut(f"himalaya did not answer within {self.timeout:g} s") from None
         except BaseException:  # Ctrl+C: do not leave himalaya running
             kill_tree(proc)
             raise

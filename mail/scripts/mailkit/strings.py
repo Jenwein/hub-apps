@@ -69,10 +69,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "unsorted": "Could not be sorted, so have a look yourself:",
         "phishing": "may be phishing",
         "daily_nothing": "No new mail needs your attention.",
+        "daily_nothing_read": (
+            "No new mail needs your attention in the mailboxes that could be read."),
         "more_mail": (
             "Not shown, to keep the report short: {n} more. Ask in the chat to list your mail."),
         "unfetched": (
             "Mail in {mailbox} that could not be fetched: {n}. The next report tries again."),
+        "unfetched_dropped": (
+            "Mail in {mailbox} that took too long to fetch, three reports in a row: {n}. It is "
+            "left out from now on: look for it in the mailbox itself."),
         "not_sorted": "Mail not sorted in time: {n}. The next report lists it.",
         "reader_failed": (
             "Mail not sorted because the reader did not answer ({why}): {n}. The next report "
@@ -84,9 +89,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "{fix}"),
         "cannot_read": (
             "{mailbox} could not be read ({why}); its mail is listed once it can be read again."),
-        "over_limit": (
-            "{mailbox} has more new mail than one report reads: only the newest {n} are in this "
-            "one."),
         "alerts_ran": "Alerts ran the whole time since the last report.",
         "alerts_down": "Alerts were down for {duration} since the last report.",
         "alerts_stopped": (
@@ -165,8 +167,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "unsorted": "无法分类，请自己看一下：",
         "phishing": "可能是钓鱼邮件",
         "daily_nothing": "没有需要你关注的新邮件。",
+        "daily_nothing_read": "能读取的邮箱里没有需要你关注的新邮件。",
         "more_mail": "为了让日报不太长，另有 {n} 封没有列出。可以在聊天里要求列出你的邮件。",
         "unfetched": "{mailbox} 有 {n} 封邮件无法取回，下次日报会再试。",
+        "unfetched_dropped": (
+            "{mailbox} 有 {n} 封邮件连续三份日报都取回超时，以后不再列出，请直接到邮箱里找它。"),
         "not_sorted": "有 {n} 封邮件没能及时分类，下次日报会列出。",
         "reader_failed": (
             "有 {n} 封邮件没有分类，因为读信程序没有回应（{why}），下次日报会再试。要测试读信程序，"
@@ -175,7 +180,6 @@ STRINGS: dict[str, dict[str, str]] = {
             "{mailbox} 无法登录（服务器拒绝了登录），所以这份日报里没有它的邮件。要重新登录，请在"
             "服务器的终端里、总站的目录下输入：{fix}"),
         "cannot_read": "{mailbox} 无法读取（{why}），等能读取时再列出它的邮件。",
-        "over_limit": "{mailbox} 的新邮件超过一份日报能读的数量，这份只列了最新的 {n} 封。",
         "alerts_ran": "自上次日报以来，实时提醒一直在运行。",
         "alerts_down": "自上次日报以来，实时提醒有 {duration}没有运行。",
         "alerts_stopped": (
