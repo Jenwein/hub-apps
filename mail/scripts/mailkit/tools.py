@@ -134,9 +134,9 @@ def platform_key(
     return f"{os_name}-{arch}"
 
 
-def fetch_url(url: str) -> bytes:
+def fetch_url(url: str, timeout: float = 120) -> bytes:
     """The body of `url`, through the proxies the environment names (urllib's default)."""
-    with urllib.request.urlopen(url, timeout=120) as response:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read()
 
 

@@ -24,6 +24,7 @@ from . import (
     message,
     query,
     reader,
+    report,
     rules,
     service,
     signin,
@@ -406,6 +407,22 @@ def run_watch_unit(args: argparse.Namespace) -> None:
         service.write_unit(args.out, args.platform, text)
 
 
+def run_report(args: argparse.Namespace) -> None:
+    """A section of the hub's report, as plain text: what cc-hub's report runs, with the window
+    and the language in the environment."""
+    since, until = report.env_window(os.environ)
+    language = os.environ.get("CC_HUB_LANGUAGE") or "en"
+    ctx = load_ctx(args)
+    if args.period == "daily":
+        text = report.daily(
+            ctx, himalaya.Himalaya(ctx, timeout=report.HIMALAYA_TIMEOUT),
+            reader.Reader(ctx.settings.reader_model, timeout=report.READER_TIMEOUT), since, until,
+            language)
+    else:
+        text = report.monthly(ctx, since, until, language)
+    print(text)
+
+
 def run_alerts(args: argparse.Namespace) -> None:
     print_json(service.set_alerts(load_ctx(args), args.action == "on"))
 
@@ -667,6 +684,13 @@ def build_parser() -> Parser:
         "alerts-status", help="are alerts on, is the watcher running, what waits or has gone "
         "wrong")
     p.set_defaults(func=run_alerts_status)
+
+    p = sub.add_parser(
+        "report", help="the mail section of the hub's daily or monthly report, as plain text "
+        "(cc-hub's report runs it, with the window in CC_HUB_REPORT_SINCE and "
+        "CC_HUB_REPORT_UNTIL)")
+    p.add_argument("period", choices=["daily", "monthly"])
+    p.set_defaults(func=run_report)
 
     # No help text, like secret-fetch: only carillon calls it.
     p = sub.add_parser("hook")
