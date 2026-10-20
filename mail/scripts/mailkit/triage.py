@@ -12,7 +12,7 @@ mail by mail, each mail alone in its own call, and how a mail fails alone decide
 - The reader answered, but not with a verdict that fits the mail (a mail number missing or
   repeated, a tier that is not one of TIERS, no answer in the schema, or a refusal of the model's
   safeguards, which the sender's words set off): that is about the mail, which gets the fallback
-  verdict (tier daily, category other, reason FALLBACK_REASON), stored like
+  verdict (tier daily, category other, reason FALLBACK_REASON, `fallback` UNSORTED), stored like
   any other, and reused like any other: the mail is not sent to the reader again. This
   holds when every mail of a batch fails so, too: what a mail makes the reader answer is up to
   its sender, and ten crafted mails must not hold a mailbox's alerts back for good.
@@ -29,15 +29,16 @@ which raises.
 
 Fetching works the same way. When the fetch of a batch fails with a HimalayaError that is not an
 AuthError or a ConnectError, each mail of it is fetched alone, and the fetched ones are sorted
-together. A mail whose own fetch fails gets the fallback verdict FETCH_FALLBACK_REASON (sender and
-subject "", the date it arrived when `fetch_dates` can tell it). That verdict is returned but not
+together. A mail whose own fetch fails gets the fallback verdict FETCH_FALLBACK_REASON (`fallback`
+UNFETCHED; sender and subject "", the date it arrived when `fetch_dates` can tell it). That verdict is returned but not
 stored: the failure may pass (a server that refuses one more connection for a while), so a later
 run, such as the daily report, fetches and sorts the mail again. An AuthError or a ConnectError
 is about the mailbox and is raised. A mail the server no longer has (moved or deleted since) gets
 no verdict and is not left.
 
-`TriageResult.fallbacks` names the mails that got a fallback in this call, so the caller can tell
-when a whole run fell back.
+A fallback verdict is told by its `fallback` field, which only the builders here set; never by its
+reason or its empty summary, which a reader's answer can have too. `TriageResult.fallbacks` names
+the mails that got a fallback in this call, so the caller can tell when a whole run fell back.
 
 An error that is raised (ReaderDown, an AuthError or ConnectError of a fetch, any other
 MailError) stops new batches from starting; the running ones finish and are stored, then the
@@ -66,6 +67,8 @@ BATCH = 10
 WORKERS = 3
 FALLBACK_REASON = "could not be sorted"  # English: the report and the alerts say it in theirs
 FETCH_FALLBACK_REASON = "could not be fetched"
+UNSORTED = "unsorted"  # Verdict.fallback of a mail the reader could not sort
+UNFETCHED = "unfetched"  # Verdict.fallback of a mail that could not be fetched
 
 Item = tuple[str, str, str, int]  # verdict key, mailbox, folder, UID
 Mail = tuple[str, str, Parsed]  # verdict key, mailbox, parsed: what the reader takes
@@ -97,23 +100,23 @@ class _Done:
 
 
 def _fallback_verdict(key: str, mailbox: str, sender: str, subject: str, when: str,
-                      reason: str) -> Verdict:
+                      reason: str, kind: str) -> Verdict:
     return Verdict(
         key=key, mailbox=mailbox, sender=sender, subject=subject, date=when, summary="",
         code=None, amount=None, deadline=None, tier="daily", category="other", reason=reason,
-        phishing=False)
+        phishing=False, fallback=kind)
 
 
 def fallback(key: str, mailbox: str, parsed: Parsed) -> Verdict:
     """The verdict of a mail the reader could not sort alone: for the daily report, with the
     sender, subject and date from its headers and nothing from the reader."""
-    return _fallback_verdict(key, mailbox, *from_headers(parsed), FALLBACK_REASON)
+    return _fallback_verdict(key, mailbox, *from_headers(parsed), FALLBACK_REASON, UNSORTED)
 
 
 def unfetched(key: str, mailbox: str, when: str) -> Verdict:
     """The verdict of a mail whose bytes could not be fetched: for the daily report, with no
     sender or subject (they are in the bytes) and the time it arrived, or ""."""
-    return _fallback_verdict(key, mailbox, "", "", when, FETCH_FALLBACK_REASON)
+    return _fallback_verdict(key, mailbox, "", "", when, FETCH_FALLBACK_REASON, UNFETCHED)
 
 
 def _batches(items: list[Item]) -> list[list[Item]]:

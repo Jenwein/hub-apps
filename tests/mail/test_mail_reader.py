@@ -157,7 +157,7 @@ def test_look_returns_a_verdict(fake_claude):
         "summary": "A login code.", "code": "482913", "amount": "", "deadline": "2026-10-20",
         "tier": "now", "category": "security", "reason": "A code you may not have asked for.",
         "phishing": False}})
-    assert look() == Verdict(
+    assert look(parsed=mail(body="Your code is 482913. It expires on 2026-10-20.")) == Verdict(
         key="qq/inbox/7", mailbox="qq", sender="Shop", subject="Your code",
         date="2026-10-19T10:00:00+08:00", summary="A login code.", code="482913", amount=None,
         deadline="2026-10-20", tier="now", category="security",
@@ -252,7 +252,36 @@ def test_an_amount_in_an_attachment_counts_for_look(fake_claude):
     ("2026-10-26T10:00", None), ("", None), (None, None)])
 def test_deadline_must_be_a_date(fake_claude, deadline, kept):
     fake_claude.by_subject({"": {"deadline": deadline}})
-    assert look().deadline == kept
+    assert look(parsed=mail(body="Pay by 2026-10-26.")).deadline == kept
+
+
+@pytest.mark.parametrize("body", [
+    "Pay by 2026-10-26.", "Pay by 10/26.", "Pay by 26.10.2026.", "Pay by 26 Oct.",
+    "Pay by October 26th, 2026.", "Pay by Oct. 26.", "Pay by the 26th of October.",
+    "Due: 26-Oct-2026.", "请在10月26日前付款。", "请在 2026 年 10 月 26 日前付款。"])
+def test_a_deadline_the_sender_wrote_is_kept(fake_claude, body):
+    fake_claude.by_subject({"": {"deadline": "2026-10-26"}})
+    assert look(parsed=mail(body=body)).deadline == "2026-10-26"
+
+
+@pytest.mark.parametrize("body", [
+    "Pay soon.",  # no date at all
+    "Pay by the 26th.",  # the month would be the reader's guess
+    "Pay in October.",  # and here the day
+    "Order 1026 ships on 2026-11-26.",  # the numbers, but not as a date
+    "Pay by 10/260.",
+    "Ticket 110-26.",
+])
+def test_a_deadline_the_sender_did_not_write_is_dropped(fake_claude, body):
+    fake_claude.by_subject({"": {"deadline": "2026-10-26"}})
+    assert look(parsed=mail(body=body)).deadline is None
+
+
+def test_the_date_of_the_mail_is_no_deadline(fake_claude):
+    # The Date line is written by mx from the header: a reader that takes it for a deadline is
+    # not quoting the sender.
+    fake_claude.by_subject({"": {"deadline": "2026-10-19"}})
+    assert look(parsed=mail(body="Thanks for your order.")).deadline is None
 
 
 def test_sender_subject_date_come_from_the_headers(fake_claude):

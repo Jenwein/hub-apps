@@ -62,7 +62,7 @@ from .reader import AMOUNT_LIMIT, SUMMARY_LIMIT, Reader, ReaderError, Verdict
 from .settings import Mailbox, MailError
 from .strings import t
 from .tools import TOOLS, fetch_url
-from .triage import FALLBACK_REASON, FETCH_FALLBACK_REASON, WORKERS, TriageResult, triage
+from .triage import UNFETCHED, UNSORTED, WORKERS, TriageResult, triage
 from .verdicts import VerdictStore
 from .watch import LOGIN_KINDS
 
@@ -291,7 +291,7 @@ def _settle(done: _Sorted, store: VerdictStore, box: _Box, keys: list[str],
     if err is None:
         for v in result.verdicts:
             done.verdicts.append(v)
-            if _fell_back(v, FETCH_FALLBACK_REASON):  # not stored: fetched again next time
+            if v.fallback == UNFETCHED:  # not stored: fetched again next time
                 done.carry[v.key] = box.flags_of(v.key)
                 done.unfetched[box.mb.name] = done.unfetched.get(box.mb.name, 0) + 1
         left = result.left
@@ -369,11 +369,6 @@ def _sort_box(ctx: Ctx, hima: Himalaya, reader: Reader, store: VerdictStore, don
 
 
 # --- the text ----------------------------------------------------------------------------------
-
-
-def _fell_back(v: Verdict, reason: str) -> bool:
-    """Is `v` the fallback verdict of triage with this reason (no summary from the reader)?"""
-    return v.reason == reason and not _text(v.summary)
 
 
 def _order(v: Verdict) -> tuple:
@@ -527,9 +522,9 @@ def daily(ctx: Ctx, hima: Himalaya, reader: Reader, since: datetime, until: date
     unsorted: list[str] = []
     for v in sorted(done.verdicts, key=_order):
         name = owner[v.key]
-        if _fell_back(v, FETCH_FALLBACK_REASON):
+        if v.fallback == UNFETCHED:
             continue  # counted per mailbox
-        if _fell_back(v, FALLBACK_REASON):
+        if v.fallback == UNSORTED:
             unsorted.append(_unsorted_line(name, v, language))
         elif v.tier == "now":
             if not store.alerted(v.key):

@@ -67,11 +67,15 @@ SORTED = {
 }
 
 
+# The dates of SORTED, written in every mail: a deadline the sender did not write is dropped.
+DUE = "Friday is 2026-10-23; the renewal is due on 2026-10-30."
+
+
 def eml(subject: str, when: datetime, sender: str = "Shop <shop@example.org>",
         body: str | None = None) -> str:
     return (
         f"From: {sender}\nTo: me@qq.com\nSubject: {subject}\nDate: {format_datetime(when)}\n"
-        f"Content-Type: text/plain; charset=utf-8\n\n{body or f'The text of {subject}.'}\n")
+        f"Content-Type: text/plain; charset=utf-8\n\n{body or f'The text of {subject}. {DUE}'}\n")
 
 
 def message(uid: int, subject: str, when: datetime = T0 - HOUR, **fields) -> dict:
@@ -449,6 +453,23 @@ def test_daily_lists_mail_it_could_not_sort_or_fetch(ctx, clock, fake_himalaya, 
     assert daily(ctx, T0, T0 + DAY) == (
         "Orders and deliveries:\n"
         "- [gmail] Shop: Your parcel is on its way.")
+
+
+def test_a_reader_answer_in_the_words_of_a_fallback_is_an_ordinary_verdict(
+        ctx, fake_himalaya, fake_claude):
+    # What tells a fallback is the marker triage sets, never what the reader wrote: a mail that
+    # makes the reader answer "could not be fetched" with no summary is sorted like any other.
+    fake_himalaya(server(qq=[message(1, "Odd parcel"), message(2, "Odd order")]))
+    fake_claude.by_subject({
+        "odd parcel": {"summary": "", "tier": "daily", "category": "orders",
+                       "reason": "could not be fetched"},
+        "odd order": {"summary": "", "tier": "daily", "category": "orders",
+                      "reason": "could not be sorted"}})
+
+    assert daily(ctx) == (
+        "Orders and deliveries:\n"
+        "- [qq] Shop: Odd parcel\n"
+        "- [qq] Shop: Odd order")
 
 
 def test_daily_section_stays_within_cc_hubs_limit(ctx, fake_himalaya, fake_claude):

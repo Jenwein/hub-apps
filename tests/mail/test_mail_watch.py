@@ -830,6 +830,30 @@ def test_a_sweep_where_every_mail_fell_back_is_a_reader_failure(
     assert chat.sent[2:] == [strings.t("reader_unsorted", "", mailbox="qq", count=1)]
 
 
+def test_a_fallback_is_told_by_its_marker_whoever_made_it(ctx, clock, fake_himalaya, fake_claude):
+    fake = fake_himalaya(server())
+    fake_claude.by_subject({"odd": BOGUS, "declined": URGENT})
+    watcher, chat, _ = rig(ctx, clock)
+    watcher.tick()
+    # The daily report sorted mail 1 first, and it fell back; mail 2 falls back now.
+    VerdictStore(ctx).put(verdict(
+        key=verdict_key("qq", "7", "1"), subject="Odd 1", summary="", code=None, amount=None,
+        deadline=None, tier="daily", category="other", reason="could not be sorted",
+        phishing=False, fallback="unsorted"))
+    fake.write(server([message(1, "Odd 1"), message(2, "Odd 2")]))
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+    assert chat.sent == [strings.t("reader_unsorted", "", mailbox="qq", count=2)]
+
+    # A reader answer in the words of a fallback is a verdict of the reader: it works.
+    fake_claude.by_subject({"plain": {**URGENT, "tier": "daily", "summary": "",
+                                      "reason": "could not be sorted"}})
+    fake.write(server([message(1, "Odd 1"), message(2, "Odd 2"), message(3, "Plain")]))
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+    assert Health(ctx).problems(T0, clock.at)[0]["until"] == clock.at.isoformat()
+
+
 def test_mail_left_by_the_budget_keeps_the_mark(ctx, clock, fake_himalaya, fake_claude,
                                                 monkeypatch):
     fake = fake_himalaya(server())

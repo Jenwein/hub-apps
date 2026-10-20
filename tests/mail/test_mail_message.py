@@ -49,7 +49,7 @@ SEND = ["send", "-p", CHAT_PROJECT, "-s", CHAT_SESSION]
 MARKER = re.compile(r"<<<MAIL-([0-9a-f]{16}) (\d+)>>>\n(.*?)\n<<<END MAIL-\1 \2>>>", re.DOTALL)
 PDF = b"%PDF-1.4\n"
 INVOICE_WHEN = "Mon, 19 Oct 2026 10:00:00 +0800"
-INVOICE_BODY = "Please pay 25.00 USD by Friday. The code is 482913.\nSecond line."
+INVOICE_BODY = "Please pay 25.00 USD by Friday, 23 October. The code is 482913.\nSecond line."
 INVOICE_TEXT = f"""\
 From: Carol <carol@example.org>
 To: me@example.org, you@example.org

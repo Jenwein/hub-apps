@@ -45,6 +45,10 @@ PDF_MAX_BYTES = 5 * 1024 * 1024  # a bigger PDF is not read at all: slow, and a 
 # for the bytes 0x80 to 0xFF), and what no text may carry out of here.
 SURROGATES = re.compile("[\ud800-\udfff]")
 TEXT_TYPES = ("text/plain", "text/html")
+# The type of an attachment as it may reach the agent: `type/subtype` of a few safe characters.
+CONTENT_TYPE = re.compile(r"[a-z0-9.+-]+/[a-z0-9.+-]+")
+CONTENT_TYPE_LIMIT = 60
+UNKNOWN_TYPE = "application/octet-stream"
 PDF_TYPES = ("application/pdf", "application/x-pdf")
 
 # What the stdlib parsers raise on hostile input where they usually record a defect. No mail may
@@ -60,7 +64,7 @@ PARSE_ERRORS = (
 class Attachment:
     index: int  # from 1, in MIME order: what `attachment_bytes` takes
     filename: str  # cleaned and cut to FILENAME_LIMIT; `attachment-<index>` when it has none
-    content_type: str
+    content_type: str  # a checked token (`_content_type`)
     size: int  # bytes, decoded
 
 
@@ -365,12 +369,25 @@ def _read(raw: bytes) -> tuple[Message, Message | None, list[Message]]:
     return msg, *_structure(msg)
 
 
+def _content_type(part: Message) -> str:
+    """The part's `type/subtype`, lowercase, when it is a short token of letters, digits and
+    `.+-` (CONTENT_TYPE, at most CONTENT_TYPE_LIMIT characters); else UNKNOWN_TYPE. The sender
+    writes it, and the agent sees it."""
+    try:
+        found = part.get_content_type().lower()
+    except PARSE_ERRORS:
+        return UNKNOWN_TYPE
+    if len(found) <= CONTENT_TYPE_LIMIT and CONTENT_TYPE.fullmatch(found):
+        return found
+    return UNKNOWN_TYPE
+
+
 def _attachment(index: int, part: Message) -> Attachment:
     name = clean(_filename(part) or "", FILENAME_LIMIT)
     return Attachment(
         index=index,
         filename=name or f"attachment-{index}",
-        content_type=clean(part.get_content_type(), FILENAME_LIMIT),
+        content_type=_content_type(part),
         size=len(_payload(part)))
 
 

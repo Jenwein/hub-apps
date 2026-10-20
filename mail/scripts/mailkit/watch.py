@@ -439,7 +439,8 @@ class Watcher:
         # mail must not end the spell that the same failure goes on with at the next sweep.
         self.health.mailbox_ok(mb.name, at, kinds=LOGIN_KINDS)
         if result.verdicts:
-            if {v.key for v in result.verdicts} <= set(result.fallbacks):
+            # None of the mail got a verdict of the reader, and it failed on some of it now.
+            if result.fallbacks and all(v.fallback for v in result.verdicts):
                 self._unsorted(mb, len(result.verdicts), at)
             else:
                 self.health.mailbox_ok(mb.name, at)

@@ -9,8 +9,9 @@ the command line comes from a mail and no mail can fake the end of its own block
 
 What comes back is checked field by field before anyone sees it: the tier and the category must
 be known words, the summary and the reason become one short line, a code or an amount that the
-mail does not contain is dropped, and a deadline must be a date. The sender, subject and date of a
-verdict come from the mail's headers, never from the model. Answers to questions and reply drafts
+mail does not contain is dropped, and a deadline must be a date whose month and day the sender
+wrote. The sender, subject and date of a verdict come from the mail's headers, never from the
+model. Answers to questions and reply drafts
 are free text: they go to the user's chat, never to the agent.
 """
 
@@ -56,7 +57,8 @@ CODE = re.compile(r"[A-Za-z0-9-]{3,12}")
 # letters (USD, CNY, 元) or a currency sign ($, ¥, €): see `_currency`. Nothing else may be in it.
 AMOUNT = re.compile(r"(?:([^\s\d]+) ?)?(\d[\d,.]*)(?: ?([^\s\d]+))?")
 CURRENCY_LETTERS = 4
-DAY =re.compile(r"\d{4}-\d{2}-\d{2}")
+DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 SURROGATES = re.compile("[\ud800-\udfff]")
 CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # the C0 and C1 controls but \t and \n
 
@@ -76,6 +78,9 @@ class Verdict:
     category: str  # one of CATEGORIES
     reason: str
     phishing: bool
+    # Set by triage only, on the verdict it makes up for a mail the reader could not sort
+    # ("unsorted") or that could not be fetched ("unfetched"); "" for every verdict of the reader.
+    fallback: str = ""
 
 
 class ReaderError(MailError):
@@ -291,15 +296,35 @@ def _amount(value: object, text: str) -> str | None:
     return amount
 
 
-def _deadline(value: object) -> str | None:
+def _written(day: date, text: str) -> bool:
+    """Did the sender write the month and the day of `day`, as one date: 2026-10-25, 10/25,
+    10.25, 25/10, 25.10.2026, Oct 25, October 25th, 25 Oct, 25-Oct-2026, the 25th of October,
+    10月25日? Each number stands alone (no digit next to it); the month may be its English name."""
+    month, number = rf"0?{day.month}", rf"0?{day.day}"
+    name = rf"(?<![a-z]){MONTHS[day.month - 1]}[a-z]*\.?"
+    nth = r"(?:st|nd|rd|th)?"
+    gap = r"[\s,./-]{0,3}"
+    forms = (
+        rf"(?<!\d){month}\s*[-/.]\s*{number}(?!\d)",
+        rf"(?<!\d){number}\s*[-/.]\s*{month}(?!\d)",
+        rf"(?<!\d){month}\s*月\s*{number}(?!\d)",
+        rf"{name}{gap}{number}{nth}(?![\da-z])",
+        rf"(?<!\d){number}{nth}{gap}(?:of\s+)?{name}",
+    )
+    return any(re.search(form, text, re.IGNORECASE) for form in forms)
+
+
+def _deadline(value: object, text: str) -> str | None:
+    """The deadline, when it is a date and the sender wrote its month and day in `text` (see
+    `_mail`): a date the reader worked out, or took from the Date line, is dropped."""
     day = _model_text(value).strip()
-    if DAY.fullmatch(day):
-        try:
-            date.fromisoformat(day)
-        except ValueError:  # such as 2026-13-40
-            return None
-        return day
-    return None
+    if not DAY.fullmatch(day):
+        return None
+    try:
+        found = date.fromisoformat(day)
+    except ValueError:  # such as 2026-13-40
+        return None
+    return day if _written(found, text) else None
 
 
 def _items(answer: dict, count: int) -> list[dict]:
@@ -346,7 +371,7 @@ def _verdict(item: dict, key: str, mailbox: str, parsed: Parsed, evidence: str) 
         summary=_line(item.get("summary"), SUMMARY_LIMIT),
         code=_code(item.get("code"), evidence),
         amount=_amount(item.get("amount"), evidence),
-        deadline=_deadline(item.get("deadline")),
+        deadline=_deadline(item.get("deadline"), evidence),
         tier=tier,
         category=category,
         reason=_line(item.get("reason"), REASON_LIMIT),

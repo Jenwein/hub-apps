@@ -32,7 +32,15 @@ from mailkit.marks import (
 from mailkit.paths import locked
 from mailkit.reader import Reader, ReaderDown, ReaderError, Verdict
 from mailkit.rules import combined, default_rules, user_rules
-from mailkit.triage import BATCH, FALLBACK_REASON, FETCH_FALLBACK_REASON, WORKERS, triage
+from mailkit.triage import (
+    BATCH,
+    FALLBACK_REASON,
+    FETCH_FALLBACK_REASON,
+    UNFETCHED,
+    UNSORTED,
+    WORKERS,
+    triage,
+)
 from mailkit.verdicts import KEEP, VerdictStore
 from mailtest import write_mailboxes
 
@@ -105,6 +113,20 @@ def items(uids, mailbox: str = "qq", validity: str = "7") -> list[tuple[str, str
 
 def keys_of(rows) -> list[str]:
     return [row[0] for row in rows]
+
+
+def test_a_stored_fallback_keeps_its_marker_and_an_old_entry_loads_without_one(ctx):
+    store = VerdictStore(ctx)
+    store.put(verdict("qq/7/1", reason=FALLBACK_REASON, summary="", fallback=UNSORTED))
+    assert store.get("qq/7/1").fallback == UNSORTED
+    stored = json.loads((ctx.state / "verdicts.json").read_text("utf-8"))
+    assert stored["qq/7/1"]["verdict"]["fallback"] == UNSORTED
+
+    # An entry written before verdicts had the marker is an ordinary verdict.
+    del stored["qq/7/1"]["verdict"]["fallback"]
+    (ctx.state / "verdicts.json").write_text(json.dumps(stored), "utf-8")
+    assert store.get("qq/7/1") == verdict("qq/7/1", reason=FALLBACK_REASON, summary="")
+    assert store.get("qq/7/1").fallback == ""
 
 
 def mails_in(call: dict) -> list[str]:
@@ -557,8 +579,9 @@ def test_one_bad_mail_gets_a_fallback_and_the_rest_real_verdicts(ctx, fake_himal
     assert fallback == Verdict(
         key=rows[3][0], mailbox="qq", sender="Shop", subject="poison pill",
         date=(T0 - timedelta(minutes=50)).isoformat(), summary="", code=None, amount=None,
-        deadline=None, tier="daily", category="other", reason=FALLBACK_REASON, phishing=False)
-    assert FALLBACK_REASON == "could not be sorted"
+        deadline=None, tier="daily", category="other", reason=FALLBACK_REASON, phishing=False,
+        fallback=UNSORTED)
+    assert (FALLBACK_REASON, UNSORTED) == ("could not be sorted", "unsorted")
     others = result.verdicts[:3] + result.verdicts[4:]
     assert all((v.tier, v.summary) == ("now", URGENT["summary"]) for v in others)
     assert result.fallbacks == [rows[3][0]]
@@ -626,14 +649,15 @@ def test_a_mail_that_cannot_be_fetched_gets_a_fallback(ctx, fake_himalaya, fake_
     result = triage(ctx, Himalaya(ctx), Reader("sonnet"), rows, budget=600)
 
     assert result.left == [] and result.fallbacks == [rows[3][0]]
-    assert FETCH_FALLBACK_REASON == "could not be fetched"
+    assert (FETCH_FALLBACK_REASON, UNFETCHED) == ("could not be fetched", "unfetched")
     assert result.verdicts[3] == Verdict(
         key=rows[3][0], mailbox="qq", sender="", subject="",
         date=(T0 - timedelta(minutes=50)).isoformat(), summary="", code=None, amount=None,
         deadline=None, tier="daily", category="other", reason=FETCH_FALLBACK_REASON,
-        phishing=False)
+        phishing=False, fallback=UNFETCHED)
     others = result.verdicts[:3] + result.verdicts[4:]
     assert [v.summary for v in others] == ["A mail."] * 9  # the fake reader's verdicts
+    assert [v.fallback for v in others] == [""] * 9
     # The batch's fetch, then each mail alone, then the date of the one that failed; the nine
     # fetched go to the reader together.
     assert [words(c)[4:] for c in fake.calls()] == [
