@@ -226,7 +226,8 @@ FORBIDDEN_SPELLINGS = [
 
 
 def test_the_fake_refuses_what_must_never_run(hub, ctx, make_exe):
-    """The fake exits 99 with F-NODEL on stdout for each spelling of F-NODEL, so a wrapper that
+    """The fake exits 99 with FORBIDDEN on stdout for each spelling of what mx never runs, so a
+    wrapper that
     ever ran one fails its test; `imap search --seen` is only a search filter and passes. The
     fake is started directly: Himalaya.run would not."""
     server, log = hub.state / "server.json", hub.state / "calls.log"
@@ -241,7 +242,7 @@ def test_the_fake_refuses_what_must_never_run(hub, ctx, make_exe):
     spellings = [args for args in FORBIDDEN_SPELLINGS if args[0] != "Message"]  # clap: no case
     for args in spellings:
         done = start(*args)
-        assert (done.returncode, done.stdout.strip()) == (99, b"F-NODEL"), args
+        assert (done.returncode, done.stdout.strip()) == (99, b"FORBIDDEN"), args
     assert start("imap", "search", "-m", "INBOX", "--seen").returncode == 0
     codes = [json.loads(line)["exit"] for line in log.read_text("utf-8").splitlines()]
     assert codes == [99] * len(spellings) + [0]
@@ -804,7 +805,8 @@ def test_send_refuses_8bit_input(hub, ctx, fake_himalaya):
 
 
 def test_the_fake_cuts_at_the_first_8bit_line_like_himalaya(hub, ctx, fake_himalaya):
-    """What F-SEND warns about, so the 7-bit check is worth having: via run(), which has none."""
+    """himalaya stops reading a mail at its first line that is not UTF-8, so the 7-bit check is
+    worth having: via run(), which has none."""
     fake = fake_himalaya(make_server())
     Himalaya(ctx).run("qq", "message", "send", "--no-save", input=b"A: 1\r\nB: \xe4\r\nC: 3\r\n")
     assert fake.server()["_sent"][0]["raw"] == "A: 1\r\n"

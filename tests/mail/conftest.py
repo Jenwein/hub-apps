@@ -83,8 +83,8 @@ def fake_himalaya(hub, tmp_path, make_exe):
     state directory gets a placeholder himalaya.toml (Himalaya.run wants the file; the fake does
     not read it).
 
-    One fake per test. The test fails at teardown if a call exited 99 (the wrapper asked for
-    something F-NODEL forbids) or 97 (the fake crashed).
+    One fake per test. The test fails at teardown if a call exited 99 (the wrapper asked for a
+    command that deletes mail for good or marks it as read) or 97 (the fake crashed).
     """
     made: list[FakeHimalaya] = []
 
@@ -104,7 +104,7 @@ def fake_himalaya(hub, tmp_path, make_exe):
     calls = [call for fake in made for call in fake.calls()]
     forbidden = [call["argv"][1:] for call in calls if call["exit"] == 99]
     if forbidden:
-        pytest.fail(f"the fake himalaya was asked for what F-NODEL forbids: {forbidden}")
+        pytest.fail(f"the fake himalaya was asked for what mx never runs: {forbidden}")
     crashed = [call["argv"][1:] for call in calls if call["exit"] == 97]
     if crashed:
         pytest.fail(f"the fake himalaya crashed on: {crashed}")

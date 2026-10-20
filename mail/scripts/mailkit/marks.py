@@ -1,4 +1,4 @@
-"""How far the alert watcher got in each inbox, and which mail came since (F-UID).
+"""How far the alert watcher got in each inbox, and which mail came since (by IMAP UID).
 
 A mark is the inbox's UIDVALIDITY, the highest UID handled, and the time the newest handled mail
 arrived (its INTERNALDATE). `fresh` starts with one `imap status` call: when nothing came, that is

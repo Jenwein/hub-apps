@@ -80,7 +80,7 @@ def stdin_is_null():
 # - `fail_fetch` (optional) is a <failure> (see `fail` below) of every `imap fetch --body` that
 #   names the message: a mail whose bytes cannot be fetched.
 # - `fail`: a <failure> is an error text, or [error, source, ...] for an error with causes. It
-#   makes every command of that account exit 1 with it on stdout: the F-CLI JSON with `--json`,
+#   makes every command of that account exit 1 with it on stdout: the error JSON with `--json`,
 #   else the layout of the real binary (`Error: ...`, `Caused by:` with ` - ...` items,
 #   `Suggestions:`). `account check` reports both backends failing instead (exit 0). A dict fails
 #   one backend: "imap" for every command but `message send`, "smtp" for `message send`.
@@ -92,7 +92,7 @@ def stdin_is_null():
 # argv[1:5] is `-c himalaya.toml -a <mailbox>`), `cwd`, `stdin_closed` (stdin is the null device
 # or closed), `stdin` (what `message send` and `message add` read, else null) and `exit`.
 #
-# Exit 99 with `F-NODEL` on stdout: `message delete`, `imap expunge` and `--seen` (except as the
+# Exit 99 with `FORBIDDEN` on stdout: `message delete`, `imap expunge` and `--seen` (except as the
 # filter of `imap search`), with himalaya's aliases (`msg`, `rm`) and `imap delete`, `imap close`,
 # `imap raw`. Exit 97: the fake itself crashed. A command or option it does not know exits 2.
 # `himalaya --version` prints `himalaya v<$FAKE_HIMALAYA_VERSION, default 2.2.1> +imap +smtp` and
@@ -707,7 +707,8 @@ def account_check(opts, positional):
     emit({"account": STATE["account"], "backends": backends})
 
 
-# F-NODEL, with the aliases of himalaya (`msg`, `rm`), `imap close` (it expunges) and `imap raw`.
+# What mx never runs, with the aliases of himalaya (`msg`, `rm`), `imap close` (it expunges) and
+# `imap raw`.
 NODEL = {
     ("message", "delete"), ("message", "rm"), ("msg", "delete"), ("msg", "rm"),
     ("imap", "delete"), ("imap", "expunge"), ("imap", "close"), ("imap", "raw"),
@@ -768,7 +769,7 @@ def main():
     rest = args[at:]
     head = rest[:2]
     if tuple(head) in NODEL or ("--seen" in rest and head != ["imap", "search"]):
-        sys.stdout.write("F-NODEL\n")
+        sys.stdout.write("FORBIDDEN\n")
         finish(99)
     spec = COMMANDS.get(tuple(head))
     if spec is None:

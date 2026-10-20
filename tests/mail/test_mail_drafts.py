@@ -258,7 +258,7 @@ def test_send_with_the_right_code_sends_once(mailhub, chat, fake_chat, server, m
     assert mail["Message-ID"] == data["message_id"]
     assert mail.get_content().replace("\r\n", "\n") == "Hello Bob,\n\nlunch at noon?\n"
     assert [s["mailbox"] for s in server.server()["_sent"]] == ["qq"]
-    # qq keeps no copy itself: the same bytes go to its sent folder, marked as read (F-SAVE).
+    # qq keeps no copy itself: the same bytes go to its sent folder, marked as read.
     [copy] = adds(server)
     assert copy["argv"][8:] == ["-m", "Sent Messages", "-f", "seen"]
     assert copy["stdin"] == call["stdin"]
@@ -819,7 +819,7 @@ def test_built_mail_is_7bit(mailhub, tmp_path):
     assert mail["From"] == "张三 <me@qq.com>"
     assert mail["Subject"] == d.subject
     assert mail["To"] == "bob@example.org" and mail["Cc"] == "carol@example.org"
-    assert mail["Bcc"] == "dan@example.org"  # himalaya takes it and strips it (F-SEND)
+    assert mail["Bcc"] == "dan@example.org"  # himalaya takes it and strips it
     assert mail["In-Reply-To"] == "<a@b.c>" and mail["References"] == "<r@b.c> <a@b.c>"
     assert mail["Message-ID"].endswith("@qq.com>") and mail["Date"]
     assert mail.get_body().get_content().replace("\r\n", "\n") == d.body + "\n"

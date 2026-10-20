@@ -85,7 +85,8 @@ def kind(error: type[HimalayaError]) -> str:
 
 
 def parse_error(stdout: str) -> str:
-    """The message of a failed call, from what himalaya printed (F-CLI): with `--json` the `error`
+    """The message of a failed call, from what himalaya printed on stdout, where its errors go
+    too (its stderr has logs only): with `--json` the `error`
     and the `sources` joined with `: `; without it the `Error:` line (no `Error: ` prefix) and the
     `Caused by:` items joined the same way, up to `Suggestions:`; else the first non-empty line."""
     try:
@@ -245,7 +246,7 @@ def _envelope(item: object) -> Envelope:
 
 
 def parse_envelopes(data: object) -> list[Envelope]:
-    """The envelopes of `envelope search` (F-QUERY)."""
+    """The envelopes of `envelope search` (kebab-case keys, `date` RFC 3339 or null)."""
     try:
         return [_envelope(item) for item in _arr(_get(_obj(data), "envelopes"))]
     except _Shape:
@@ -292,7 +293,7 @@ def decode_utf7(name: str) -> str:
 
 
 def parse_folders(data: object) -> list[Folder]:
-    """The folders of `mailbox list` (F-LIST)."""
+    """The folders of `mailbox list`; a non-ASCII name comes in IMAP's modified UTF-7."""
     try:
         found = []
         for item in _arr(_get(_obj(data), "mailboxes")):
@@ -308,7 +309,7 @@ def parse_folders(data: object) -> list[Folder]:
 
 
 # Folder names the providers use, matched on the decoded name without regard to case. IMAP has
-# no SPECIAL-USE roles in himalaya's `mailbox list` (F-HCONF): these guesses are all there is.
+# no SPECIAL-USE roles in himalaya's `mailbox list`: these guesses are all there is.
 KNOWN_FOLDERS: dict[str, tuple[str, ...]] = {
     "sent": ("Sent Messages", "Sent", "Sent Items", "Sent Mail", "[Gmail]/Sent Mail",
              "[Gmail]/已发邮件", "已发送"),
@@ -330,7 +331,7 @@ def guess_folders(folders: list[Folder]) -> dict[str, str | None]:
 # --- running himalaya --------------------------------------------------------------------------
 
 
-# F-NODEL: what mx never runs, in every spelling himalaya knows. Deleting for good (inside the
+# What mx never runs, in every spelling himalaya knows. Deleting for good (inside the
 # trash too), expunging (CLOSE expunges as well), `imap raw` (it could send any of them), and
 # `--seen`, which marks a mail as read (as a filter of `imap search` it only selects).
 FORBIDDEN = frozenset({

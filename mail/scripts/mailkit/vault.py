@@ -160,7 +160,8 @@ def has_token(state: Path, mailbox: str) -> bool:
 
 def mx_command(ctx: Ctx, *args: str) -> list[str]:
     """The argv that runs `mx <args>` for this hub: absolute paths only, and no shell, so it means
-    the same on every OS and from every tool that runs it (the F-AUTH password command)."""
+    the same on every OS and from every tool that runs it (such as the password command that
+    himalaya and carillon run without a shell)."""
     uv = shutil.which("uv")
     if uv is None:
         raise MailError("uv is not on PATH: the tools that fetch secrets run mx through uv")

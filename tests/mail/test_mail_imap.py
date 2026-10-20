@@ -318,7 +318,7 @@ def drafted_and_sent(greenmail_hub, fake_chat, capsys, monkeypatch, *argv: str) 
 def test_send_and_sent_copy_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, capsys,
                                              monkeypatch):
     """A draft goes out through himalaya, 7-bit, with a Chinese subject and body; the copy is
-    appended to Sent, marked as read (save_copy, F-SAVE)."""
+    appended to Sent, marked as read (save_copy)."""
     record_chat(greenmail_hub)
     rcpt = f"rcpt-{uuid4().hex[:8]}@greenmail.test"
     subject = f"gm-draft-{uuid4().hex[:8]} 你好"
@@ -343,7 +343,7 @@ def test_send_and_sent_copy_on_a_real_server(greenmail_hub, ctx, hima, fake_chat
 @pytest.mark.greenmail
 def test_bcc_is_stripped_on_a_real_server(greenmail_hub, ctx, hima, fake_chat, capsys,
                                           monkeypatch):
-    """himalaya sends to To and Bcc and strips the Bcc line (F-SEND): both get the mail and
+    """himalaya sends to To and Bcc and strips the Bcc line: both get the mail and
     neither copy names the hidden recipient. The sent copy keeps it, as the sender's record."""
     record_chat(greenmail_hub)
     tag = uuid4().hex[:8]

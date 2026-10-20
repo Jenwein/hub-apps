@@ -205,7 +205,8 @@ Your mailboxes from the chat. You talk to the agent in a direct chat, in your la
 searches and reads your mail, finds verification codes, writes, replies to and forwards mail, and
 can tell you when something urgent arrives. It needs cc-hub 0.7.0 or later.
 
-- **Search and read.** "Mail from GitHub this week", "unread in QQ", "what did I send to Bob".
+- **Search and read.** "Mail from GitHub this week", "unread in QQ", "what did I send from QQ
+  last week".
   The agent lists mail across your mailboxes, newest first. The original of a mail, or the answer
   to a question about it, goes to your private chat.
 - **Verification codes.** "What is the QQ code?" gives the code from mail of the last few minutes.
@@ -245,7 +246,7 @@ The agent shows you each command and what it does, and installs nothing until yo
 | Software | What for | How it is installed |
 |---|---|---|
 | [himalaya](https://github.com/pimalaya/himalaya) v2.2.1 | reads and sends the mail over IMAP and SMTP | the app's own downloader, from the official GitHub release, SHA-256 checked, into `~/.local/bin`; no root |
-| Claude Code | the mail reader, which has no tools; needed even when the hub's agent is Codex | the official installer; you sign in once in the server terminal |
+| Claude Code | the mail reader, which has no tools; needed even when the hub's agent is Codex | the official installer; you sign in once in the server terminal (`claude`, then `/login`) |
 | [uv](https://docs.astral.sh/uv/) | runs the app's scripts | the official installer, only if it is missing |
 | [carillon](https://github.com/pimalaya/carillon) v0.2.0 | alerts only: watches the inboxes | the app's downloader, when you turn alerts on |
 | [ortie](https://github.com/pimalaya/ortie) v2.3.0 | Outlook only: the Microsoft sign-in | the app's downloader, when you add an Outlook mailbox |
@@ -273,9 +274,12 @@ Move that one to the archive
 
 Mail is read by a reader without tools (Claude Code with every tool switched off): the agent never
 reads a mail body or an attachment, and treats the subjects, sender names and attachment names it
-sees in lists as data, never as instructions. Nothing is sent without the confirmation code from
-the chat: you read the draft there and type the code back. Passwords are typed in the server
-terminal and stay outside the hub.
+sees in lists as data, never as instructions. What the agent gets from the reader about a mail
+(`mx look`: a summary, a reason, a code, an amount, a deadline) is written by the reader and
+checked against the mail: the summary and the reason are one short line each, and a code, amount
+or deadline that the mail itself does not contain is dropped. Nothing is sent without the
+confirmation code from the chat: you read the draft there and type the code back. Passwords are
+typed in the server terminal and stay outside the hub.
 
 Passwords, drafts and the alert log are kept per machine, outside the hub. `mail/` in your hub
 holds the mailbox list (addresses and folder names), your sorting rules and the settings, with

@@ -349,3 +349,20 @@ def test_readme_mail_section_covers_what_the_brief_lists():
     assert "subjects, sender names and attachment names" in flat_safety
     assert "as data, never as instructions" in flat_safety
     assert "cannot make the agent do anything" not in flat_safety
+
+
+# Names of the plan's facts and decisions, of spec sections and of review rulings are the history
+# of the design: comments, docstrings and tests say what the code does.
+HISTORY = re.compile(r"\bF-[A-Z]+\b|plan\s+decision|spec\s*§|\bR\d{1,2}\b:")
+
+
+def test_no_file_of_the_app_or_its_tests_names_the_plan_or_a_ruling():
+    found = []
+    for folder in (APP, ROOT / "tests" / "mail"):
+        for path in sorted(folder.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            text = path.read_bytes().decode("utf-8", "replace")
+            found += [f"{path.relative_to(ROOT).as_posix()}: {hit.group()}"
+                      for hit in HISTORY.finditer(text)]
+    assert found == []

@@ -3,14 +3,16 @@
 The agent writes a draft (`draft`, `forward`, `draft-update --body`), or the reader writes a reply
 (`reply`, `revise`). Either way the draft is saved with a new code, and the whole draft goes with
 the code to the user's private chat (`_publish`). The agent's output names the draft and its
-addresses, never the code, and never a body the reader wrote: that is text made from a mail
-(spec §8.1; plan decision 2). When the chat cannot be reached, the code is voided again: a code
-nobody saw must not stay valid.
+addresses, never the code, and never a body the reader wrote: that is text made from a mail, and
+no text from a mail may reach the agent. When the chat cannot be reached, the code is voided
+again: a code nobody saw must not stay valid.
 
 `send` checks the code (drafts.check_code) and spends it before anything goes out, then hands the
-mail to himalaya and appends the sent copy separately (F-SAVE). A forward goes only with the very
-mail the user approved: its bytes are bound to the code. `build` makes the mail 7-bit, which
-himalaya needs (F-SEND); himalaya takes the recipients from To, Cc and Bcc and strips Bcc.
+mail to himalaya with `--no-save` and appends the sent copy separately: a copy that himalaya
+appended itself and failed to append would look like a failed send. A forward goes only with the
+very mail the user approved: its bytes are bound to the code. `build` makes the mail 7-bit, since
+himalaya stops reading the mail at its first line that is not UTF-8; himalaya takes the
+recipients from To, Cc and Bcc and strips Bcc.
 """
 
 from __future__ import annotations
@@ -615,7 +617,7 @@ def build(d: Draft, mb: Mailbox, original: bytes | None,
     if d.cc:
         msg["Cc"] = ", ".join(d.cc)
     if d.bcc:
-        msg["Bcc"] = ", ".join(d.bcc)  # himalaya sends to it and takes the line out (F-SEND)
+        msg["Bcc"] = ", ".join(d.bcc)  # himalaya sends to it and takes the line out
     msg["Subject"] = d.subject
     msg["Date"] = format_datetime(clock.now())
     # The message ids as they are (MAIL_POLICY), one per line; only well-formed ids get in.

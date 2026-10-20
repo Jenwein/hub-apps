@@ -31,7 +31,10 @@ uv run apps/mail/scripts/mx.py reader-check
 `{"ok": true}` means the reader works: go on. Otherwise the answer is `{"ok": false, "detail":
 "..."}`. If `claude` is missing, not on `PATH`, or not signed in, the user must fix it
 themselves: `claude` is installed with its native installer (on Windows an npm `claude.cmd` is
-refused), and signing in is running `claude` once in the server's terminal. Note it as left for
+refused), and signing in is running `claude` in the server's terminal and typing `/login` there
+(or giving Claude Code its own credentials file). A shell with an `ANTHROPIC_API_KEY` passes the
+check without a sign-in, but the alert service does not keep that variable and its reader would
+fail: if the user wants alerts, they sign in as above all the same. Note it as left for
 the user (step 7) and carry on with the next steps: nothing in steps 2 to 4 needs the reader. A
 usage limit or a timeout passes; run the check again later.
 
@@ -220,7 +223,9 @@ git add -- mail/config.toml && git commit -m "mail: alerts on" -- mail/config.to
 
 **The service.** Create, change or start it only after the user's OK (asked above). The
 definition names the hub's absolute path, so run `watch-unit` from the hub root. The watcher runs
-himalaya, carillon, `claude` and `cc-connect`, so all four must be found. `watch-unit --out FILE`
+himalaya, carillon, `claude` and `cc-connect`, so all four must be found, and `claude` must be
+signed in (`claude`, then `/login`; step 1): an `ANTHROPIC_API_KEY` of the shell does not reach
+the service. `watch-unit --out FILE`
 writes the file readable by the user only, because it can hold proxy credentials.
 
 **Linux.**

@@ -18,8 +18,10 @@ sending side, and lists one mail. The answer per mailbox is `{"ok": true}` or
 status 0 either way. An `error` that says himalaya (or ortie, for Outlook) is not on `PATH` or is
 another version than the app needs comes before any sign-in: the mailbox was not tried. With the
 user's OK run the `install-tool` command it names; when it still shows after that, another copy
-comes first on `PATH`, and `.local/bin` of the home directory must come before it. `secret-status` says per mailbox whether a password is stored (`true` or
-`false`; `"oauth"` for an Outlook mailbox) and never shows it.
+comes first on `PATH`, and `.local/bin` of the home directory must come before it.
+
+`secret-status` says per mailbox whether a password is stored (`true` or `false`; `"oauth"` for
+an Outlook mailbox) and never shows it.
 
 ## The sign-in fails
 
@@ -68,7 +70,10 @@ It answers `{"ok": true}` or `{"ok": false, "detail": "..."}`. The usual causes:
   installer.
 - On Windows, a `claude.cmd` from npm is refused, because it garbles the arguments. The user
   installs Claude Code with its native installer instead.
-- `claude` is not signed in. The user runs `claude` once in the server's terminal and signs in.
+- `claude` is not signed in. The user runs `claude` in the server's terminal and types `/login`
+  there (or gives Claude Code its own credentials file). A reader that works only through an
+  `ANTHROPIC_API_KEY` in the shell fails in the alert service, which does not keep that
+  variable: alerts then say that the reader did not answer.
 - A usage limit, or no answer in time. Try again later.
 
 The reader's model is `model` under `[reader]` in `mail/config.toml`.
@@ -108,7 +113,7 @@ Go through the fields ([alerts.md](alerts.md) explains them):
    |---|---|
    | Linux, WSL | `systemctl --user status cc-hub-mail-watch`, `journalctl --user -u cc-hub-mail-watch -n 50 --no-pager` |
    | macOS | `launchctl print gui/$(id -u)/io.cc-hub.mail.watch`; the service writes its output to `watch.log` |
-   | Windows | `schtasks /Query /TN cc-hub-mail-watch /V /FO LIST`; start it with `schtasks /Run /TN cc-hub-mail-watch` |
+   | Windows | `schtasks /Query /TN cc-hub-mail-watch /V /FO LIST`; start it with `schtasks /Change /TN cc-hub-mail-watch /ENABLE`, then `schtasks /Run /TN cc-hub-mail-watch` (see "Stop and start the service" in [alerts.md](alerts.md)) |
 
    A Linux user service stops when the user logs out unless lingering is on (`loginctl
    enable-linger`; step 5 of `apps/mail/SETUP.md`). On WSL it needs systemd, which `/etc/wsl.conf`
