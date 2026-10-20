@@ -18,7 +18,7 @@ from mailkit.alerts import AlertQueue
 from mailkit.cli import main
 from mailkit.context import load
 from mailkit.health import Health, sign_in_command
-from mailkit.himalaya import Himalaya
+from mailkit.himalaya import Himalaya, TimedOut
 from mailkit.reader import Reader, Verdict
 from mailkit.strings import STRINGS, t
 from mailkit.tools import TOOLS
@@ -121,8 +121,23 @@ def beat(ctx, at: datetime = T0) -> None:
 
 
 def daily(ctx, since: datetime = SINCE, until: datetime = T0, language: str = "en",
-          **extra) -> str:
-    return report.daily(ctx, Himalaya(ctx), Reader("sonnet"), since, until, language, **extra)
+          hima: Himalaya | None = None, **extra) -> str:
+    return report.daily(
+        ctx, hima or Himalaya(ctx), Reader("sonnet"), since, until, language, **extra)
+
+
+class SlowFetch(Himalaya):
+    """The fake himalaya, except that fetching the mail with one of the UIDs `slow` takes longer
+    than himalaya's timeout (a very large mail)."""
+
+    def __init__(self, ctx, slow: set[int]):
+        super().__init__(ctx)
+        self.slow = slow
+
+    def fetch_raw(self, mailbox: str, folder: str, uids: list[int]) -> dict[int, bytes]:
+        if self.slow & set(uids):
+            raise TimedOut(f"himalaya did not answer within {report.HIMALAYA_TIMEOUT:g} s")
+        return super().fetch_raw(mailbox, folder, uids)
 
 
 def lines(text: str) -> list[str]:
@@ -543,16 +558,16 @@ def reader_calls_with(fake_claude, subject: str) -> list[int]:
 
 def test_a_batch_whose_fetch_times_out_is_fetched_mail_by_mail_next_time(
         ctx, clock, fake_himalaya, fake_claude):
-    huge = message(3, "Domain renewal")
-    huge["fail_fetch"] = "imap: connection timed out"
-    fake_himalaya(server(qq=[message(1, "Parcel shipped"), message(2, "Friday"), huge]))
+    fake_himalaya(server(qq=[
+        message(1, "Parcel shipped"), message(2, "Friday"), message(3, "Domain renewal")]))
     fake_claude.by_subject(SORTED)
+    hima = SlowFetch(ctx, {3})
 
     # The three are one batch, whose fetch takes too long: no mailbox failure, but the mail waits.
-    assert daily(ctx) == "Mail not sorted in time: 3. The next report lists it."
+    assert daily(ctx, hima=hima) == "Mail not sorted in time: 3. The next report lists it."
 
     clock.at = T0 + DAY
-    assert daily(ctx, T0, T0 + DAY) == (
+    assert daily(ctx, T0, T0 + DAY, hima=hima) == (
         "Waiting for your reply:\n"
         "- [qq] Shop: Alice asks whether Friday works. · 2026-10-23\n"
         "\n"
@@ -566,21 +581,64 @@ def test_a_batch_whose_fetch_times_out_is_fetched_mail_by_mail_next_time(
 
 def test_a_mail_that_times_out_alone_three_times_is_given_up(ctx, clock, fake_himalaya,
                                                              fake_claude):
-    huge = message(1, "Domain renewal")
-    huge["fail_fetch"] = "imap: connection timed out"
-    fake_himalaya(server(qq=[huge]))
+    fake_himalaya(server(qq=[message(1, "Domain renewal")]))
+    hima = SlowFetch(ctx, {1})
     waiting = "Mail not sorted in time: 1. The next report lists it."
-
-    assert daily(ctx) == waiting
-    clock.at = T0 + DAY
-    assert daily(ctx, T0, T0 + DAY) == waiting
-    clock.at = T0 + 2 * DAY
-    assert daily(ctx, T0 + DAY, T0 + 2 * DAY) == (
+    given_up = (
         "Mail in qq that took too long to fetch, three reports in a row: 1. It is left out "
         "from now on: look for it in the mailbox itself.")
+
+    assert daily(ctx, hima=hima) == waiting
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY, hima=hima) == waiting
+    clock.at = T0 + 2 * DAY
+    assert daily(ctx, T0 + DAY, T0 + 2 * DAY, hima=hima) == given_up
+
+    # That report was not sent: the one over the same window says it again, without fetching.
+    hima.slow = set()
+    clock.at = T0 + 2 * DAY + HOUR
+    assert daily(ctx, T0 + DAY, T0 + 2 * DAY + HOUR, hima=hima) == given_up
+    assert fake_claude.calls() == []
     clock.at = T0 + 3 * DAY
-    assert daily(ctx, T0 + 2 * DAY, T0 + 3 * DAY) == t("daily_nothing", "en")
+    assert daily(ctx, T0 + 2 * DAY + HOUR, T0 + 3 * DAY, hima=hima) == t("daily_nothing", "en")
     assert json.loads((ctx.state / "report.json").read_text("utf-8"))["left"] == []
+
+
+def test_a_server_that_cannot_be_reached_in_time_is_no_slow_mail(ctx, clock, fake_himalaya,
+                                                                 fake_claude):
+    late = message(1, "Parcel shipped")
+    late["fail_fetch"] = "imap: connection timed out (os error 10060)"
+    fake = fake_himalaya(server(qq=[late]))
+    fake_claude.by_subject(SORTED)
+
+    # The connection timed out, not the fetch: the mailbox could not be read, and its mail waits
+    # to be fetched with the others, not on its own.
+    assert daily(ctx) == (
+        "No new mail needs your attention in the mailboxes that could be read.\n\n"
+        "qq could not be read (imap: connection timed out (os error 10060)); its mail is listed "
+        "once it can be read again.")
+    [entry] = json.loads((ctx.state / "report.json").read_text("utf-8"))["left"]
+    assert (entry["key"], entry["alone"], entry["timeouts"]) == ("qq/7/1", False, 0)
+
+    data = fake.server()
+    del data["qq"]["INBOX"]["messages"][0]["fail_fetch"]
+    fake.write(data)
+    clock.at = T0 + DAY
+    assert daily(ctx, T0, T0 + DAY) == (
+        "Orders and deliveries:\n- [qq] Shop: Your parcel is on its way.")
+
+
+def test_the_arrival_listing_asks_for_one_range(ctx, fake_himalaya, fake_claude):
+    # Thousands of sparse UIDs since the start's day, all of them before the window.
+    fake = fake_himalaya(server(qq=[
+        message(uid, "Weekly news", SINCE - HOUR) for uid in range(1, 10_000, 2)]))
+
+    assert daily(ctx) == t("daily_nothing", "en")
+    [fetch] = [
+        call["argv"] for call in fake.calls()
+        if "qq" in call["argv"] and "fetch" in call["argv"] and "--internal-date" in call["argv"]]
+    assert "1:9999" in fetch
+    assert max(len(arg) for arg in fetch[1:]) < 100  # argv[0] is the fake's own path
 
 
 def test_daily_shares_the_budget_and_ends_in_time(ctx, fake_himalaya, fake_claude, monkeypatch):
