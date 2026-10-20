@@ -45,10 +45,21 @@ start a background service of the user's account.
 2. `mx alerts on` turns alerts on for this machine: it records the machine's name as `host` in
    `mail/config.toml`, so run it on the right machine. The first check afterwards only sets a
    starting point: mail that came while alerts were off is not alerted. The daily report lists it.
-3. The first time, install the service. `apps/mail/SETUP.md`, step 5, does this for each system:
+3. Commit `mail/config.toml`, and do not push (the hub's nightly task pushes what is committed).
+   The nightly task commits only the memory files, so this file would stay changed, and `host` is
+   how other copies of the hub know which machine runs the alerts; a copy that never gets the
+   change would keep the old switch and could send every alert twice. If git says there is
+   nothing to commit, the switch was already in that state.
+
+   ```
+   git add -- mail/config.toml && git commit -m "mail: alerts on" -- mail/config.toml
+   ```
+
+4. The first time, install the service. `apps/mail/SETUP.md`, step 5, does this for each system:
    `mx watch-unit --platform linux`, `macos` or `windows` prints the definition, and the setup
-   steps save it where the system wants it. Later, only start the service again (below).
-4. `mx alerts-status` shows `watching: true` within two minutes. If it does not, read
+   steps save it where the system wants it. Later, only start the service again (see "Stop and
+   start the service").
+5. `mx alerts-status` shows `watching: true` within two minutes. If it does not, read
    [troubleshoot.md](troubleshoot.md).
 
 ```
@@ -57,26 +68,43 @@ uv run apps/mail/scripts/mx.py alerts on
 uv run apps/mail/scripts/mx.py alerts-status
 ```
 
-### Turn alerts off
+### Stop and start the service
 
-Stop the service first, then switch alerts off: a watcher that still runs keeps alerting and keeps
-writing its sign of life.
-
-| System | Stop (and keep from starting at login) | Start again |
+| System | Stop it, and keep it from starting at login | Start it again |
 |---|---|---|
 | Linux, WSL | `systemctl --user disable --now cc-hub-mail-watch` | `systemctl --user enable --now cc-hub-mail-watch` |
-| macOS | `launchctl bootout gui/$(id -u)/io.cc-hub.mail.watch` | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.cc-hub.mail.watch.plist` |
-| Windows | `schtasks /End /TN cc-hub-mail-watch` then `schtasks /Change /TN cc-hub-mail-watch /DISABLE` | `schtasks /Change /TN cc-hub-mail-watch /ENABLE` then `schtasks /Run /TN cc-hub-mail-watch` |
+| Windows | `schtasks /End /TN cc-hub-mail-watch`, then `schtasks /Change /TN cc-hub-mail-watch /DISABLE` | `schtasks /Change /TN cc-hub-mail-watch /ENABLE`, then `schtasks /Run /TN cc-hub-mail-watch` |
 
-Then:
+On macOS, `bootout` stops the job, but the property list stays in `~/Library/LaunchAgents` and
+loads again at the next login, so the job must also be disabled; and a disabled job cannot be
+loaded until it is enabled again:
 
-```
-uv run apps/mail/scripts/mx.py alerts off
-```
+- Stop: `launchctl bootout gui/$(id -u)/io.cc-hub.mail.watch`, then
+  `launchctl disable gui/$(id -u)/io.cc-hub.mail.watch`.
+- Start: `launchctl enable gui/$(id -u)/io.cc-hub.mail.watch`, then
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.cc-hub.mail.watch.plist` (when it
+  says the job is already loaded, go on), then
+  `launchctl kickstart gui/$(id -u)/io.cc-hub.mail.watch`.
 
-The service runs `mx watch`. Where alerts are off, or are meant for another machine, `mx watch`
-says why on stderr and ends at once with status 0, so a service that is left installed does
-nothing. To remove the service for good, follow `apps/mail/REMOVE.md`.
+After starting, `mx alerts-status` shows `watching: true` within two minutes.
+
+The service runs `mx watch`. Never run `mx watch` yourself: in the foreground it blocks the shell
+and holds the watcher's lock, and the real service then fails with `mx watch is already running
+for this hub`. Where alerts are off, or are meant for another machine, `mx watch` says why on
+stderr and ends at once with status 0, so a service that is left installed does nothing.
+
+### Turn alerts off
+
+1. Stop the service (above): a watcher that still runs keeps alerting and keeps writing its sign
+   of life.
+2. Switch alerts off, then commit `mail/config.toml` as when turning alerts on:
+
+   ```
+   uv run apps/mail/scripts/mx.py alerts off
+   git add -- mail/config.toml && git commit -m "mail: alerts off" -- mail/config.toml
+   ```
+
+To remove the service for good, follow `apps/mail/REMOVE.md`.
 
 ## Daily and monthly reports
 

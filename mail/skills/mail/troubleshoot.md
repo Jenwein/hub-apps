@@ -74,10 +74,12 @@ The reader's model is `model` under `[reader]` in `mail/config.toml`.
 
 `show`, `ask`, `attachment-send` and every draft write to the user's private chat.
 
-- `no private chat recorded`: run `mx chat-set` from here, in the direct chat. It records this
-  chat (cc-connect gives it to the agent as `CC_SESSION_KEY` and `CC_PROJECT`) and sends a test
-  message there; tell the user it arrived. `mx chat-show` shows which chat is recorded. Run
-  `chat-set` again if the user moves to another chat.
+- `no private chat recorded`: run `mx chat-set` from here, but only in a direct chat with the
+  user, never in a group chat: the chat it records receives the originals, the answers, the drafts
+  and their codes, and the alerts. It records this chat (cc-connect gives it to the agent as
+  `CC_SESSION_KEY` and `CC_PROJECT`) and sends a test message there. Say that a test message was
+  sent, and ask the user to confirm that they see it. `mx chat-show` shows which chat is recorded.
+  Run `chat-set` again if the user moves to another direct chat with you.
 - `cc-connect is not on PATH`, `cannot run cc-connect`, or `cc-connect exited with status ...`:
   cc-connect is not installed, not running, or cannot reach the chat. It must be running. A draft
   made meanwhile is saved but its code is void: after the chat works again, `mx confirm <id>`.
