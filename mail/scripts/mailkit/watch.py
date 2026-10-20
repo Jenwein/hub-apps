@@ -623,9 +623,15 @@ def chat_sender(ctx: Ctx) -> Callable[[str], None]:
 
 
 def serve(ctx: Ctx) -> None:
-    """`mx watch`: refuse unless alerts are on and meant for this machine; write the configs;
-    watch until SIGTERM or Ctrl+C."""
-    check_here(ctx)
+    """`mx watch`: unless alerts are on and meant for this machine, say so on stderr and return;
+    that is no failure, and a service manager that restarts only failures leaves it stopped.
+    Otherwise write the configs and watch until SIGTERM or Ctrl+C."""
+    try:
+        check_here(ctx)
+    except MailError as err:
+        if sys.stderr is not None:  # none under a windowless Python
+            print(f"mx: {err}", file=sys.stderr)
+        return
     with single_instance(ctx.state):
         configs.write_configs(ctx)
         rotate_log(ctx.state)

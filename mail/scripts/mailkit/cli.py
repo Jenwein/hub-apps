@@ -381,7 +381,8 @@ def run_discard(args: argparse.Namespace) -> None:
 
 
 def run_watch(args: argparse.Namespace) -> None:
-    """The alert watcher, which the alert service runs: until it is stopped."""
+    """The alert watcher, which the alert service runs: until it is stopped. Where alerts are off
+    or meant for another machine it says so and ends with status 0."""
     watch.serve(load_ctx(args))
 
 
@@ -395,8 +396,10 @@ def run_watch_unit(args: argparse.Namespace) -> None:
     """The service definition for this hub, as plain text on stdout or in a file. Nothing is
     installed: the setup steps put it where the operating system wants it."""
     ctx = load_ctx(args)
-    text = service.watch_unit(
-        args.platform, service.uv_path(), ctx.hub, ctx.state / watch.LOG, os.environ)
+    uv = service.uv_path()
+    if args.platform == "windows":
+        service.check_launcher(uv)
+    text = service.watch_unit(args.platform, uv, ctx.hub, ctx.state / watch.LOG, os.environ)
     if args.out is None:
         print(text, end="")
     else:
@@ -640,7 +643,8 @@ def build_parser() -> Parser:
 
     p = sub.add_parser(
         "watch", help="watch the inboxes and alert on urgent mail in the private chat (the alert "
-        "service runs it; it runs until it is stopped)")
+        "service runs it; it runs until it is stopped, and ends at once, saying why, where alerts "
+        "are off or meant for another machine)")
     p.set_defaults(func=run_watch)
 
     p = sub.add_parser(

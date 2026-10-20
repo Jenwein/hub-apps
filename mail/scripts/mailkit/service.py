@@ -59,6 +59,8 @@ CONFIG = "config.toml"  # in the hub's mail directory
 UNSAFE_IN_UNIT = ('"', "\\", "%", "\n", "\r")
 # It also expands ${NAME} in a command line, and reads $$ as one dollar sign.
 UNSAFE_IN_COMMAND = (*UNSAFE_IN_UNIT, "$")
+# The value of an Environment= setting is written with %% for each percent sign.
+UNSAFE_IN_VALUE = ('"', "\\", "\n", "\r")
 # Task Scheduler expands %NAME% in a command, its arguments and its folder, and a quote ends a
 # quoted argument; XML allows no other control character.
 UNSAFE_IN_TASK = re.compile(r'["%\x00-\x1f]')
@@ -102,8 +104,38 @@ def current_user() -> str:
     return f"{domain}\\{name}" if domain else name
 
 
+def _outside(path: str, folder: str) -> str:
+    """The search path `path` without the entries that are `folder` or lie under it (compared
+    the way this operating system compares paths: Windows ignores case and slash direction)."""
+    root = os.path.normcase(os.path.normpath(folder))
+
+    def inside(entry: str) -> bool:
+        if not entry:
+            return False
+        where = os.path.normcase(os.path.normpath(entry))
+        return where == root or where.startswith(root + os.sep)
+
+    return os.pathsep.join(entry for entry in path.split(os.pathsep) if not inside(entry))
+
+
 def _kept(env: Mapping[str, str]) -> dict[str, str]:
-    return {name: env[name] for name in ENV_KEEP if env.get(name)}
+    """The variables of ENV_KEEP that `env` sets. The search path loses the entries under the
+    active virtual environment: `uv run mx.py` puts the scripts folder of its throwaway
+    environment first, which is gone once the command ends."""
+    kept = {name: env[name] for name in ENV_KEEP if env.get(name)}
+    venv = env.get("VIRTUAL_ENV")
+    if venv and "PATH" in kept:
+        kept["PATH"] = _outside(kept["PATH"], venv)
+        if not kept["PATH"]:
+            del kept["PATH"]
+    return kept
+
+
+def _environment(name: str, value: str) -> str:
+    """An Environment= setting. systemd reads %NAME in a value as a specifier, so each percent
+    sign is written twice."""
+    text = _quoted(f"{name}={value}", f"the value of {name}", UNSAFE_IN_VALUE, show=False)
+    return "Environment=" + text.replace("%", "%%")
 
 
 def _linux_unit(uv: str, hub: PurePath, env: Mapping[str, str]) -> str:
@@ -120,8 +152,7 @@ def _linux_unit(uv: str, hub: PurePath, env: Mapping[str, str]) -> str:
         # not quoted: systemd takes the rest of the line as the path, and a quote would make it
         # a relative one
         f"WorkingDirectory={_checked(root, 'the hub path')}",
-        *(f"Environment={_quoted(f'{name}={value}', f'the value of {name}', show=False)}"
-          for name, value in _kept(env).items()),
+        *(_environment(name, value) for name, value in _kept(env).items()),
         f"ExecStart={command}",
         "Restart=on-failure",
         "RestartSec=30",
@@ -230,6 +261,17 @@ def uv_path() -> str:
     if uv is None:
         raise MailError("uv is not on PATH: the service runs mx through uv")
     return uv if os.path.isabs(uv) else os.path.abspath(uv)  # which() may return a relative one
+
+
+def check_launcher(uv: str) -> None:
+    """A Windows task starts `uvw.exe`, the launcher without a console that sits beside uv.exe:
+    refuse a uv that is on this machine and has none. A uv that is not here (the task is made
+    for another machine) cannot be checked."""
+    exe = Path(uv)
+    if exe.is_file() and not exe.with_name("uvw.exe").is_file():
+        raise MailError(
+            f"uv has no uvw.exe next to it ({exe.parent}): the scheduled task needs it, "
+            "so that no window opens; update uv with uv self update")
 
 
 def write_unit(path: Path, platform: str, text: str) -> None:

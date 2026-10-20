@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import socket
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -1047,18 +1048,34 @@ def test_spawn_without_carillon_is_a_mail_error(ctx, monkeypatch):
 
 
 def test_watch_refuses_when_off_or_on_another_host(hub, monkeypatch, capsys):
+    # The refusal ends the command with status 0: a service manager restarts a failure only, so
+    # an installed service whose alerts are off or meant for another machine stops for good.
+    started = []
+    monkeypatch.setattr(watch, "spawn_carillon", lambda ctx: started.append("carillon"))
+    monkeypatch.setattr(watch, "Watcher", lambda *args, **kwargs: started.append("watcher"))
     monkeypatch.setattr(socket, "gethostname", lambda: "here")
-    assert main(["--hub", str(hub.root), "watch"]) == 1
-    assert capsys.readouterr().err == "mx: alerts are off: mx alerts on\n"
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    printed = capsys.readouterr()
+    assert (printed.out, printed.err) == ("", "mx: alerts are off: mx alerts on\n")
 
     config = hub.data / "config.toml"
     config.write_text('[alerts]\nenabled = true\nhost = "there"\n', "utf-8")
-    assert main(["--hub", str(hub.root), "watch"]) == 1
-    assert capsys.readouterr().err == "mx: alerts run on there, not here\n"
-    assert not (hub.state / "carillon.toml").exists()  # nothing was written or started
+    assert main(["--hub", str(hub.root), "watch"]) == 0
+    printed = capsys.readouterr()
+    assert (printed.out, printed.err) == ("", "mx: alerts run on there, not here\n")
+    assert started == []  # no watcher, no carillon
+    assert not (hub.state / "carillon.toml").exists()  # nothing was written
+    assert not (hub.state / "watch.json").exists() and not (hub.state / "watch.lock").exists()
 
     config.write_text('[alerts]\nenabled = true\nhost = "here"\n', "utf-8")
     watch.check_here(load(hub.root))  # this machine is the one
+
+
+def test_watch_refuses_without_a_console(hub, monkeypatch):
+    monkeypatch.setattr(watch, "Watcher", lambda *args, **kwargs: pytest.fail("started"))
+    monkeypatch.setattr(sys, "stderr", None)  # a windowless Python has none
+
+    assert main(["--hub", str(hub.root), "watch"]) == 0
 
 
 def test_one_watcher_per_hub(hub):

@@ -151,10 +151,92 @@ def test_a_dollar_sign_in_a_command_path_is_refused():
         unit(hub=PurePosixPath("/home/u/${HOME}"))
 
 
-@pytest.mark.parametrize("bad", ['a"b', "a\\b", "a%b", "a\nb"])
+@pytest.mark.parametrize("bad", ['a"b', "a\\b", "a\nb"])
 def test_unsafe_value_of_a_kept_variable_refused(bad):
     with pytest.raises(MailError, match=r"PATH.*cannot contain"):
         unit(env={"PATH": f"/usr/bin:{bad}"})
+
+
+def test_a_percent_sign_in_a_variable_is_written_as_two():
+    # systemd reads %NAME in a setting as a specifier and %% as one percent sign; a proxy
+    # address with a percent-encoded password is common
+    env = {"HTTPS_PROXY": "http://u:p%40ss@proxy:8080", "NO_PROXY": "localhost"}
+
+    assert 'Environment="HTTPS_PROXY=http://u:p%%40ss@proxy:8080"\n' in unit(env=env)
+    assert 'Environment="NO_PROXY=localhost"\n' in unit(env=env)
+    # launchd takes the value as it is
+    plist = plistlib.loads(unit("macos", env=env).encode())
+    assert plist["EnvironmentVariables"]["HTTPS_PROXY"] == "http://u:p%40ss@proxy:8080"
+
+
+def test_a_percent_sign_in_a_path_is_still_refused():
+    with pytest.raises(MailError, match="cannot contain"):
+        unit(hub=PurePosixPath("/home/u/100%"))
+
+
+def uv_run_environment(tmp_path, *rest: str):
+    """What `uv run <script>` makes: a VIRTUAL_ENV in uv's cache and a PATH that starts with its
+    scripts folder, followed by `rest`."""
+    venv = tmp_path / "uv" / "cache" / "environments-v2" / "mx-1a2b3c"
+    scripts = venv / ("Scripts" if os.name == "nt" else "bin")
+    return venv, scripts, {
+        "VIRTUAL_ENV": str(venv), "PATH": os.pathsep.join([str(scripts), *rest])}
+
+
+def kept_path(env) -> str | None:
+    """The PATH that a launchd agent made from `env` has (None: no PATH)."""
+    plist = plistlib.loads(unit("macos", env=env).encode())
+    return plist["EnvironmentVariables"].get("PATH")
+
+
+def test_the_path_of_a_unit_drops_the_uv_run_environment(tmp_path):
+    venv, _scripts, env = uv_run_environment(tmp_path, "/opt/tools", "/usr/bin")
+    expected = os.pathsep.join(["/opt/tools", "/usr/bin"])
+
+    linux = unit(env=env)
+
+    assert f'Environment="PATH={expected}"\n' in linux
+    assert str(venv) not in linux and "VIRTUAL_ENV" not in linux  # it is not kept either
+    assert kept_path(env) == expected
+
+
+def test_the_path_keeps_a_folder_beside_the_environment_and_empty_entries(tmp_path):
+    venv, scripts, env = uv_run_environment(tmp_path)
+    beside = f"{venv}-other{os.sep}bin"
+    env["PATH"] = os.pathsep.join([str(scripts), beside, str(venv), "", "/usr/bin"])
+
+    assert kept_path(env) == os.pathsep.join([beside, "", "/usr/bin"])
+
+
+def test_a_path_of_only_the_environment_is_left_out(tmp_path):
+    _venv, _scripts, env = uv_run_environment(tmp_path)
+
+    assert kept_path({**env, "HTTPS_PROXY": "http://p:1"}) is None
+    assert 'Environment="HTTPS_PROXY=http://p:1"' in unit(env={**env, "HTTPS_PROXY": "http://p:1"})
+
+
+def test_the_path_is_whole_when_no_environment_is_active():
+    path = os.pathsep.join(["/opt/tools", "/usr/bin"])
+
+    assert kept_path({"PATH": path}) == path
+    assert kept_path({"PATH": path, "VIRTUAL_ENV": ""}) == path
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths differ in case only")
+def test_the_environment_is_found_whatever_the_case_on_windows(tmp_path):
+    _venv, scripts, env = uv_run_environment(tmp_path)
+    env["PATH"] = os.pathsep.join([str(scripts).upper().replace("\\", "/"), "/usr/bin"])
+
+    assert kept_path(env) == "/usr/bin"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths differ in case only")
+def test_the_environment_is_found_by_exact_case_elsewhere(tmp_path):
+    _venv, scripts, env = uv_run_environment(tmp_path)
+    shouted = str(scripts).upper()
+    env["PATH"] = os.pathsep.join([shouted, "/usr/bin"])
+
+    assert kept_path(env) == os.pathsep.join([shouted, "/usr/bin"])
 
 
 def test_unknown_platform_refused():
@@ -382,6 +464,55 @@ def test_cli_without_uv_is_an_error(hub, monkeypatch, capsys):
     assert main(["--hub", str(hub.root), "watch-unit", "--platform", "linux"]) == 1
 
     assert capsys.readouterr().err.startswith("mx: uv is not on PATH")
+
+
+def uv_folder(tmp_path, *, uvw: bool):
+    folder = tmp_path / "uvdir"
+    folder.mkdir()
+    exe = folder / "uv.exe"
+    exe.write_text("", "utf-8")
+    if uvw:
+        (folder / "uvw.exe").write_text("", "utf-8")
+    return exe
+
+
+def test_cli_windows_needs_uvw_beside_uv(hub, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(service, "current_user", lambda: r"PC\u")
+    exe = uv_folder(tmp_path, uvw=False)
+    monkeypatch.setattr(service, "uv_path", lambda: str(exe))
+
+    assert main(["--hub", str(hub.root), "watch-unit", "--platform", "windows"]) == 1
+
+    printed = capsys.readouterr()
+    assert printed.out == ""
+    assert printed.err.startswith("mx: uv has no uvw.exe next to it")
+    assert "uv self update" in printed.err
+    # a definition for another platform does not need it
+    out = tmp_path / "agent.plist"
+    assert main([
+        "--hub", str(hub.root), "watch-unit", "--platform", "macos", "--out", str(out)]) == 0
+    assert out.is_file()
+
+
+def test_cli_windows_with_uvw_beside_uv_prints_the_task(hub, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(service, "current_user", lambda: r"PC\u")
+    exe = uv_folder(tmp_path, uvw=True)
+    monkeypatch.setattr(service, "uv_path", lambda: str(exe))
+
+    assert main(["--hub", str(hub.root), "watch-unit", "--platform", "windows"]) == 0
+
+    root = ET.fromstring(capsys.readouterr().out)
+    assert text_of(root, "t:Actions/t:Exec/t:Command") == str(
+        PureWindowsPath(str(exe)).with_name("uvw.exe"))
+
+
+def test_cli_windows_does_not_check_a_uv_that_is_not_here(hub, fake_uv, monkeypatch, capsys):
+    # the uv of the fixture is no file on this machine: the task is made for another one
+    monkeypatch.setattr(service, "current_user", lambda: r"PC\u")
+
+    assert main(["--hub", str(hub.root), "watch-unit", "--platform", "windows"]) == 0
+
+    assert "uvw.exe" in capsys.readouterr().out
 
 
 def test_cli_platform_is_required_and_checked(hub, capsys):
