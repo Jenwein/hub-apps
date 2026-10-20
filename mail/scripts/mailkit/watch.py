@@ -4,6 +4,13 @@ It supervises carillon, which holds an IMAP IDLE connection to every inbox and r
 <mailbox>` for each new mail; the hook only touches `state/pokes/<mailbox>`. Every TICK_SECONDS
 the watcher:
 
+0. reads `mail/mailboxes.toml` and `mail/config.toml` again when their text changed (`_reload`):
+   the configs are written again, and carillon is started again when the mailboxes changed. A new
+   mailbox (or one whose address, server or inbox changed) is swept at once and, like a first
+   run, only gets a baseline; a removed one is no longer swept; a new language or reader model
+   is used from then on. When alerts were switched off, or are now meant for another machine,
+   the watcher stops: carillon is stopped and `run` returns, which ends `mx watch` with status 0.
+   Settings that cannot be read leave the old ones in place.
 1. checks that carillon runs. One that exited, or could not be started, starts a down spell in
    `Health` and is started again after the next step of RESTART_BACKOFF; the steps start over once
    a carillon has kept running for STABLE_SECONDS, which also ends the spell.
@@ -46,13 +53,22 @@ from pathlib import Path
 from typing import Protocol
 
 from . import clock as clock_module
-from . import configs
+from . import configs, context
 from .alerts import COMBINE_OVER, AlertQueue, alert_text, combined_text
 from .chat import NO_CHAT, ChatError, saved, send_text
 from .context import Ctx
 from .health import GRACE, HEARTBEAT, Health, heartbeat, sign_in_command
 from .himalaya import AuthError, Himalaya
-from .marks import MAX_CATCH_UP, Mark, fresh, inbox_folder, load_marks, save_marks, verdict_key
+from .marks import (
+    MAX_CATCH_UP,
+    Mark,
+    drop_marks,
+    fresh,
+    inbox_folder,
+    load_marks,
+    save_marks,
+    verdict_key,
+)
 from .paths import this_machine, write_json
 from .query import clean
 from .reader import Reader, ReaderError, Verdict
@@ -76,6 +92,7 @@ LOG_LIMIT = 1_000_000  # bytes: a longer watch.log is moved to watch.log.1 when 
 LOGIN_KINDS = ("auth", "connect")
 
 POKES = "pokes"  # in the state directory: one empty file per mailbox with news
+SETTINGS = ("mailboxes.toml", "config.toml")  # in the hub's mail directory: read again on a change
 LOG = "watch.log"  # in the state directory: carillon's output and the watcher's own lines
 LOCK = "watch.lock"  # in the state directory: held by the one watcher of this hub
 
@@ -101,6 +118,27 @@ def _passed(start: datetime, seconds: float, now: datetime) -> bool:
 def _stderr(line: str) -> None:
     if sys.stderr is not None:  # none under a windowless Python
         print(f"mx watch: {line}", file=sys.stderr, flush=True)
+
+
+class StopWatching(Exception):
+    """Alerts were switched off, or are meant for another machine now: the watcher stops."""
+
+
+def _settings_text(data: Path) -> tuple[bytes | None, ...]:
+    """The bytes of the files of SETTINGS (None for one that cannot be read): what tells the
+    watcher that they changed."""
+    found = []
+    for name in SETTINGS:
+        try:
+            found.append((Path(data) / name).read_bytes())
+        except OSError:
+            found.append(None)
+    return tuple(found)
+
+
+def _other_account(old: Mailbox, new: Mailbox) -> bool:
+    """Is `new` another account than `old` for the marks: another address, server or inbox?"""
+    return (old.address, old.imap, inbox_folder(old)) != (new.address, new.imap, inbox_folder(new))
 
 
 class Watcher:
@@ -135,12 +173,15 @@ class Watcher:
         self.drain_after: datetime | None = None  # the chat failed: not asked before this
         self.first = True
         self.stopping = False
+        self.seen = _settings_text(ctx.data)  # the settings as `ctx` read them
+        self.new: set[str] = set()  # mailboxes a reload added: swept in the same tick
 
     # --- one tick ------------------------------------------------------------------------------
 
     def tick(self) -> None:
-        """One pass: see the module's docstring."""
+        """One pass: see the module's docstring. Raises StopWatching when the watcher must stop."""
         now = self.clock()
+        self._reload(now)
         if self.first:
             self.first = False
             self._recover(now)
@@ -150,6 +191,9 @@ class Watcher:
         if sweep:
             due = list(self.ctx.mailboxes)
             self.swept = now
+        else:
+            due += [name for name in self.ctx.mailboxes if name in self.new and name not in due]
+        self.new.clear()
         self._take_pokes(due)
         if due:
             self.process(due)
@@ -162,6 +206,47 @@ class Watcher:
                 "carillon_down", self.language, minutes=int(GRACE.total_seconds() // 60),
                 every=SWEEP_SECONDS // 60, log=str(self.ctx.state / LOG)), [], now)
         self._beat(now)
+
+    def _reload(self, now: datetime) -> None:
+        """Take in settings that changed: see step 0 of the module's docstring."""
+        seen = _settings_text(self.ctx.data)
+        if seen == self.seen:
+            return
+        self.seen = seen
+        try:
+            ctx = context.load(self.ctx.hub)
+        except MailError as err:
+            self.log(f"the mail settings changed but cannot be read; the old ones stay: {err}")
+            return
+        try:
+            check_here(ctx)
+        except MailError as err:
+            raise StopWatching(str(err)) from None
+        old, self.ctx = self.ctx, ctx
+        self.language = ctx.settings.language
+        self.reader.model = ctx.settings.reader_model
+        self.hima.ctx = ctx
+        self.health, self.queue, self.store = Health(ctx), AlertQueue(ctx), VerdictStore(ctx)
+        try:
+            configs.write_configs(ctx)
+        except MailError as err:
+            self.log(f"cannot write the configs: {err}")
+        added = [name for name, mb in ctx.mailboxes.items()
+                 if name not in old.mailboxes or _other_account(old.mailboxes[name], mb)]
+        removed = [name for name in old.mailboxes if name not in ctx.mailboxes]
+        if added:
+            drop_marks(ctx, added)  # a mark of another account, or of an earlier setup
+            self.new.update(added)
+        for name in removed:
+            self.batches.pop(name, None)
+            with suppress(OSError):
+                (ctx.state / POKES / name).unlink()
+            self.health.mailbox_ok(name, now)
+        self.log(f"the mail settings changed: added {added or 'none'}, removed {removed or 'none'}")
+        if ctx.mailboxes != old.mailboxes:
+            self.log("carillon is started again with the new mailboxes")
+            self.stop()
+            self.retry = None  # started again in this tick, also one that waited to
 
     def _recover(self, now: datetime) -> None:
         """A heartbeat left behind: the watcher before stopped without a word (it was killed, or
@@ -419,18 +504,24 @@ class Watcher:
         return previous
 
     def run(self) -> None:
-        """`tick` every TICK_SECONDS until SIGTERM or Ctrl+C; then carillon is stopped. A watcher
-        that was told to stop removes its heartbeat (one that dies of an error leaves it)."""
+        """`tick` every TICK_SECONDS until SIGTERM or Ctrl+C, or until alerts are switched off or
+        moved to another machine; then carillon is stopped. A watcher that was told to stop
+        removes its heartbeat (one that dies of an error leaves it). A tick that fails for want of
+        the state (a lock held too long, a file that cannot be written) is logged, and the next
+        tick tries again."""
         previous = self._signals()
         told = False
         try:
             while True:
                 try:
                     self.tick()
-                except MailError as err:  # such as a state lock held too long: try next tick
+                except (MailError, OSError) as err:
                     self.log(f"a tick failed: {err}")
                 self.sleep(TICK_SECONDS)
         except KeyboardInterrupt:
+            told = True
+        except StopWatching as why:
+            self.log(f"stopped: {why}")
             told = True
         finally:
             self.stopping = True

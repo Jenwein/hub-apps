@@ -11,8 +11,12 @@ an agent.
 
 - A mail is alerted once. More than three urgent mails in one batch make one combined message.
 - The service also checks every inbox every 15 minutes, in case a connection died unnoticed or the
-  machine was off. Mail that arrived meanwhile is found and alerted in one message; after a very
-  long break only the newest 200 mails of an inbox are looked at.
+  machine was off. Mail that arrived meanwhile is found and alerted, in one message when more than
+  three are urgent; after a very long break only the newest 200 mails of an inbox are looked at.
+- The service reads `mail/mailboxes.toml` and `mail/config.toml` again when they change. A
+  mailbox added later is watched from then on (the mail already in it is not alerted), a removed
+  one no longer, and a new language or reader model is used at once. When alerts are switched
+  off, or turned on for another machine, it stops by itself.
 - When cc-connect is not running, alerts wait in a queue and go out when it is back.
 - The user is told once when a mailbox cannot sign in, and once when the listener has been down
   for a while.
@@ -92,12 +96,12 @@ After starting, `mx alerts-status` shows `watching: true` within two minutes.
 The service runs `mx watch`. Never run `mx watch` yourself: in the foreground it blocks the shell
 and holds the watcher's lock, and the real service then fails with `mx watch is already running
 for this hub`. Where alerts are off, or are meant for another machine, `mx watch` says why on
-stderr and ends at once with status 0, so a service that is left installed does nothing.
+stderr and ends at once with status 0, so a service that is left installed does nothing; a
+running one ends the same way when the switch changes.
 
 ### Turn alerts off
 
-1. Stop the service (above): a watcher that still runs keeps alerting and keeps writing its sign
-   of life.
+1. Stop the service (above), so that it does not start again at each login.
 2. Switch alerts off, then commit `mail/config.toml` as when turning alerts on:
 
    ```

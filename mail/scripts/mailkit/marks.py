@@ -156,6 +156,17 @@ def load_marks(ctx: Ctx) -> dict[str, Mark]:
     return found
 
 
+def drop_marks(ctx: Ctx, names: Iterable[str]) -> None:
+    """Forget the marks of these mailboxes: each starts again from a baseline. Takes the state
+    lock, like `save_marks`."""
+    names = set(names)
+    path = ctx.state / MARKS
+    with locked(ctx.state):
+        data = read_json(path, {})
+        if isinstance(data, dict) and names & set(data):
+            write_json(path, {name: entry for name, entry in data.items() if name not in names})
+
+
 def save_marks(ctx: Ctx, marks: dict[str, Mark]) -> None:
     """Save these marks; the marks of other mailboxes stay. Takes the state lock, which is not
     reentrant: do not call it while holding `paths.locked`."""

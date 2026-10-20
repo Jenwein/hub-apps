@@ -13,6 +13,7 @@ import signal
 import socket
 import sys
 import time
+import tomllib
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
@@ -158,9 +159,10 @@ def ctx(hub, clock):
 
 def rig(ctx, clock: Clock, **extra) -> tuple[Watcher, Chat, Spawner]:
     chat, spawn = Chat(), Spawner(clock)
+    log = extra.pop("log", lambda line: None)
     watcher = Watcher(
         ctx, hima=Himalaya(ctx), reader=Reader("sonnet"), send=chat, spawn=spawn, clock=clock,
-        log=lambda line: None, **extra)
+        log=log, **extra)
     return watcher, chat, spawn
 
 
@@ -1106,3 +1108,178 @@ def test_hook_only_touches_a_file(hub, fake_himalaya, fake_claude, capsys):
     assert main(["--hub", str(hub.root), "hook", "../qq"]) == 1  # a name is a file name
     assert "not a mailbox name" in capsys.readouterr().err
     assert [path.name for path in (hub.state / "pokes").iterdir()] == ["qq"]
+
+
+# --- settings that change while the watcher runs -----------------------------------------------
+
+WORK = '\n[[mailbox]]\nname = "work"\naddress = "me@work.example"\nprovider = "gmail"\n'
+QQ_ONLY = BOXES.split("\n[[mailbox]]\nname = \"gmail\"")[0]
+
+
+def alerts_here(hub, language: str = "", model: str = "sonnet") -> None:
+    """config.toml with alerts on for this machine, and this language and reader model."""
+    hub.state.mkdir(parents=True, exist_ok=True)
+    (hub.data / "config.toml").write_text(
+        f'[alerts]\nenabled = true\nhost = "{this_machine(hub.state)}"\n\n'
+        f'[reader]\nmodel = "{model}"\n\n[chat]\nlanguage = "{language}"\n', "utf-8", newline="\n")
+
+
+@pytest.fixture
+def live(hub, clock):
+    """The hub with the mailboxes qq and gmail, alerts on for this machine, at T0."""
+    write_mailboxes(hub, BOXES)
+    alerts_here(hub)
+    return load(hub.root)
+
+
+def work_inbox(*messages: dict) -> dict:
+    return {"INBOX": {"uidvalidity": "5", "messages": list(messages)}}
+
+
+def test_a_new_mailbox_starts_from_a_baseline_and_a_removed_one_is_left(
+        live, hub, clock, fake_himalaya, fake_claude):
+    fake = fake_himalaya(server(work=work_inbox(message(1, "Card declined before"))))
+    fake_claude.by_subject({"declined": URGENT})
+    watcher, chat, spawn = rig(live, clock)
+    watcher.tick()  # the baseline of qq and gmail
+    save_marks(live, {"work": Mark("5", 0, (T0 - 60 * MINUTE).isoformat())})  # of an old setup
+    Health(live).mailbox_failed("gmail", "auth", "refused", T0)
+
+    write_mailboxes(hub, QQ_ONLY + WORK)
+    reloaded = clock.advance(TICK_SECONDS)
+    watcher.tick()
+
+    # carillon runs again, with a config of the mailboxes there are now
+    assert len(spawn.made) == 2 and spawn.made[0].terminated and spawn.last.poll() is None
+    carillon = tomllib.loads((hub.state / "carillon.toml").read_text("utf-8"))
+    assert set(carillon["accounts"]) == {"qq", "work"}
+    # work starts from a baseline at once: the mail there is not news, an old mark is not used
+    assert load_marks(live)["work"] == Mark("5", 1, reloaded.isoformat())
+    assert chat.sent == []
+    # a problem of the mailbox that is gone does not go on for ever
+    assert Health(live).problems(T0, reloaded)[0]["until"] == reloaded.isoformat()
+
+    fake.write(server(
+        gmail=[message(1, "Card declined in gmail")],
+        work=work_inbox(message(1, "Card declined before"), message(2, "Card declined at work"))))
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+
+    assert chat.sent == [alert_of("Card declined at work", mailbox="work")]
+    assert {call["argv"][4] for call in fake.calls()} >= {"work"}
+    assert load_marks(live)["gmail"].last_uid == 0  # gmail is no longer looked at
+
+
+def test_a_poke_of_a_mailbox_that_comes_with_a_reload_is_not_lost(live, hub, clock):
+    watcher, _, _ = rig(live, clock)
+    calls = record_process(watcher)
+    watcher.tick()
+    del calls[:]
+
+    # A carillon that read the new list before the watcher did pokes for the new mailbox.
+    write_mailboxes(hub, BOXES + WORK)
+    poke(live, "work")
+    reloaded = clock.advance(TICK_SECONDS)
+    watcher.tick()
+    assert calls == [(reloaded, ["work"])]  # its first sweep, at once
+
+    poke(live, "work")
+    poked = clock.advance(TICK_SECONDS)
+    watcher.tick()
+    clock.advance(BATCH_SECONDS)
+    watcher.tick()
+    assert calls[1:] == [(poked + timedelta(seconds=BATCH_SECONDS), ["work"])]
+
+
+def test_a_new_language_and_reader_model_apply_without_a_restart(
+        live, hub, clock, fake_himalaya, fake_claude):
+    fake = fake_himalaya(server())
+    fake_claude.by_subject({"declined": URGENT})
+    watcher, chat, spawn = rig(live, clock)
+    watcher.tick()
+
+    alerts_here(hub, language="zh-CN", model="haiku")
+    fake.write(server([message(1, "Card declined")], fail={"gmail": "authentication failed"}))
+    clock.advance(SWEEP_SECONDS)
+    watcher.tick()
+
+    assert len(spawn.made) == 1  # the mailboxes are the same: carillon goes on
+    argv = fake_claude.calls()[-1]["argv"]
+    assert argv[argv.index("--model") + 1] == "haiku"
+    assert "in zh-CN" in argv[argv.index("--system-prompt") + 1]
+    assert chat.sent == [
+        strings.t("login_failed", "zh-CN", mailbox="gmail",
+                  fix="uv run apps/mail/scripts/mx.py secret-set gmail"),
+        alert_text(verdict(subject="Card declined", amount=None, deadline=None, phishing=False),
+                   "zh-CN")]
+
+
+@pytest.mark.parametrize("switch", [
+    "[alerts]\nenabled = false\nhost = \"\"\n",
+    "[alerts]\nenabled = true\nhost = \"office#0a1b2c3d\"\n",
+])
+def test_alerts_switched_off_or_moved_stop_the_watcher(live, hub, clock, switch):
+    sleeps: list[float] = []
+    lines: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) == 2:
+            (hub.data / "config.toml").write_text(switch, "utf-8", newline="\n")
+        assert len(sleeps) < 5, "the watcher did not stop"
+
+    watcher, _, spawn = rig(live, clock, sleep=sleep, log=lines.append)
+    record_process(watcher)
+    watcher.run()  # it returns: the service ends with status 0 and is not started again
+
+    assert len(sleeps) == 2
+    assert spawn.made[0].terminated and spawn.made[0].poll() is not None
+    assert not (hub.state / "watch.json").exists()  # a stop that was asked for is no downtime
+    assert any(line.startswith("stopped: alerts ") for line in lines), lines
+
+
+def test_settings_that_cannot_be_read_leave_the_old_ones(live, hub, clock):
+    lines: list[str] = []
+    watcher, _, spawn = rig(live, clock, log=lines.append)
+    record_process(watcher)
+    watcher.tick()
+
+    (hub.data / "mailboxes.toml").write_text("[[mailbox]\nname = ", "utf-8", newline="\n")
+    for _ in range(3):
+        clock.advance(TICK_SECONDS)
+        watcher.tick()
+    assert len([line for line in lines if "cannot be read" in line]) == 1, lines
+    assert list(watcher.ctx.mailboxes) == ["qq", "gmail"] and len(spawn.made) == 1
+
+    write_mailboxes(hub, BOXES + WORK)
+    clock.advance(TICK_SECONDS)
+    watcher.tick()
+    assert list(watcher.ctx.mailboxes) == ["qq", "gmail", "work"] and len(spawn.made) == 2
+
+
+def test_a_tick_whose_state_write_fails_is_logged_and_the_watcher_goes_on(ctx, clock):
+    sleeps: list[float] = []
+    lines: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) == 3:
+            raise KeyboardInterrupt
+
+    watcher, _, _ = rig(ctx, clock, sleep=sleep, log=lines.append)
+    calls: list[list[str]] = []
+
+    def process(names: list[str]) -> None:
+        calls.append(list(names))
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied", str(ctx.state / "marks.json"))
+
+    watcher.process = process
+    watcher.run()
+
+    assert len(sleeps) == 3  # it kept running after the failed write
+    assert any(line.startswith("a tick failed: ") and "Access is denied" in line
+               for line in lines), lines
+
