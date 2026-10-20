@@ -11,6 +11,8 @@ from mailkit.cli import main
 
 if __name__ == "__main__":
     # Commands print non-ASCII text (subjects, names); a Windows console must not choke on it.
+    # Under uvw.exe, the launcher without a console, there are no streams at all.
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(encoding="utf-8")
+        if stream is not None:
+            stream.reconfigure(encoding="utf-8")
     sys.exit(main())

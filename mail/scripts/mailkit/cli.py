@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import re
 import shutil
 import sys
@@ -24,6 +25,7 @@ from . import (
     query,
     reader,
     rules,
+    service,
     signin,
     strings,
     tools,
@@ -389,6 +391,26 @@ def run_hook(args: argparse.Namespace) -> None:
     watch.poke(load_ctx(args).state, args.mailbox)
 
 
+def run_watch_unit(args: argparse.Namespace) -> None:
+    """The service definition for this hub, as plain text on stdout or in a file. Nothing is
+    installed: the setup steps put it where the operating system wants it."""
+    ctx = load_ctx(args)
+    text = service.watch_unit(
+        args.platform, service.uv_path(), ctx.hub, ctx.state / watch.LOG, os.environ)
+    if args.out is None:
+        print(text, end="")
+    else:
+        service.write_unit(args.out, args.platform, text)
+
+
+def run_alerts(args: argparse.Namespace) -> None:
+    print_json(service.set_alerts(load_ctx(args), args.action == "on"))
+
+
+def run_alerts_status(args: argparse.Namespace) -> None:
+    print_json(service.status(load_ctx(args)))
+
+
 def build_parser() -> Parser:
     parser = Parser(prog="mx", description="Tools for the mail app.")
     parser.add_argument(
@@ -620,6 +642,27 @@ def build_parser() -> Parser:
         "watch", help="watch the inboxes and alert on urgent mail in the private chat (the alert "
         "service runs it; it runs until it is stopped)")
     p.set_defaults(func=run_watch)
+
+    p = sub.add_parser(
+        "watch-unit", help="print the definition of the background service that runs the alert "
+        "watcher (a systemd unit, a launchd agent or a Windows scheduled task); nothing is "
+        "installed")
+    p.add_argument("--platform", required=True, choices=["linux", "macos", "windows"])
+    p.add_argument(
+        "--out", type=Path, metavar="FILE",
+        help="write it to FILE instead (UTF-16 for windows, which schtasks /XML reads)")
+    p.set_defaults(func=run_watch_unit)
+
+    p = sub.add_parser(
+        "alerts", help="turn real-time alerts on for this machine, or off (the service is "
+        "installed and stopped apart; stop it before switching off)")
+    p.add_argument("action", choices=["on", "off"])
+    p.set_defaults(func=run_alerts)
+
+    p = sub.add_parser(
+        "alerts-status", help="are alerts on, is the watcher running, what waits or has gone "
+        "wrong")
+    p.set_defaults(func=run_alerts_status)
 
     # No help text, like secret-fetch: only carillon calls it.
     p = sub.add_parser("hook")
