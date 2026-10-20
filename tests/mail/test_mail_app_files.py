@@ -222,18 +222,30 @@ def test_setup_service_steps():
     content = text(APP / "SETUP.md")
     flat_content = flat(APP / "SETUP.md")
     # per platform: the unit or definition, then its start
-    assert "uv run apps/mail/scripts/mx.py watch-unit --platform linux" in content
-    assert "uv run apps/mail/scripts/mx.py watch-unit --platform macos" in content
-    assert "uv run apps/mail/scripts/mx.py watch-unit --platform windows --out" in content
+    mx = "uv run apps/mail/scripts/mx.py watch-unit --platform"
+    unit = f"~/.config/systemd/user/{service.UNIT_NAME}"
+    plist = f"~/Library/LaunchAgents/{service.LAUNCHD_LABEL}.plist"
+    # mx writes the file itself, readable by the user only: no redirect and no chmod afterwards,
+    # so there is no moment at which another user could read what may hold proxy credentials
+    assert f"{mx} linux --out {unit}\n" in content
+    assert f"{mx} macos --out {plist}\n" in content
+    assert f"{mx} windows --out" in content
+    assert "chmod" not in content
+    assert not re.search(r"watch-unit [^\n`]*> ", content), "a redirect leaves the file readable"
+    assert "readable by the user only" in flat_content
     assert "systemctl --user daemon-reload" in content
+    # a unit that is enabled but stopped is started again; a changed one that runs is restarted
+    assert "systemctl --user is-active cc-hub-mail-watch" in content
     assert "systemctl --user enable --now cc-hub-mail-watch" in content
+    assert "systemctl --user restart cc-hub-mail-watch" in content
     assert "loginctl enable-linger" in content
     assert f"launchctl enable gui/$(id -u)/{service.LAUNCHD_LABEL}" in content
     assert "launchctl bootstrap" in content and "launchctl kickstart" in content
     assert "schtasks /Create /TN cc-hub-mail-watch /XML" in content
     assert "schtasks /Run /TN cc-hub-mail-watch" in content
-    # a unit may hold proxy credentials
-    assert "chmod 600" in content
+    # what the unit carries of the environment (service.ENV_KEEP)
+    assert "CLAUDE_CONFIG_DIR" in service.ENV_KEEP
+    assert "`PATH`, its proxy variables and `CLAUDE_CONFIG_DIR`" in flat_content
     # a Windows task sees only the account's PATH
     assert "where himalaya" in content and "where carillon" in content
     assert "where claude" in content and "where cc-connect" in content
@@ -243,6 +255,36 @@ def test_setup_service_steps():
     assert "starting point" in flat_content
     # the check
     assert "watching" in flat_content and "two minutes" in flat_content
+
+
+def test_the_service_is_touched_only_after_the_users_ok():
+    """Also on a re-run, where alerts are on and the service is not running: the user may have
+    stopped it on purpose, so setup asks before it creates, changes or starts it."""
+    content = flat(APP / "SETUP.md")
+    rerun = content.index("`watching` is false")
+    ask = content.index("ask before you create, change or start it", rerun)
+    # the asking comes before the steps that do it
+    assert ask < content.index('do "The system" and "The service"', rerun)
+    assert ask < content.index("**The service.**")
+    assert "If they say no, leave it as it is" in content
+    assert "suggest turning them off" in content
+    assert "Create, change or start it only after the user's OK" in content
+    # alerts for another machine are left alone
+    assert "is not `this_host`" in content and "leave them" in content
+
+
+def test_remove_leaves_alerts_of_another_machine_on():
+    """The alert switch is shared through git: REMOVE looks at `host` before it switches off."""
+    content = text(APP / "REMOVE.md")
+    look = content.index("uv run apps/mail/scripts/mx.py alerts-status")
+    off = content.index("uv run apps/mail/scripts/mx.py alerts off")
+    assert look < off
+    said = flat(APP / "REMOVE.md")
+    assert "`host` is not `this_host`" in said
+    assert "Skip `alerts off` and its commit" in said
+    assert "alerts stay on for that machine" in said
+    # the check comes after the local service is removed and before the switch
+    assert content.index("schtasks /Delete /TN cc-hub-mail-watch /F") < look
 
 
 def test_remove_stops_the_service_before_alerts_are_switched_off():
@@ -300,3 +342,10 @@ def test_readme_mail_section_covers_what_the_brief_lists():
             "without tools", "server terminal"):
         assert phrase in flat_section, phrase
     assert "cc-hub 0.7.0" in section
+    # the agent never reads mail text; names in lists are data
+    safety = section.split("### Safety", 1)[1]
+    flat_safety = " ".join(safety.split())
+    assert "the agent never reads a mail body or an attachment" in flat_safety
+    assert "subjects, sender names and attachment names" in flat_safety
+    assert "as data, never as instructions" in flat_safety
+    assert "cannot make the agent do anything" not in flat_safety

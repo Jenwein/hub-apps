@@ -162,15 +162,19 @@ lowercase letters, digits and dashes).
 Skip this step when `enabled` under `[alerts]` in `mail/config.toml` is true and
 `uv run apps/mail/scripts/mx.py alerts-status` shows `"watching": true`. When `enabled` is true
 but `host` is not `this_host`, alerts were turned on for another machine: leave them, and tell
-the user. When `enabled` is true and `watching` is false, the service is missing or stopped: do
-"The system" and "The service" below again, and not "Switch on".
+the user. When `enabled` is true and `watching` is false, the service is missing or stopped (the
+user may have stopped it on purpose, as `apps/mail/skills/mail/alerts.md` describes): tell the
+user that the alert service is not running here, and ask before you create, change or start it.
+If they agree, do "The system" and "The service" below, and not "Switch on". If they say no,
+leave it as it is; if they no longer want alerts, suggest turning them off, which "Turn alerts
+off" in `alerts.md` describes.
 
-Ask whether they want an alert in the chat for urgent mail. If not, there is nothing to do: they
-can ask for it later. If yes, explain what it is and get their OK before anything is installed.
-The app downloads carillon (pinned version, from its official release, SHA-256 checked, into
-`.local/bin` of their home directory). A background service of their account, on this machine,
-then keeps one connection to each mailbox: a new mail is read by the reader (which uses their
-Claude Code usage), and an urgent one makes one message in this chat.
+Otherwise ask whether they want an alert in the chat for urgent mail. If not, there is nothing to
+do: they can ask for it later. If yes, explain what it is and get their OK before anything is
+installed: the app downloads carillon (pinned version, from its official release, SHA-256
+checked, into `.local/bin` of their home directory), and a background service of their account,
+on this machine, then keeps one connection to each mailbox. A new mail is read by the reader
+(which uses their Claude Code usage), and an urgent one makes one message in this chat.
 
 **The system.** `uname -s` prints `Linux` or `Darwin` (macOS); anything else is Windows. On Linux,
 `systemctl --user show-environment` must work. If it fails there is no systemd user manager (a
@@ -196,39 +200,41 @@ uv run apps/mail/scripts/mx.py configure
 
 `alerts on` records this machine as `host` in `mail/config.toml` and resets the catch-up
 position: the first check only sets a starting point, and mail that came before is not alerted
-(the daily report lists it). `configure` writes carillon's config from the list of mailboxes. Commit the switch, because other copies of the hub read `host` to
-know which machine sends the alerts. If the language from step 3 is not committed yet, this
-commit takes it too:
+(the daily report lists it). `configure` writes carillon's config from the list of mailboxes.
+Commit the switch, because other copies of the hub read `host` to know which machine sends the
+alerts. If the language from step 3 is not committed yet, this commit takes it too:
 
 ```
 git add -- mail/config.toml && git commit -m "mail: alerts on" -- mail/config.toml
 ```
 
-**The service.** The definition names the hub's absolute path, so run `watch-unit` from the hub
-root. The watcher runs himalaya, carillon, `claude` and `cc-connect`, so all four must be found.
+**The service.** Create, change or start it only after the user's OK (asked above). The
+definition names the hub's absolute path, so run `watch-unit` from the hub root. The watcher runs
+himalaya, carillon, `claude` and `cc-connect`, so all four must be found. `watch-unit --out FILE`
+writes the file readable by the user only, because it can hold proxy credentials.
 
 **Linux.**
 
 1. `command -v himalaya carillon claude cc-connect` must print four paths. The unit carries this
-   shell's `PATH` and proxy variables and nothing else of its environment, so a program that is
-   missing here is missing for the service: install it or fix `PATH` first (`.local/bin` of the
-   home directory is where `install-tool` puts what it downloads).
+   shell's `PATH`, its proxy variables and `CLAUDE_CONFIG_DIR`, and nothing else of its
+   environment, so a program that is missing here is missing for the service: install it or fix
+   `PATH` first (`.local/bin` of the home directory is where `install-tool` puts what it
+   downloads).
 2. `uv run apps/mail/scripts/mx.py watch-unit --platform linux` prints the unit. If it fails,
    read the `mx:` message.
 3. If `~/.config/systemd/user/cc-hub-mail-watch.service` is missing or differs from that text,
-   create its folder and save the text there, then make the file private (it can hold proxy
-   credentials) and let systemd read it:
+   create its folder, save the unit there and let systemd read it:
 
    ```
    mkdir -p ~/.config/systemd/user
-   uv run apps/mail/scripts/mx.py watch-unit --platform linux > ~/.config/systemd/user/cc-hub-mail-watch.service
-   chmod 600 ~/.config/systemd/user/cc-hub-mail-watch.service
+   uv run apps/mail/scripts/mx.py watch-unit --platform linux --out ~/.config/systemd/user/cc-hub-mail-watch.service
    systemctl --user daemon-reload
    ```
 
-4. If `systemctl --user is-enabled cc-hub-mail-watch` fails, run
-   `systemctl --user enable --now cc-hub-mail-watch`. If it was already enabled and you saved a
-   changed unit, run `systemctl --user restart cc-hub-mail-watch`.
+4. If `systemctl --user is-active cc-hub-mail-watch` does not print `active`, run
+   `systemctl --user enable --now cc-hub-mail-watch`: it starts the unit, also one that is enabled
+   but was stopped. If it is active and you saved a changed unit, run
+   `systemctl --user restart cc-hub-mail-watch`.
 5. If `loginctl show-user "$USER" -p Linger` does not print `Linger=yes`, the service stops when
    the user logs out. With their OK, try `loginctl enable-linger`. If it needs root, tell the user
    to run `sudo loginctl enable-linger $USER`. If they decline, or it cannot be done, tell them
@@ -242,12 +248,11 @@ root. The watcher runs himalaya, carillon, `claude` and `cc-connect`, so all fou
 2. `uv run apps/mail/scripts/mx.py watch-unit --platform macos` prints the property list. If
    `~/Library/LaunchAgents/io.cc-hub.mail.watch.plist` is missing or differs from that text: when
    `launchctl print gui/$(id -u)/io.cc-hub.mail.watch` succeeds, run
-   `launchctl bootout gui/$(id -u)/io.cc-hub.mail.watch`; then save the text and make the file
-   private (it can hold proxy credentials):
+   `launchctl bootout gui/$(id -u)/io.cc-hub.mail.watch`; then save the property list:
 
    ```
-   uv run apps/mail/scripts/mx.py watch-unit --platform macos > ~/Library/LaunchAgents/io.cc-hub.mail.watch.plist
-   chmod 600 ~/Library/LaunchAgents/io.cc-hub.mail.watch.plist
+   mkdir -p ~/Library/LaunchAgents
+   uv run apps/mail/scripts/mx.py watch-unit --platform macos --out ~/Library/LaunchAgents/io.cc-hub.mail.watch.plist
    ```
 
 3. Start it. A job that was disabled cannot be loaded, so enable it first; when `bootstrap` says

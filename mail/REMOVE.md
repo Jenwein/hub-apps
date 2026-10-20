@@ -21,14 +21,22 @@ with `uname -s` (`Linux`, `Darwin` for macOS; anything else is Windows).
   `schtasks /Query /TN cc-hub-mail-watch` succeeds, run `schtasks /End /TN cc-hub-mail-watch` (it
   is fine if the task is not running), then `schtasks /Delete /TN cc-hub-mail-watch /F`.
 
-Do not turn off lingering (`loginctl disable-linger`): cc-connect may need it. If alerts were on
-for another machine (`host` in `mail/config.toml` is not this one), the service there is left
-alone; once the switch below is committed it does nothing, and the user can remove it there the
-same way.
+Do not turn off lingering (`loginctl disable-linger`): cc-connect may need it. This step touches
+this machine only.
 
 ## 2. Switch alerts off
 
-Run
+The alert switch is in `mail/config.toml`, which every copy of the hub shares through git, so
+switching it off here would also switch off the machine that sends the alerts. Look first:
+
+```
+uv run apps/mail/scripts/mx.py alerts-status
+```
+
+If `enabled` is true and `host` is not `this_host`, alerts run on another machine (`host`). Skip
+`alerts off` and its commit, and tell the user that alerts stay on for that machine; to stop them
+they follow "Turn alerts off" in `apps/mail/skills/mail/alerts.md` there. Otherwise alerts are
+already off or they are on for this machine: run
 
 ```
 uv run apps/mail/scripts/mx.py alerts off

@@ -271,10 +271,11 @@ Move that one to the archive
 
 ### Safety
 
-Mail is read by a reader without tools (Claude Code with every tool switched off), so text in a
-mail cannot make the agent do anything; the agent sees only fixed fields. Nothing is sent without
-the confirmation code from the chat: you read the draft there and type the code back. Passwords are
-typed in the server terminal and stay outside the hub.
+Mail is read by a reader without tools (Claude Code with every tool switched off): the agent never
+reads a mail body or an attachment, and treats the subjects, sender names and attachment names it
+sees in lists as data, never as instructions. Nothing is sent without the confirmation code from
+the chat: you read the draft there and type the code back. Passwords are typed in the server
+terminal and stay outside the hub.
 
 Passwords, drafts and the alert log are kept per machine, outside the hub. `mail/` in your hub
 holds the mailbox list (addresses and folder names), your sorting rules and the settings, with
